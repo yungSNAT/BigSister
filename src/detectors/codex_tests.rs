@@ -741,18 +741,99 @@ fn a_command_without_an_item_pairs_by_position_only_where_items_show_the_order()
 }
 
 #[test]
-fn items_of_a_command_a_cell_runs_twice_tie_in_the_order_they_started() {
-    // The second git status started last but ended first.
+fn items_of_a_command_a_cell_runs_twice_tie_in_start_order_where_printed_results_agree() {
+    let twice = commands(&["git status", "git status"]);
+    // The second git status started last but ended first; the cell printed each
+    // result in its place.
     let lines = in_window(&[
-        exec_at("a", &commands(&["git status", "git status"]), T),
+        exec_at("a", &twice, T),
         ran("git status", 1, "e", T + 2),
         ran("git status", 0, "s", T + 1),
-        done("a"),
+        output("a", &[(0, json!("s")), (1, json!("e"))]),
         exec_at("b", &commands(&["git status"]), T + 10),
         ran("git status", 0, "ok", T + 11),
         output("b", &[(0, json!("ok"))]),
     ]);
     // b follows the second run, which failed.
-    assert_eq!(polls(&lines), (counts(2, 1, 2), json!(0)));
+    assert_eq!(polls(&lines), (counts(2, 1, 3), json!(0)));
     assert_eq!(not_paired(&lines), (json!(0), json!(0)));
+
+    // Code need not run them in the order it writes them, so without printed
+    // results, or with 2 that started in the same millisecond, neither ties.
+    for (first, second, out) in [
+        (T + 1, T + 2, done("a")),
+        (
+            T + 1,
+            T + 1,
+            output("a", &[(0, json!("s")), (1, json!("e"))]),
+        ),
+    ] {
+        let lines = in_window(&[
+            exec_at("a", &twice, T),
+            ran("git status", 1, "e", second),
+            ran("git status", 0, "s", first),
+            out,
+        ]);
+        assert_eq!(not_paired(&lines), (json!(1), json!(2)));
+    }
+
+    // Nor do 2 commands that read alike once rtk is dropped.
+    let lines = in_window(&[
+        exec_at("a", &commands(&["rtk git log", "git log"]), T),
+        ran("rtk git log", 0, "l", T + 1),
+        ran("rtk git log", 1, "m", T + 2),
+        done("a"),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(1), json!(2)));
+}
+
+#[test]
+fn an_item_a_call_without_an_id_or_a_time_could_have_run_ties_to_neither() {
+    // A cell without an id also runs git status, and its output cannot be found.
+    let lines = in_window(&[
+        exec_at("", &commands(&["git status"]), T),
+        exec_at("a", &commands(&["git status"]), T + 1),
+        ran("git status", 1, "e", T + 2),
+        done("a"),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(2), json!(2)));
+
+    // A cell whose record has no time could have started before the item.
+    let lines = in_window(&[
+        exec("b", &commands(&["git status"])),
+        exec_at("a", &commands(&["git status"]), T + 1),
+        ran("git status", 1, "e", T + 2),
+        done("a"),
+        done("b"),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(2), json!(2)));
+}
+
+#[test]
+fn untied_commands_pair_by_position_only_when_one_is_left() {
+    // git log's result is in its place, but git diff and git show have no item and
+    // may be printed in each other's places.
+    let lines = in_window(&[
+        exec_at("a", &commands(&["git log", "git diff", "git show"]), T),
+        ran("git log", 0, "l", T + 1),
+        output("a", &[(0, json!("l")), (0, json!("s")), (0, json!("d"))]),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(1), json!(2)));
+}
+
+#[test]
+fn one_printed_result_counts_as_poll_characters_once() {
+    let both = commands(&["git status", "git log"]);
+    let lines = in_window(&[
+        exec_at("a", &both, T),
+        ran("git status", 0, "x", T + 1),
+        ran("git log", 0, "x", T + 2),
+        output("a", &[(0, json!("x")), (0, json!("x"))]),
+        // Both polls end with the same output, which the cell printed once.
+        exec_at("b", &both, T + 10),
+        ran("git status", 0, "x", T + 11),
+        ran("git log", 0, "x", T + 12),
+        output("b", &[(0, json!("x"))]),
+    ]);
+    assert_eq!(polls(&lines), (counts(2, 0, 1), json!(0)));
 }
