@@ -523,3 +523,209 @@ fn function_call_commands_count_as_not_paired() {
     assert_eq!(first_row(&d, &["rereads"]), vec![json!(1)]);
     assert_eq!(summary(&d, "codex_outputs_not_paired"), 1);
 }
+
+/// A time, in milliseconds after the epoch, for records that carry one.
+const T: i64 = 1_762_560_000_000;
+
+/// An `exec` call recorded at `ms`.
+fn exec_at(id: &str, input: &str, ms: i64) -> String {
+    let mut v: Value = serde_json::from_str(&exec(id, input)).expect("record");
+    let at = chrono::DateTime::from_timestamp_millis(ms).expect("time");
+    v["timestamp"] = json!(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    v.to_string()
+}
+
+/// The `CommandExecution` item Codex records when a command started at `ms` ends.
+fn item(args: &[&str], code: i64, out: &str, ms: i64) -> String {
+    json!({"type": "event_msg", "payload": {
+        "type": "item_completed", "started_at_ms": ms, "completed_at_ms": ms + 5,
+        "item": {"type": "CommandExecution", "command": args, "exit_code": code,
+            "aggregated_output": out, "status": "completed"}
+    }})
+    .to_string()
+}
+
+/// The item for `cmd` run by `bash -lc`.
+fn ran(cmd: &str, code: i64, out: &str, ms: i64) -> String {
+    item(&["bash", "-lc", cmd], code, out, ms)
+}
+
+/// An `exec` call's output that prints no result.
+fn done(id: &str) -> String {
+    printed(id, &[json!("done")])
+}
+
+#[test]
+fn items_credit_results_printed_in_completion_order_to_their_commands() {
+    // git diff ends first and the cell prints results as they end.
+    let lines = in_window(&[
+        exec_at("a", &commands(&["git status", "git diff"]), T),
+        ran("git diff", 1, "d", T + 1),
+        ran("git status", 0, "s", T + 2),
+        output("a", &[(1, json!("d")), (0, json!("s"))]),
+        exec_at("b", &commands(&["git diff"]), T + 10),
+        ran("git diff", 1, "d", T + 11),
+        output("b", &[(1, json!("d"))]),
+    ]);
+    // git diff's poll follows its failure.
+    assert_eq!(polls(&lines), (counts(1, 1, 1), json!(0)));
+    assert_eq!(not_paired(&lines), (json!(0), json!(0)));
+}
+
+#[test]
+fn a_cell_that_prints_no_result_pairs_its_commands_by_their_items() {
+    let lines = in_window(&[
+        exec_at("a", &commands(&["git status", "git diff"]), T),
+        ran("git status", 1, "e", T + 1),
+        ran("git diff", 0, "x", T + 2),
+        done("a"),
+        exec_at("b", &commands(&["git status"]), T + 10),
+        ran("git status", 0, "ok", T + 11),
+        output("b", &[(0, json!("ok"))]),
+    ]);
+    assert_eq!(polls(&lines), (counts(1, 1, 2), json!(0)));
+    assert_eq!(not_paired(&lines), (json!(0), json!(0)));
+}
+
+#[test]
+fn an_item_started_before_the_cell_ties_to_none_of_its_commands() {
+    // A command an earlier cell left running ends whilst this one runs the same text.
+    let lines = in_window(&[
+        exec_at("a", &commands(&["git status"]), T),
+        ran("git status", 1, "e", T - 5),
+        done("a"),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(1), json!(1)));
+}
+
+#[test]
+fn an_item_whose_text_more_than_one_running_command_has_ties_to_neither() {
+    // 2 open cells run git status.
+    let lines = in_window(&[
+        exec_at("a", &commands(&["git status"]), T),
+        exec_at("b", &commands(&["git status"]), T + 1),
+        ran("git status", 1, "e", T + 2),
+        done("a"),
+        done("b"),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(2), json!(2)));
+
+    // 2 items for the one git status of a cell: git diff still pairs.
+    let lines = in_window(&[
+        exec_at("a", &commands(&["git status", "git diff"]), T),
+        ran("git status", 0, "s", T + 1),
+        ran("git status", 1, "e", T + 2),
+        ran("git diff", 0, "d", T + 3),
+        done("a"),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(1), json!(1)));
+
+    // A function_call running git status is open too.
+    let mut call: Value = serde_json::from_str(&function_call("f", "git status")).expect("record");
+    call["timestamp"] = json!("2025-11-08T00:00:00.000Z");
+    let lines = in_window(&[
+        call.to_string(),
+        exec_at("a", &commands(&["git status"]), T),
+        ran("git status", 1, "e", T + 2),
+        done("a"),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(2), json!(2)));
+}
+
+#[test]
+fn an_item_from_a_cell_that_closed_whilst_another_ran_ties_to_neither() {
+    // a leaves git status running and ends whilst b runs; the item that comes
+    // during b may be a's.
+    let lines = in_window(&[
+        exec_at("a", &commands(&["git status"]), T),
+        exec_at("b", &commands(&["git status"]), T + 1),
+        done("a"),
+        ran("git status", 1, "e", T + 2),
+        done("b"),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(2), json!(2)));
+}
+
+#[test]
+fn an_item_after_the_cells_output_ties_to_nothing() {
+    let lines = in_window(&[
+        exec_at("a", &commands(&["git status", "git diff"]), T),
+        ran("git status", 0, "s", T + 1),
+        done("a"),
+        ran("git diff", 0, "d", T + 2),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(1), json!(1)));
+}
+
+#[test]
+fn commands_rtk_rewrote_tie_unless_2_commands_then_read_alike() {
+    let pwsh = |cmd: &str, code: i64, ms: i64| item(&["pwsh.exe", "-Command", cmd], code, "ok", ms);
+    let lines = in_window(&[
+        exec_at("a", &commands(&["git status", "git diff | rg x"]), T),
+        pwsh("rtk git status", 1, T + 1),
+        pwsh("rtk git diff | rtk rg x", 0, T + 2),
+        done("a"),
+        exec_at("b", &commands(&["git status"]), T + 10),
+        pwsh("rtk git status", 0, T + 11),
+        output("b", &[(0, json!("ok"))]),
+        // Without the rtk word, both read git log.
+        exec_at("c", &commands(&["rtk git log", "git log"]), T + 20),
+        ran("rtk git log", 0, "l", T + 21),
+        ran("git log", 0, "l", T + 22),
+        done("c"),
+    ]);
+    assert_eq!(polls(&lines), (counts(1, 1, 2), json!(1)));
+    assert_eq!(not_paired(&lines), (json!(1), json!(2)));
+}
+
+#[test]
+fn pipes_judges_the_output_codex_recorded_for_the_command() {
+    let test = "cargo test 2>&1 | tail -1";
+    let mut d = Pipes::default();
+    replay(
+        &mut d,
+        &in_window(&[
+            exec_at("a", &commands(&[test]), T),
+            ran(test, 0, "test result: FAILED. 1 passed; 1 failed", T + 1),
+            done("a"),
+        ]),
+    );
+    assert_eq!(summary(&d, "unguarded_results_found"), 1);
+    assert_eq!(summary(&d, "showed_a_failure_but_reported_success"), 1);
+    assert_eq!(summary(&d, "codex_outputs_not_paired"), 0);
+}
+
+#[test]
+fn poll_characters_count_only_a_result_the_cell_printed_whole() {
+    let both = commands(&["git status", "git diff"]);
+    let lines = in_window(&[
+        exec_at("a", &commands(&["git status"]), T),
+        ran("git status", 0, "abc", T + 1),
+        output("a", &[(0, json!("abc"))]),
+        // Polled, but not printed: no characters.
+        exec_at("b", &both, T + 10),
+        ran("git status", 0, "abcd", T + 11),
+        ran("git diff", 0, "x", T + 12),
+        done("b"),
+        // Printed in another order: each result's own characters.
+        exec_at("c", &both, T + 20),
+        ran("git status", 0, "ab", T + 21),
+        ran("git diff", 0, "xyz", T + 22),
+        output("c", &[(0, json!("xyz")), (0, json!("ab"))]),
+    ]);
+    assert_eq!(polls(&lines), (counts(3, 0, 5), json!(0)));
+}
+
+#[test]
+fn a_command_of_several_without_an_item_is_not_paired_by_position_beside_one_with() {
+    // git diff of b has no item, as a command built from variables would not.
+    let lines = in_window(&[
+        exec_at("b", &commands(&["git log", "git diff"]), T + 10),
+        ran("git log", 0, "l", T + 11),
+        output("b", &[(0, json!("l")), (0, json!("d"))]),
+        // One command and one printed result still pair.
+        exec_at("c", &commands(&["git log"]), T + 20),
+        output("c", &[(0, json!("l"))]),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(1), json!(1)));
+}

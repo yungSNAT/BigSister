@@ -181,11 +181,8 @@ impl Pipes {
                 Vec::new()
             };
             let runs = unguarded.contains(&true).then_some(unguarded);
-            if call.exec {
-                self.codex.call(&call.call_id, runs, r.in_window);
-            } else if let Some(runs) = runs {
-                self.codex.not_paired(runs.len(), r.in_window);
-            }
+            self.codex.call(r, &call, runs);
+        } else if self.codex.record(r) {
         } else if let Some(out) = codex_output(r) {
             for (unguarded, res) in self.codex.pair(&out) {
                 if unguarded {

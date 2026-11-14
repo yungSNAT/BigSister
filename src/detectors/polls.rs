@@ -6,8 +6,8 @@ use std::rc::Rc;
 use serde_json::{Value, json};
 
 use super::{
-    ClaudeCalls, CodexCalls, EST_NOTE, chars, codex_call, codex_call_line, codex_output,
-    est_tokens, input_str, name_of, result_chars, tool_results, tool_uses,
+    ClaudeCalls, CodexCalls, EST_NOTE, codex_call, codex_call_line, codex_output, est_tokens,
+    input_str, name_of, result_chars, tool_results, tool_uses,
 };
 use crate::programs::Programs;
 use crate::report::{Opts, Section, Table};
@@ -262,22 +262,19 @@ impl Polls {
         if let Some(call) = codex_call(r) {
             let awaits = call.exec && !call.call_id.is_empty();
             let mut runs = Vec::new();
-            for step in call.steps {
+            for step in &call.steps {
                 match step {
-                    Step::Command(c) => runs.push(self.observe(s, &c, r.in_window, awaits)),
+                    Step::Command(c) => runs.push(self.observe(s, c, r.in_window, awaits)),
                     Step::Edit => self.edits += 1,
                 }
             }
-            if call.exec {
-                let runs = (!runs.is_empty()).then_some(runs);
-                self.codex.call(&call.call_id, runs, r.in_window);
-            } else if !runs.is_empty() {
-                self.codex.not_paired(runs.len(), r.in_window);
-            }
+            self.codex
+                .call(r, &call, (!runs.is_empty()).then_some(runs));
+        } else if self.codex.record(r) {
         } else if let Some(out) = codex_output(r) {
             for (run, res) in self.codex.pair(&out) {
                 if let Some(run) = run {
-                    self.result(s, run, res.exit_code != 0, || chars(&res.output));
+                    self.result(s, run, res.exit_code != 0, || res.printed_chars);
                 }
             }
         }

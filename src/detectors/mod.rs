@@ -244,8 +244,7 @@ pub struct CommandResult {
 /// shortcut: results are found only where the cell prints a result object whole; a
 /// cell that prints parts of one, such as its `output` alone, or none, gives no
 /// results, and one that prints each result as it finishes can print them out of
-/// order. Pairing each command with the `CommandExecution` item Codex records as it
-/// ends would be the upgrade (DESIGN.md, Codex results).
+/// order, which is why `CodexCalls` pairs a command by its item first.
 #[must_use]
 pub fn codex_output(r: &Record<'_>) -> Option<CodexOutput> {
     if r.kind() != "response_item" {
@@ -327,17 +326,75 @@ fn command_result(v: &Value) -> Option<CommandResult> {
     })
 }
 
-/// Codex `exec` calls whose output a detector awaits, each with what the detector
-/// keeps for each of its commands, and how many in the window, and how many of their
-/// commands, could not be paired with their results: calls without an id, calls
-/// whose id another `exec` call in the session also carries, calls whose output
-/// never came, and outputs that did not print one result per command.
+/// A command's result as a detector reads it.
+#[derive(Debug)]
+pub struct Paired {
+    pub exit_code: i64,
+    /// What the command wrote, as Codex recorded it or the cell printed it.
+    pub output: String,
+    /// Characters of the output the cell printed for this command, which reached the
+    /// model; 0 when it printed none.
+    pub printed_chars: u64,
+}
+
+/// What `CommandExecution` items have tied a command to so far.
+enum Tie {
+    None,
+    One(CommandResult),
+    /// More than one item, or an item that could be another command's.
+    Ambiguous,
+}
+
+/// A Codex call whose output has not come.
+struct Open<T> {
+    id: String,
+    /// `id` as JSON writes it, to find its output's line.
+    needle: String,
+    /// When the call was recorded, in milliseconds since the epoch.
+    start: Option<i64>,
+    /// Its place amongst the session's calls.
+    seq: u64,
+    /// Each command's text as `command_key` gives it, with its tie.
+    commands: Vec<(String, Tie)>,
+    /// Whether Codex recorded any `CommandExecution` item whilst the call was open.
+    saw_items: bool,
+    /// While a detector awaits the output: what it keeps for each command, and whether
+    /// the call was in the window.
+    runs: Option<(Vec<T>, bool)>,
+}
+
+/// A command not tied to an item when its call's output came, which may still be
+/// running and so end whilst a call made before that output is open.
+struct Lingering {
+    key: String,
+    start: Option<i64>,
+    /// The `seq` of the last call made before the output came.
+    closed_at: u64,
+}
+
+/// Codex calls whose output a detector awaits, each with what the detector keeps for
+/// each of its commands, and how many in the window, and how many of their commands,
+/// could not be paired with their results: calls without an id, calls whose id
+/// another call in the session also carries, `function_call` calls, whose output is
+/// not read, calls whose output never came, and commands neither tied to an item nor
+/// paired by position.
+///
+/// A command ties to the `CommandExecution` item Codex records as it ends, which
+/// carries no call id, when the item's command reads as the command's text, it ended
+/// before the call's output and no other command could have run it: no other command
+/// of an open call made before the item's command started has that text, nor does an
+/// untied command of a call whose output came whilst one of those was open, and no
+/// other item has the command's text. A command not tied pairs with the result the
+/// cell printed at its position only when the cell printed one result per command and
+/// has one command, or Codex recorded no item whilst the call was open, as older Codex
+/// versions record none.
 pub struct CodexCalls<T> {
-    /// The ids of the session's `exec` calls so far.
+    /// The ids of the session's calls so far.
     seen: HashSet<String>,
-    /// By call id: the id as JSON writes it, what the detector keeps for each command,
-    /// and whether the call was in the window.
-    waiting: HashMap<String, (String, Vec<T>, bool)>,
+    open: Vec<Open<T>>,
+    lingering: Vec<Lingering>,
+    /// Calls made so far in the session.
+    seq: u64,
     pub unpaired: u64,
     /// The commands of the `unpaired` calls.
     pub unpaired_commands: u64,
@@ -347,7 +404,9 @@ impl<T> Default for CodexCalls<T> {
     fn default() -> Self {
         Self {
             seen: HashSet::new(),
-            waiting: HashMap::new(),
+            open: Vec::new(),
+            lingering: Vec::new(),
+            seq: 0,
             unpaired: 0,
             unpaired_commands: 0,
         }
@@ -355,71 +414,277 @@ impl<T> Default for CodexCalls<T> {
 }
 
 impl<T> CodexCalls<T> {
-    /// Notes an `exec` call, which every detector reading outputs must do for every
-    /// call so that a reused id is seen. `runs` holds what the detector keeps for
-    /// each command, by position, or is `None` when it awaits none of the output. An
-    /// id carried by more than one call pairs with neither from then on, as their
-    /// outputs cannot be told apart.
-    pub fn call(&mut self, call_id: &str, runs: Option<Vec<T>>, in_window: bool) {
-        let fresh = !call_id.is_empty() && self.seen.insert(call_id.to_owned());
-        if !fresh && let Some((_, earlier, w)) = self.waiting.remove(call_id) {
-            self.not_paired(earlier.len(), w);
-        }
-        match runs {
-            Some(runs) if fresh => {
-                self.waiting
-                    .insert(call_id.to_owned(), (json_escaped(call_id), runs, in_window));
+    /// Notes a call, which every detector reading outputs must do for every call so
+    /// that a reused id and every running command are seen. `runs` holds what the
+    /// detector keeps for each command, by position, or is `None` when it awaits none
+    /// of the output. An id carried by more than one call pairs with neither from then
+    /// on, as their outputs cannot be told apart.
+    pub fn call(&mut self, r: &Record<'_>, call: &CodexCall, runs: Option<Vec<T>>) {
+        let id = call.call_id.as_str();
+        let fresh = !id.is_empty() && self.seen.insert(id.to_owned());
+        if !fresh {
+            let earlier: Vec<(Vec<T>, bool)> = self
+                .open
+                .iter_mut()
+                .filter(|o| o.id == id)
+                .filter_map(|o| o.runs.take())
+                .collect();
+            for (earlier, w) in earlier {
+                self.not_paired(earlier.len(), w);
             }
-            Some(runs) => self.not_paired(runs.len(), in_window),
-            None => {}
         }
+        let awaited = call.exec && fresh;
+        let runs = match runs {
+            Some(runs) if !awaited => {
+                self.not_paired(runs.len(), r.in_window);
+                None
+            }
+            runs => runs.map(|runs| (runs, r.in_window)),
+        };
+        if id.is_empty() || (runs.is_none() && call.commands().next().is_none()) {
+            return;
+        }
+        self.seq += 1;
+        self.open.push(Open {
+            id: id.to_owned(),
+            needle: json_escaped(id),
+            start: record_ms(r),
+            seq: self.seq,
+            commands: call
+                .commands()
+                .map(|c| (command_key(c), Tie::None))
+                .collect(),
+            runs,
+            saw_items: false,
+        });
     }
 
-    /// Counts a call of `commands` commands that will not be paired, if in the window,
-    /// such as a `function_call`, whose output is not read.
-    pub fn not_paired(&mut self, commands: usize, in_window: bool) {
+    fn not_paired(&mut self, commands: usize, in_window: bool) {
         if in_window {
             self.unpaired += 1;
             self.unpaired_commands += commands as u64;
         }
     }
 
-    /// True for lines that may hold an awaited call's output.
+    /// True for lines that may hold an open call's output or a command's item.
     #[must_use]
     pub fn wants(&self, line: &str) -> bool {
-        line.contains("\"custom_tool_call_output\"")
-            && self
-                .waiting
-                .values()
-                .any(|(id, ..)| line.contains(id.as_str()))
+        if line.contains("\"custom_tool_call_output\"") || line.contains("\"function_call_output\"")
+        {
+            self.open.iter().any(|o| line.contains(o.needle.as_str()))
+        } else {
+            // An item matters only to the commands of an awaited call.
+            line.contains("\"CommandExecution\"")
+                && self
+                    .open
+                    .iter()
+                    .any(|o| o.runs.as_ref().is_some_and(|(runs, _)| !runs.is_empty()))
+        }
+    }
+
+    /// Reads a `CommandExecution` item or a `function_call`'s output, and says whether
+    /// the record was one.
+    pub fn record(&mut self, r: &Record<'_>) -> bool {
+        let Some(p) = r.value.get("payload") else {
+            return false;
+        };
+        match (r.kind(), p.get("type").and_then(Value::as_str)) {
+            ("response_item", Some("function_call_output")) => {
+                if let Some(id) = p.get("call_id").and_then(Value::as_str) {
+                    self.close(id);
+                }
+                true
+            }
+            ("event_msg", Some("item_completed"))
+                if p.pointer("/item/type").and_then(Value::as_str) == Some("CommandExecution") =>
+            {
+                self.item(p);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn item(&mut self, p: &Value) {
+        for o in &mut self.open {
+            o.saw_items = true;
+        }
+        let item = &p["item"];
+        let Some(key) = item.get("command").and_then(function_command) else {
+            return;
+        };
+        let key = command_key(&key);
+        let started = p.get("started_at_ms").and_then(Value::as_i64);
+        let before = |start: Option<i64>| start.zip(started).is_some_and(|(s, t)| s <= t);
+        let lingers = self
+            .lingering
+            .iter()
+            .any(|l| l.key == key && before(l.start));
+        let hits: Vec<(usize, usize)> = self
+            .open
+            .iter()
+            .enumerate()
+            .filter(|(_, o)| before(o.start))
+            .flat_map(|(i, o)| {
+                o.commands
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (k, _))| *k == key)
+                    .map(move |(j, _)| (i, j))
+            })
+            .collect();
+        let result = item_result(item);
+        if let ([(i, j)], false, Some(result)) = (hits.as_slice(), lingers, result) {
+            let tie = &mut self.open[*i].commands[*j].1;
+            *tie = match tie {
+                Tie::None => Tie::One(result),
+                _ => Tie::Ambiguous,
+            };
+        } else {
+            for (i, j) in hits {
+                self.open[i].commands[j].1 = Tie::Ambiguous;
+            }
+        }
+    }
+
+    /// Ends the calls with id `id`, and gives the last. Their untied commands linger
+    /// whilst a call made before them is open.
+    fn close(&mut self, id: &str) -> Option<Open<T>> {
+        let mut last = None;
+        while let Some(i) = self.open.iter().position(|o| o.id == id) {
+            let o = self.open.remove(i);
+            if !self.open.is_empty() {
+                for (key, tie) in &o.commands {
+                    if !matches!(tie, Tie::One(_)) {
+                        self.lingering.push(Lingering {
+                            key: key.clone(),
+                            start: o.start,
+                            closed_at: self.seq,
+                        });
+                    }
+                }
+            }
+            last = Some(o);
+        }
+        let open = &self.open;
+        self.lingering
+            .retain(|l| open.iter().any(|o| o.seq <= l.closed_at));
+        last
     }
 
     /// Whether the output's call was awaited; it is awaited no longer.
     pub fn take(&mut self, out: &CodexOutput) -> bool {
-        self.waiting.remove(&out.call_id).is_some()
+        self.close(&out.call_id).is_some_and(|o| o.runs.is_some())
     }
 
-    /// For an awaited call's output: what the detector kept for each command, with
-    /// that command's result, when the cell printed one result per command. Otherwise
-    /// none, as which result belongs to which command is unknown.
-    pub fn pair<'o>(&mut self, out: &'o CodexOutput) -> Vec<(T, &'o CommandResult)> {
-        let Some((_, runs, in_window)) = self.waiting.remove(&out.call_id) else {
+    /// For an awaited call's output: what the detector kept for each command that
+    /// could be paired, with that command's result: from its item if tied, otherwise
+    /// the result printed at its position where that is allowed (`CodexCalls`).
+    pub fn pair(&mut self, out: &CodexOutput) -> Vec<(T, Paired)> {
+        let Some(Open {
+            commands,
+            runs: Some((runs, in_window)),
+            saw_items,
+            ..
+        }) = self.close(&out.call_id)
+        else {
             return Vec::new();
         };
-        if runs.len() != out.results.len() {
-            self.not_paired(runs.len(), in_window);
-            return Vec::new();
+        let n = runs.len();
+        let by_position = out.results.len() == n && (n == 1 || !saw_items);
+        let mut missing = 0;
+        let paired = runs
+            .into_iter()
+            .zip(commands)
+            .enumerate()
+            .filter_map(|(k, (run, (_, tie)))| {
+                let p = match tie {
+                    Tie::One(res) => {
+                        // The cell's one printed result, or one equal to the item's.
+                        let printed = match out.results.as_slice() {
+                            [x] if n == 1 && x.exit_code == res.exit_code => Some(x),
+                            all => all
+                                .iter()
+                                .find(|x| x.exit_code == res.exit_code && x.output == res.output),
+                        };
+                        Some(Paired {
+                            printed_chars: printed.map_or(0, |x| chars(&x.output)),
+                            exit_code: res.exit_code,
+                            output: res.output,
+                        })
+                    }
+                    _ if by_position => out.results.get(k).map(|x| Paired {
+                        exit_code: x.exit_code,
+                        output: x.output.clone(),
+                        printed_chars: chars(&x.output),
+                    }),
+                    _ => None,
+                };
+                missing += usize::from(p.is_none());
+                p.map(|p| (run, p))
+            })
+            .collect();
+        if missing > 0 {
+            self.not_paired(missing, in_window);
         }
-        runs.into_iter().zip(&out.results).collect()
+        paired
     }
 
     /// Ends a session: the calls still awaiting output never get it.
     pub fn end(&mut self) {
-        for (_, (_, runs, in_window)) in std::mem::take(&mut self.waiting) {
-            self.not_paired(runs.len(), in_window);
+        for o in std::mem::take(&mut self.open) {
+            if let Some((runs, in_window)) = o.runs {
+                self.not_paired(runs.len(), in_window);
+            }
         }
+        self.lingering.clear();
         self.seen.clear();
+        self.seq = 0;
     }
+}
+
+/// An item's exit code and output; a missing output is empty.
+fn item_result(item: &Value) -> Option<CommandResult> {
+    Some(CommandResult {
+        exit_code: item.get("exit_code")?.as_i64()?,
+        output: match item.get("aggregated_output") {
+            Some(Value::String(s)) => s.clone(),
+            None | Some(Value::Null) => String::new(),
+            Some(_) => return None,
+        },
+    })
+}
+
+/// When a record was written, in milliseconds since the epoch.
+fn record_ms(r: &Record<'_>) -> Option<i64> {
+    let t = r.value.get("timestamp")?.as_str()?;
+    Some(crate::time::parse_ts(t)?.timestamp_millis())
+}
+
+/// A command's text as it is matched with Codex's record of what ran: trimmed, and
+/// without `rtk ` where a simple command starts.
+///
+/// shortcut: the RTK hook rewrites the commands Codex runs by putting `rtk ` before
+/// each program it filters (38,599 of 104,470 items on one PC, 15 November 2026), so
+/// both texts drop the word, and 2 commands that then read alike tie to neither.
+/// Commands another hook rewrites stay untied; telling rewrites apart would need the
+/// hooks' own records.
+fn command_key(cmd: &str) -> String {
+    let mut out = String::with_capacity(cmd.len());
+    let mut rest = cmd.trim();
+    while let Some(c) = rest.chars().next() {
+        let starts = out
+            .chars()
+            .next_back()
+            .is_none_or(|p| p.is_whitespace() || ";&|(".contains(p));
+        if starts && let Some(after) = rest.strip_prefix("rtk ") {
+            rest = after;
+            continue;
+        }
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
 }
 
 /// Claude `tool_use` blocks whose result a detector awaits, by id, and the ids of the
