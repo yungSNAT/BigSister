@@ -337,12 +337,12 @@ pub struct Paired {
     pub printed_chars: u64,
 }
 
-/// What `CommandExecution` items have tied a command to so far.
-enum Tie {
-    None,
-    One(CommandResult),
-    /// More than one item, or an item that could be another command's.
-    Ambiguous,
+/// A `CommandExecution` item kept for the one open call that could have run it.
+struct Item {
+    key: String,
+    /// When its command started, in milliseconds since the epoch.
+    started: i64,
+    result: CommandResult,
 }
 
 /// A Codex call whose output has not come.
@@ -354,13 +354,26 @@ struct Open<T> {
     start: Option<i64>,
     /// Its place amongst the session's calls.
     seq: u64,
-    /// Each command's text as `command_key` gives it, with its tie.
-    commands: Vec<(String, Tie)>,
+    /// Each command's text as `command_key` gives it.
+    keys: Vec<String>,
+    /// The items whose text no other call's command could have.
+    items: Vec<Item>,
+    /// Texts that an item could have from this call or another, or that an item
+    /// without an exit code had.
+    ambiguous: Vec<String>,
     /// Whether Codex recorded any `CommandExecution` item whilst the call was open.
     saw_items: bool,
     /// While a detector awaits the output: what it keeps for each command, and whether
     /// the call was in the window.
     runs: Option<(Vec<T>, bool)>,
+}
+
+/// What a call left when its output came.
+struct Closed<T> {
+    runs: Option<(Vec<T>, bool)>,
+    /// Each command's result from its items, if tied.
+    ties: Vec<Option<CommandResult>>,
+    saw_items: bool,
 }
 
 /// A command not tied to an item when its call's output came, which may still be
@@ -379,15 +392,17 @@ struct Lingering {
 /// not read, calls whose output never came, and commands neither tied to an item nor
 /// paired by position.
 ///
-/// A command ties to the `CommandExecution` item Codex records as it ends, which
+/// A command ties to a `CommandExecution` item Codex records as a command ends, which
 /// carries no call id, when the item's command reads as the command's text, it ended
-/// before the call's output and no other command could have run it: no other command
-/// of an open call made before the item's command started has that text, nor does an
-/// untied command of a call whose output came whilst one of those was open, and no
-/// other item has the command's text. A command not tied pairs with the result the
-/// cell printed at its position only when the cell printed one result per command and
-/// has one command, or Codex recorded no item whilst the call was open, as older Codex
-/// versions record none.
+/// before the call's output and no other command could have run it: no command of
+/// another open call made before the item's command started has that text, nor does
+/// an untied command of a call whose output came whilst one of those was open. The
+/// items with one text tie to the call's commands with that text in the order they
+/// started, when there are as many of each. A command not tied pairs with the result
+/// the cell printed at its position when the cell printed one result per command and
+/// has one command, or Codex recorded no item whilst the call was open, as older
+/// Codex versions record none, or every tied command's printed result is at its own
+/// position.
 pub struct CodexCalls<T> {
     /// The ids of the session's calls so far.
     seen: HashSet<String>,
@@ -450,12 +465,11 @@ impl<T> CodexCalls<T> {
             needle: json_escaped(id),
             start: record_ms(r),
             seq: self.seq,
-            commands: call
-                .commands()
-                .map(|c| (command_key(c), Tie::None))
-                .collect(),
-            runs,
+            keys: call.commands().map(command_key).collect(),
+            items: Vec::new(),
+            ambiguous: Vec::new(),
             saw_items: false,
+            runs,
         });
     }
 
@@ -520,51 +534,54 @@ impl<T> CodexCalls<T> {
             .lingering
             .iter()
             .any(|l| l.key == key && before(l.start));
-        let hits: Vec<(usize, usize)> = self
-            .open
-            .iter()
-            .enumerate()
-            .filter(|(_, o)| before(o.start))
-            .flat_map(|(i, o)| {
-                o.commands
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, (k, _))| *k == key)
-                    .map(move |(j, _)| (i, j))
-            })
+        let calls: Vec<usize> = (0..self.open.len())
+            .filter(|&i| before(self.open[i].start) && self.open[i].keys.contains(&key))
             .collect();
-        let result = item_result(item);
-        if let ([(i, j)], false, Some(result)) = (hits.as_slice(), lingers, result) {
-            let tie = &mut self.open[*i].commands[*j].1;
-            *tie = match tie {
-                Tie::None => Tie::One(result),
-                _ => Tie::Ambiguous,
-            };
-        } else {
-            for (i, j) in hits {
-                self.open[i].commands[j].1 = Tie::Ambiguous;
+        match (calls.as_slice(), lingers, started.zip(item_result(item))) {
+            ([i], false, Some((started, result))) => self.open[*i].items.push(Item {
+                key,
+                started,
+                result,
+            }),
+            _ => {
+                for i in calls {
+                    self.open[i].ambiguous.push(key.clone());
+                }
             }
         }
     }
 
     /// Ends the calls with id `id`, and gives the last. Their untied commands linger
     /// whilst a call made before them is open.
-    fn close(&mut self, id: &str) -> Option<Open<T>> {
+    fn close(&mut self, id: &str) -> Option<Closed<T>> {
         let mut last = None;
         while let Some(i) = self.open.iter().position(|o| o.id == id) {
-            let o = self.open.remove(i);
+            let Open {
+                start,
+                keys,
+                items,
+                ambiguous,
+                saw_items,
+                runs,
+                ..
+            } = self.open.remove(i);
+            let ties = ties(&keys, items, &ambiguous);
             if !self.open.is_empty() {
-                for (key, tie) in &o.commands {
-                    if !matches!(tie, Tie::One(_)) {
+                for (key, tie) in keys.into_iter().zip(&ties) {
+                    if tie.is_none() {
                         self.lingering.push(Lingering {
-                            key: key.clone(),
-                            start: o.start,
+                            key,
+                            start,
                             closed_at: self.seq,
                         });
                     }
                 }
             }
-            last = Some(o);
+            last = Some(Closed {
+                runs,
+                ties,
+                saw_items,
+            });
         }
         let open = &self.open;
         self.lingering
@@ -574,51 +591,50 @@ impl<T> CodexCalls<T> {
 
     /// Whether the output's call was awaited; it is awaited no longer.
     pub fn take(&mut self, out: &CodexOutput) -> bool {
-        self.close(&out.call_id).is_some_and(|o| o.runs.is_some())
+        self.close(&out.call_id).is_some_and(|c| c.runs.is_some())
     }
 
     /// For an awaited call's output: what the detector kept for each command that
     /// could be paired, with that command's result: from its item if tied, otherwise
     /// the result printed at its position where that is allowed (`CodexCalls`).
     pub fn pair(&mut self, out: &CodexOutput) -> Vec<(T, Paired)> {
-        let Some(Open {
-            commands,
+        let Some(Closed {
             runs: Some((runs, in_window)),
+            ties,
             saw_items,
-            ..
         }) = self.close(&out.call_id)
         else {
             return Vec::new();
         };
         let n = runs.len();
-        let by_position = out.results.len() == n && (n == 1 || !saw_items);
+        // shortcut: printed results that agree with every tied command's item at its
+        // position are taken to be in the commands' order, which leaves 2 untied
+        // commands printed in each other's places paired wrongly.
+        let in_order = ties.iter().any(Option::is_some)
+            && ties.iter().enumerate().all(|(k, tie)| {
+                tie.as_ref()
+                    .is_none_or(|item| out.results.get(k).is_some_and(|x| shows(x, item)))
+            });
+        let by_position = out.results.len() == n && (n == 1 || !saw_items || in_order);
         let mut missing = 0;
         let paired = runs
             .into_iter()
-            .zip(commands)
+            .zip(ties)
             .enumerate()
-            .filter_map(|(k, (run, (_, tie)))| {
+            .filter_map(|(k, (run, tie))| {
                 let p = match tie {
-                    Tie::One(res) => {
-                        // The cell's one printed result, or one equal to the item's.
-                        let printed = match out.results.as_slice() {
-                            [x] if n == 1 && x.exit_code == res.exit_code => Some(x),
-                            all => all
-                                .iter()
-                                .find(|x| x.exit_code == res.exit_code && x.output == res.output),
-                        };
-                        Some(Paired {
-                            printed_chars: printed.map_or(0, |x| chars(&x.output)),
-                            exit_code: res.exit_code,
-                            output: res.output,
-                        })
-                    }
-                    _ if by_position => out.results.get(k).map(|x| Paired {
+                    Some(item) => Some(Paired {
+                        printed_chars: printed_for(&out.results, n, &item)
+                            .map_or(0, |x| chars(&x.output)),
+                        exit_code: item.exit_code,
+                        output: item.output,
+                    }),
+                    None if by_position => out.results.get(k).map(|x| Paired {
                         exit_code: x.exit_code,
                         output: x.output.clone(),
                         printed_chars: chars(&x.output),
                     }),
-                    _ => None,
+                    None => None,
                 };
                 missing += usize::from(p.is_none());
                 p.map(|p| (run, p))
@@ -640,6 +656,56 @@ impl<T> CodexCalls<T> {
         self.lingering.clear();
         self.seen.clear();
         self.seq = 0;
+    }
+}
+
+/// Each command's result from a call's items: the items of a text go to the commands
+/// with that text in the order the items' commands started, when the text is not
+/// `ambiguous` and there are as many items as commands.
+fn ties(keys: &[String], mut items: Vec<Item>, ambiguous: &[String]) -> Vec<Option<CommandResult>> {
+    items.sort_by_key(|i| i.started);
+    let fits: Vec<bool> = keys
+        .iter()
+        .map(|key| {
+            !ambiguous.contains(key)
+                && keys.iter().filter(|k| *k == key).count()
+                    == items.iter().filter(|i| i.key == *key).count()
+        })
+        .collect();
+    let mut items: Vec<Option<Item>> = items.into_iter().map(Some).collect();
+    keys.iter()
+        .zip(fits)
+        .map(|(key, fits)| {
+            let i = items
+                .iter()
+                .position(|i| i.as_ref().is_some_and(|i| i.key == *key))
+                .filter(|_| fits)?;
+            items[i].take().map(|i| i.result)
+        })
+        .collect()
+}
+
+/// Whether printed result `x` shows the item's: the same exit code, and the item's
+/// output or, as `exec_command` keeps the end of a long output, its end.
+fn shows(x: &CommandResult, item: &CommandResult) -> bool {
+    x.exit_code == item.exit_code
+        && (x.output == item.output || (!x.output.is_empty() && item.output.ends_with(&x.output)))
+}
+
+/// The result a cell of `n` commands printed for a command whose item gave `item`:
+/// the cell's one result when it has one command and the item's exit code, or one
+/// that shows the item's, preferring the whole output.
+fn printed_for<'a>(
+    printed: &'a [CommandResult],
+    n: usize,
+    item: &CommandResult,
+) -> Option<&'a CommandResult> {
+    match printed {
+        [x] if n == 1 => Some(x).filter(|x| x.exit_code == item.exit_code),
+        all => all
+            .iter()
+            .find(|x| x.exit_code == item.exit_code && x.output == item.output)
+            .or_else(|| all.iter().find(|x| shows(x, item))),
     }
 }
 

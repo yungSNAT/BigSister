@@ -136,7 +136,7 @@ impl Detector for Pipes {
                     .to_owned(),
                 "Fix: set -o pipefail before the pipe, or keep the runner's own exit status."
                     .to_owned(),
-                "A Codex result counts only when its exec cell printed one whole exec_command result per command, alone or inside a printed list or object; Codex outputs not paired counts the calls with an unguarded test run whose results could not be paired: a function_call, whose output is not read, or an exec cell that had no call id, whose call id another exec cell in the session had, whose output never came or that did not print one result per command. Codex may run PowerShell, where pipefail does not apply; a failure shown whilst the exit code was 0 is hidden there too."
+                "A Codex command's result is the CommandExecution record Codex wrote as it ended, tied to the command by its text; a command no record ties takes the result its exec cell printed only when the cell has one command and printed one result, or Codex wrote no such record whilst the cell ran. Codex outputs not paired counts the calls with an unguarded test run whose results could not all be paired: a function_call, whose output is not read, or an exec cell that had no call id, whose call id another exec cell in the session had, whose output never came or with a command neither tied nor paired. Codex may run PowerShell, where pipefail does not apply; a failure shown whilst the exit code was 0 is hidden there too."
                     .to_owned(),
             ],
         }
