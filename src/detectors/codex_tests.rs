@@ -668,10 +668,9 @@ fn commands_rtk_rewrote_tie_unless_2_commands_then_read_alike() {
         exec_at("b", &commands(&["git status"]), T + 10),
         pwsh("rtk git status", 0, T + 11),
         output("b", &[(0, json!("ok"))]),
-        // Without the rtk word, both read git log.
+        // Without the rtk word, both read git log, so its one item ties to neither.
         exec_at("c", &commands(&["rtk git log", "git log"]), T + 20),
         ran("rtk git log", 0, "l", T + 21),
-        ran("git log", 0, "l", T + 22),
         done("c"),
     ]);
     assert_eq!(polls(&lines), (counts(1, 1, 2), json!(1)));

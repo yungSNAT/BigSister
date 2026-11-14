@@ -903,7 +903,18 @@ mod tests {
         claude.wait(id, ());
         assert!(claude.wants(&claude_tool_result(id, "ok")));
         let mut codex = CodexCalls::<()>::default();
-        codex.call(id, Some(Vec::new()), true);
+        let call = CodexCall {
+            call_id: id.to_owned(),
+            exec: true,
+            steps: Vec::new(),
+            reads: Vec::new(),
+        };
+        let value = json!({});
+        let r = Record {
+            value: &value,
+            in_window: true,
+        };
+        codex.call(&r, &call, Some(Vec::new()));
         let out = json!({"type": "response_item", "payload": {
             "type": "custom_tool_call_output", "call_id": id, "output": "ok"
         }});
