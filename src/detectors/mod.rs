@@ -388,7 +388,10 @@ impl<T> CodexCalls<T> {
     #[must_use]
     pub fn wants(&self, line: &str) -> bool {
         line.contains("\"custom_tool_call_output\"")
-            && self.waiting.values().any(|(id, ..)| line.contains(id.as_str()))
+            && self
+                .waiting
+                .values()
+                .any(|(id, ..)| line.contains(id.as_str()))
     }
 
     /// Whether the output's call was awaited; it is awaited no longer.
