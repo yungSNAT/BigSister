@@ -335,9 +335,9 @@ fn command_result(v: &Value) -> Option<CommandResult> {
 pub struct CodexCalls<T> {
     /// The ids of the session's `exec` calls so far.
     seen: HashSet<String>,
-    /// By call id: what the detector keeps for each command, and whether the call was
-    /// in the window.
-    waiting: HashMap<String, (Vec<T>, bool)>,
+    /// By call id: the id as JSON writes it, what the detector keeps for each command,
+    /// and whether the call was in the window.
+    waiting: HashMap<String, (String, Vec<T>, bool)>,
     pub unpaired: u64,
     /// The commands of the `unpaired` calls.
     pub unpaired_commands: u64,
@@ -362,12 +362,13 @@ impl<T> CodexCalls<T> {
     /// outputs cannot be told apart.
     pub fn call(&mut self, call_id: &str, runs: Option<Vec<T>>, in_window: bool) {
         let fresh = !call_id.is_empty() && self.seen.insert(call_id.to_owned());
-        if !fresh && let Some((earlier, w)) = self.waiting.remove(call_id) {
+        if !fresh && let Some((_, earlier, w)) = self.waiting.remove(call_id) {
             self.not_paired(earlier.len(), w);
         }
         match runs {
             Some(runs) if fresh => {
-                self.waiting.insert(call_id.to_owned(), (runs, in_window));
+                self.waiting
+                    .insert(call_id.to_owned(), (json_escaped(call_id), runs, in_window));
             }
             Some(runs) => self.not_paired(runs.len(), in_window),
             None => {}
@@ -387,7 +388,7 @@ impl<T> CodexCalls<T> {
     #[must_use]
     pub fn wants(&self, line: &str) -> bool {
         line.contains("\"custom_tool_call_output\"")
-            && self.waiting.keys().any(|id| line.contains(id.as_str()))
+            && self.waiting.values().any(|(id, ..)| line.contains(id.as_str()))
     }
 
     /// Whether the output's call was awaited; it is awaited no longer.
@@ -399,7 +400,7 @@ impl<T> CodexCalls<T> {
     /// that command's result, when the cell printed one result per command. Otherwise
     /// none, as which result belongs to which command is unknown.
     pub fn pair<'o>(&mut self, out: &'o CodexOutput) -> Vec<(T, &'o CommandResult)> {
-        let Some((runs, in_window)) = self.waiting.remove(&out.call_id) else {
+        let Some((_, runs, in_window)) = self.waiting.remove(&out.call_id) else {
             return Vec::new();
         };
         if runs.len() != out.results.len() {
@@ -411,7 +412,7 @@ impl<T> CodexCalls<T> {
 
     /// Ends a session: the calls still awaiting output never get it.
     pub fn end(&mut self) {
-        for (_, (runs, in_window)) in std::mem::take(&mut self.waiting) {
+        for (_, (_, runs, in_window)) in std::mem::take(&mut self.waiting) {
             self.not_paired(runs.len(), in_window);
         }
         self.seen.clear();
@@ -422,7 +423,8 @@ impl<T> CodexCalls<T> {
 /// session's blocks so far.
 pub struct ClaudeCalls<T> {
     seen: HashSet<String>,
-    awaited: HashMap<String, T>,
+    /// By id: the id as JSON writes it, and what the detector keeps.
+    awaited: HashMap<String, (String, T)>,
 }
 
 impl<T> Default for ClaudeCalls<T> {
@@ -451,19 +453,23 @@ impl<T> ClaudeCalls<T> {
 
     /// Awaits the result of a block that `note` said can be awaited.
     pub fn wait(&mut self, id: &str, run: T) {
-        self.awaited.insert(id.to_owned(), run);
+        self.awaited.insert(id.to_owned(), (json_escaped(id), run));
     }
 
     /// True for lines that may hold an awaited block's result.
     #[must_use]
     pub fn wants(&self, line: &str) -> bool {
-        line.contains("\"tool_result\"") && self.awaited.keys().any(|id| line.contains(id.as_str()))
+        line.contains("\"tool_result\"")
+            && self
+                .awaited
+                .values()
+                .any(|(id, _)| line.contains(id.as_str()))
     }
 
     /// What the detector kept for the block whose result has id `id`, if awaited; it
     /// is awaited no longer.
     pub fn take(&mut self, id: &str) -> Option<T> {
-        self.awaited.remove(id)
+        self.awaited.remove(id).map(|(_, run)| run)
     }
 
     /// Starts a session.
@@ -471,6 +477,13 @@ impl<T> ClaudeCalls<T> {
         self.seen.clear();
         self.awaited.clear();
     }
+}
+
+/// `id` as it appears inside a JSON string, so that a raw line can be searched for
+/// an id holding a quote, a backslash or a control character.
+fn json_escaped(id: &str) -> String {
+    let quoted = Value::from(id).to_string();
+    quoted[1..quoted.len() - 1].to_owned()
 }
 
 /// Feeds one session to `d` as the scan does, parsing only the lines it wants; each
@@ -546,6 +559,21 @@ mod tests {
         assert!(!calls.note(Some("")));
         assert!(calls.note(Some("toolu_a")));
         assert!(!calls.note(Some("toolu_a")));
+    }
+
+    #[test]
+    fn an_id_that_json_escapes_is_still_found_in_its_line() {
+        let id = "toolu_\"q\\b\u{1}";
+        let mut claude = ClaudeCalls::default();
+        assert!(claude.note(Some(id)));
+        claude.wait(id, ());
+        assert!(claude.wants(&claude_tool_result(id, "ok")));
+        let mut codex = CodexCalls::<()>::default();
+        codex.call(id, Some(Vec::new()), true);
+        let out = json!({"type": "response_item", "payload": {
+            "type": "custom_tool_call_output", "call_id": id, "output": "ok"
+        }});
+        assert!(codex.wants(&out.to_string()));
     }
 
     #[test]
