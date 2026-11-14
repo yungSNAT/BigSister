@@ -185,7 +185,7 @@ impl Detector for Polls {
             notes: vec![
                 "A poll repeats a command with no file edit since its last run; a rerun follows an edit.".to_owned(),
                 "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
-                "Polls after failure repeat a command whose previous run's result was read before the repeat and marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results, for Codex only of what the exec cell printed of them. A Codex command's result is the CommandExecution record Codex wrote as it ended, tied to the command by its text; a command no record ties takes the result its exec cell printed in its place only when the cell printed one result per command and has one command, Codex wrote no such record whilst the cell ran, or it is the one command left untied and each tied command's printed result is in its own place; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the calls in the window whose results could not all be paired: a function_call, whose output is not read, or an exec cell that had no call id, whose call id another exec cell in the session had, whose output never came or with a command neither tied nor paired. Codex commands not paired counts those commands, whose results were not judged.".to_owned(),
+                "Polls after failure repeat a command whose previous run's result was read before the repeat and marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results, for Codex only of what the exec cell printed of them. A Codex command's result is the CommandExecution record Codex wrote as it ended, tied to the command by its text; a command no record ties takes the result its exec cell printed in its place only when the cell printed one result per command and has one command, Codex wrote no such record whilst the cell ran, or it is the one command left untied and each tied command's result is printed whole in its own place; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the calls in the window whose results could not all be paired: a function_call, whose output is not read, or an exec cell that had no call id, whose call id another exec cell in the session had, whose output never came or with a command neither tied nor paired. Codex commands not paired counts those commands, whose results were not judged.".to_owned(),
                 EST_NOTE.to_owned(),
             ],
         }
@@ -270,8 +270,9 @@ impl Polls {
             }
             self.codex
                 .call(r, &call, (!runs.is_empty()).then_some(runs));
-        } else if self.codex.record(r) {
-        } else if let Some(out) = codex_output(r) {
+        } else if !self.codex.record(r)
+            && let Some(out) = codex_output(r)
+        {
             for (run, res) in self.codex.pair(&out) {
                 if let Some(run) = run {
                     self.result(s, run, res.exit_code != 0, || res.printed_chars);

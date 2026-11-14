@@ -340,8 +340,6 @@ pub struct Paired {
 /// A `CommandExecution` item kept for the one open call that could have run it.
 struct Item {
     key: String,
-    /// When its command started, in milliseconds since the epoch.
-    started: i64,
     result: CommandResult,
 }
 
@@ -371,8 +369,8 @@ struct Open<T> {
 /// What a call left when its output came.
 struct Closed<T> {
     runs: Option<(Vec<T>, bool)>,
-    /// Each command's result from its items, if tied, as `ties` gives it.
-    ties: Vec<Option<(CommandResult, Option<usize>)>>,
+    /// Each command's result from its items, if tied.
+    ties: Vec<Option<CommandResult>>,
     saw_items: bool,
 }
 
@@ -398,13 +396,12 @@ struct Lingering {
 /// start, and no other command could have run it: no command of another open call,
 /// including a call without an id or time, that could have started first has that
 /// text, nor does an untied command of a call whose output came whilst one of those
-/// was open. The items with one text tie to the call's commands with that text in the
-/// order they started, when there are as many of each and, for a text the call has
-/// more than once, the printed results in their places agree (`confirmed`). A command
-/// not tied pairs with the result the cell printed at its position when the cell
-/// printed one result per command and has one command, or Codex recorded no item
+/// was open; and the call has no other command with that text and no other such item.
+/// A command not tied pairs with the result the cell printed at its position when the
+/// cell printed one result per command and has one command, or Codex recorded no item
 /// whilst the call was open, as older Codex versions record none, or it is the one
-/// command left untied and every tied command's printed result is in its own place.
+/// command left untied and every tied command's result is printed whole in its own
+/// place.
 pub struct CodexCalls<T> {
     /// The ids of the session's calls so far.
     seen: HashSet<String>,
@@ -546,12 +543,8 @@ impl<T> CodexCalls<T> {
             .filter(|&i| could(self.open[i].start) && self.open[i].keys.contains(&key))
             .collect();
         match (calls.as_slice(), lingers, started.zip(item_result(item))) {
-            ([i], false, Some((started, result))) if self.open[*i].start.is_some() => {
-                self.open[*i].items.push(Item {
-                    key,
-                    started,
-                    result,
-                })
+            ([i], false, Some((_, result))) if self.open[*i].start.is_some() => {
+                self.open[*i].items.push(Item { key, result });
             }
             _ => {
                 for i in calls {
@@ -620,26 +613,28 @@ impl<T> CodexCalls<T> {
             return Vec::new();
         };
         let n = runs.len();
-        let ties = confirmed(ties, &out.results);
-        // With every other command tied to the result printed in its own place, the
-        // one result left is the untied command's.
+        // With every other command tied to the result printed whole in its own place,
+        // the one result left is the untied command's.
         let in_order = ties.iter().filter(|t| t.is_none()).count() == 1
             && ties.iter().enumerate().all(|(k, tie)| {
-                tie.as_ref()
-                    .is_none_or(|item| in_place(&out.results, k, item))
+                tie.as_ref().is_none_or(|item| {
+                    out.results
+                        .get(k)
+                        .is_some_and(|x| x.exit_code == item.exit_code && x.output == item.output)
+                })
             });
         let by_position = out.results.len() == n && (n == 1 || !saw_items || in_order);
-        let mut used = vec![false; out.results.len()];
+        let shown = printed_for(&out.results, &ties);
         let mut missing = 0;
         let paired = runs
             .into_iter()
             .zip(ties)
+            .zip(shown)
             .enumerate()
-            .filter_map(|(k, (run, tie))| {
+            .filter_map(|(k, ((run, tie), shown))| {
                 let p = match tie {
                     Some(item) => Some(Paired {
-                        printed_chars: printed_for(&out.results, n, k, &item, &mut used)
-                            .map_or(0, |x| chars(&x.output)),
+                        printed_chars: shown.map_or(0, |x| chars(&x.output)),
                         exit_code: item.exit_code,
                         output: item.output,
                     }),
@@ -673,71 +668,26 @@ impl<T> CodexCalls<T> {
     }
 }
 
-/// Each command's result from a call's items: the items of a text go to the commands
-/// with that text in the order the items' commands started, when the text is not
-/// `ambiguous` and there are as many items as commands. A text the call has more than
-/// once is marked with the place of its first command, for `pair` to confirm.
-fn ties(
-    keys: &[String],
-    mut items: Vec<Item>,
-    ambiguous: &[String],
-) -> Vec<Option<(CommandResult, Option<usize>)>> {
-    items.sort_by_key(|i| i.started);
-    let fits: Vec<bool> = keys
-        .iter()
-        .map(|key| {
-            !ambiguous.contains(key)
-                && keys.iter().filter(|k| *k == key).count()
-                    == items.iter().filter(|i| i.key == *key).count()
-        })
-        .collect();
+/// Each command's result from a call's items: the one item with its text, when the
+/// text is not `ambiguous` and no other command of the call has it, as code need not
+/// run commands in the order it writes them.
+fn ties(keys: &[String], items: Vec<Item>, ambiguous: &[String]) -> Vec<Option<CommandResult>> {
+    let once = |key: &String| {
+        !ambiguous.contains(key)
+            && keys.iter().filter(|k| *k == key).count() == 1
+            && items.iter().filter(|i| i.key == *key).count() == 1
+    };
+    let fits: Vec<bool> = keys.iter().map(once).collect();
     let mut items: Vec<Option<Item>> = items.into_iter().map(Some).collect();
     keys.iter()
         .zip(fits)
         .map(|(key, fits)| {
-            let i = items
-                .iter()
-                .position(|i| i.as_ref().is_some_and(|i| i.key == *key))
-                .filter(|_| fits)?;
-            let first = keys.iter().position(|k| k == key);
-            let repeated = first.filter(|_| keys.iter().filter(|k| *k == key).count() > 1);
-            items[i].take().map(|i| (i.result, repeated))
+            let item = items
+                .iter_mut()
+                .find(|i| fits && i.as_ref().is_some_and(|i| i.key == *key))?;
+            item.take().map(|i| i.result)
         })
         .collect()
-}
-
-/// The ties `ties` gave, keeping those of a text the call runs more than once only
-/// where each such command's printed result in its place shows its item, as code need
-/// not run commands in the order it writes them.
-///
-/// shortcut: a cell that both runs them out of order and prints them as they end can
-/// still agree with start order; telling them apart needs a call id on each item.
-fn confirmed(
-    ties: Vec<Option<(CommandResult, Option<usize>)>>,
-    printed: &[CommandResult],
-) -> Vec<Option<CommandResult>> {
-    let text_confirmed = |text: usize| {
-        ties.iter().enumerate().all(|(k, t)| match t {
-            Some((item, Some(r))) if *r == text => in_place(printed, k, item),
-            _ => true,
-        })
-    };
-    let ok: Vec<bool> = ties
-        .iter()
-        .map(|t| {
-            t.as_ref()
-                .is_some_and(|(_, repeated)| repeated.is_none_or(text_confirmed))
-        })
-        .collect();
-    ties.into_iter()
-        .zip(ok)
-        .map(|(t, ok)| t.filter(|_| ok).map(|(item, _)| item))
-        .collect()
-}
-
-/// Whether the result printed in place `k` shows the item's.
-fn in_place(printed: &[CommandResult], k: usize, item: &CommandResult) -> bool {
-    printed.get(k).is_some_and(|x| shows(x, item))
 }
 
 /// Whether printed result `x` shows the item's: the same exit code, and the item's
@@ -747,32 +697,40 @@ fn shows(x: &CommandResult, item: &CommandResult) -> bool {
         && (x.output == item.output || (!x.output.is_empty() && item.output.ends_with(&x.output)))
 }
 
-/// The result a cell of `n` commands printed for its command `k`, whose item gave
-/// `item`, amongst those no other command has taken (`used`): the cell's one result
-/// when it has one command and the item's exit code, or one that shows the item's,
-/// preferring the one in its place, then the whole output.
+/// For each tied command, the result the cell printed of it: one that shows its item
+/// and no other tied command's, preferring its whole output. A printed result that
+/// could be more than one command's counts for none.
 fn printed_for<'a>(
     printed: &'a [CommandResult],
-    n: usize,
-    k: usize,
-    item: &CommandResult,
-    used: &mut [bool],
-) -> Option<&'a CommandResult> {
-    let free = |i: &usize| !used[*i];
-    let i = match printed {
-        [x] if n == 1 => (x.exit_code == item.exit_code).then_some(0),
-        all => Some(k)
-            .filter(|k| in_place(all, *k, item) && free(k))
-            .or_else(|| {
-                (0..all.len())
-                    .filter(free)
-                    .find(|&i| all[i].exit_code == item.exit_code && all[i].output == item.output)
-            })
-            .or_else(|| (0..all.len()).filter(free).find(|&i| shows(&all[i], item))),
-    }
-    .filter(free)?;
-    used[i] = true;
-    Some(&printed[i])
+    ties: &[Option<CommandResult>],
+) -> Vec<Option<&'a CommandResult>> {
+    let owners: Vec<Option<usize>> = printed
+        .iter()
+        .map(|x| {
+            let mut can =
+                (0..ties.len()).filter(|&k| ties[k].as_ref().is_some_and(|item| shows(x, item)));
+            match (can.next(), can.next()) {
+                (Some(k), None) => Some(k),
+                _ => None,
+            }
+        })
+        .collect();
+    ties.iter()
+        .enumerate()
+        .map(|(k, tie)| {
+            let item = tie.as_ref()?;
+            let mine = || {
+                printed
+                    .iter()
+                    .zip(&owners)
+                    .filter(move |(_, o)| **o == Some(k))
+                    .map(|(x, _)| x)
+            };
+            mine()
+                .find(|x| x.output == item.output)
+                .or_else(|| mine().next())
+        })
+        .collect()
 }
 
 /// An item's exit code and output; a missing output is empty.
@@ -798,8 +756,8 @@ fn record_ms(r: &Record<'_>) -> Option<i64> {
 ///
 /// shortcut: the RTK hook rewrites the commands Codex runs by putting `rtk ` before
 /// each program it filters (38,599 of 104,470 items on one PC, 15 November 2026), so
-/// both texts drop the word, and 2 commands of a call that then read alike tie only as
-/// a text the call runs twice does (`CodexCalls::pair`).
+/// both texts drop the word, and 2 commands of a call that then read alike tie to
+/// neither.
 /// Commands another hook rewrites stay untied; telling rewrites apart would need the
 /// hooks' own records.
 fn command_key(cmd: &str) -> String {

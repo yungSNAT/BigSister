@@ -175,8 +175,8 @@ impl Rereads {
                 reread |= self.read(s, &path, r.in_window);
             }
             self.codex.call(r, &call, reread.then(Vec::new));
-        } else if self.codex.record(r) {
-        } else if let Some(out) = codex_output(r)
+        } else if !self.codex.record(r)
+            && let Some(out) = codex_output(r)
             && self.codex.take(&out)
         {
             self.returned(s, out.chars);
