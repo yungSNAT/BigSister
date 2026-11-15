@@ -1365,6 +1365,11 @@ fn each_estimate_is_priced_at_the_model_that_read_it() {
         Some((chars / 4.0 * 4.0 / 1e6 * 100.0).round() / 100.0)
     );
     assert_eq!(idle["unpriced_tokens_est"], json!(0));
+    // Rereads: a 40,000-character re-read read by Claude Sonnet 5.5 at US$2 per million.
+    let reread = find(rows(&doc, "rereads", 0), &[("agent", json!("claude"))]);
+    assert_eq!(reread["reread_chars"], json!(40000));
+    assert_eq!(reread["reread_usd_est"], json!(0.02));
+    assert_eq!(reread["unpriced_tokens_est"], json!(0));
     let notes = doc["detectors"]["polls"]["notes"].to_string();
     assert!(
         notes.contains("15 November 2026") && notes.contains("not a bill"),
