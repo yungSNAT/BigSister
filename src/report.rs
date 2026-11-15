@@ -208,20 +208,20 @@ pub fn text(meta: &Meta<'_>, sections: &[Section]) -> String {
     out
 }
 
+/// Dollars show to the cent; every other value as [`cell`] gives it.
+fn text_cell((v, column): (&Value, &&str)) -> String {
+    match v.as_f64() {
+        Some(dollars) if column.ends_with("_usd_est") => format!("{dollars:.2}"),
+        _ => cell(v),
+    }
+}
+
 fn render_table(out: &mut String, t: &Table) {
     let head: Vec<String> = t.columns.iter().map(|c| c.replace('_', " ")).collect();
     let cells: Vec<Vec<String>> = t
         .rows
         .iter()
-        .map(|r| {
-            r.iter()
-                .zip(&t.columns)
-                .map(|(v, c)| match v.as_f64() {
-                    Some(dollars) if c.ends_with("_usd_est") => format!("{dollars:.2}"),
-                    _ => cell(v),
-                })
-                .collect()
-        })
+        .map(|r| r.iter().zip(&t.columns).map(text_cell).collect())
         .collect();
     let mut widths: Vec<usize> = head.iter().map(|h| h.chars().count()).collect();
     for row in &cells {
