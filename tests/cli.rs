@@ -1260,3 +1260,51 @@ fn roots_no_detector_reads_are_left_out_and_cut_lines_still_count() {
     assert_eq!(roots[0]["agent"], "claude");
     assert_eq!(roots[0]["lines_skipped"], 1);
 }
+
+#[test]
+fn a_rate_prices_each_token_estimate_and_nothing_else() {
+    let plain = report("all", &[]);
+    let priced = report("all", &["--usd-per-mtok", "2500"]);
+    for (detector, tokens, usd) in [
+        ("polls", "poll_tokens_est", "poll_usd_est"),
+        ("rereads", "reread_tokens_est", "reread_usd_est"),
+        ("schemas", "idle_tokens_est", "idle_usd_est"),
+    ] {
+        let rows = rows(&priced, detector, 0);
+        assert!(!rows.is_empty(), "{detector}");
+        for row in rows {
+            let want = (row[tokens].as_f64().unwrap() * 2500.0 / 1e6 * 100.0).round() / 100.0;
+            assert_eq!(row[usd].as_f64(), Some(want), "{detector} {row}");
+        }
+        assert!(
+            rows_of(&plain, detector)
+                .iter()
+                .all(|r| r.get(usd).is_none())
+        );
+        let notes = priced["detectors"][detector]["notes"].to_string();
+        assert!(notes.contains("not a bill"), "{detector} {notes}");
+    }
+    // Startup's measured request tokens include cache reads, so they stay unpriced.
+    assert_eq!(
+        priced["detectors"]["startup"],
+        plain["detectors"]["startup"]
+    );
+
+    let (code, text, _) = run(&fixture_args("polls", &["--usd-per-mtok", "3"]));
+    assert_eq!(code, 0);
+    assert!(text.contains("poll usd est"), "{text}");
+    for bad in ["0", "-1", "NaN", "inf", "1001", "x"] {
+        let (code, _, stderr) = run(&fixture_args("polls", &["--usd-per-mtok", bad]));
+        assert_eq!(code, 2, "{bad}: {stderr}");
+    }
+}
+
+/// Every row of every table of a detector.
+fn rows_of(doc: &Value, detector: &str) -> Vec<Value> {
+    doc["detectors"][detector]["tables"]
+        .as_array()
+        .expect("tables")
+        .iter()
+        .flat_map(|t| t["rows"].as_array().expect("rows").clone())
+        .collect()
+}

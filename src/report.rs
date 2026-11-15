@@ -281,6 +281,52 @@ mod tests {
     }
 
     #[test]
+    fn pricing_adds_dollars_beside_each_token_estimate() {
+        let mut table = Table::new("t", vec!["agent", "poll_chars", "poll_tokens_est"]);
+        table.rows = vec![
+            vec![json!("codex"), json!(4_000_000), json!(1_000_000)],
+            vec![json!("claude"), json!(1_600_000), json!(400_000)],
+            vec![json!("claude"), json!(3), json!(1)],
+        ];
+        let mut section = Section {
+            name: "polls",
+            tables: vec![table],
+            ..Section::default()
+        };
+        price(&mut section, 3.0);
+        let t = &section.tables[0];
+        assert_eq!(
+            t.columns,
+            ["agent", "poll_chars", "poll_tokens_est", "poll_usd_est"]
+        );
+        let usd: Vec<&Value> = t.rows.iter().map(|r| &r[3]).collect();
+        assert_eq!(usd, [&json!(3.0), &json!(1.2), &json!(0.0)]);
+        assert_eq!(section.notes.len(), 1);
+        assert!(
+            section.notes[0].contains("US$3 per million"),
+            "{:?}",
+            section.notes
+        );
+        let mut out = String::new();
+        render_table(&mut out, t);
+        assert!(
+            out.contains(" 3.00\n") && out.contains(" 1.20\n") && out.contains(" 0.00\n"),
+            "{out}"
+        );
+
+        // A section with no token estimate, such as startup, is left as it was.
+        let mut startup = Section {
+            name: "startup",
+            summary: vec![("median_first_request_tokens".to_owned(), json!(5))],
+            tables: vec![Table::new("t", vec!["source", "chars"])],
+            ..Section::default()
+        };
+        price(&mut startup, 3.0);
+        assert_eq!(startup.tables[0].columns, ["source", "chars"]);
+        assert!(startup.notes.is_empty());
+    }
+
+    #[test]
     fn ratio_rounds_and_handles_zero() {
         assert_eq!(ratio(1, 3), json!(0.33));
         assert_eq!(ratio(5, 0), Value::Null);
