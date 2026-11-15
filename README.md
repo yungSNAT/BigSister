@@ -132,8 +132,9 @@ By hook name and command, most cancellations first
 | `--json` | off | Print one JSON object with `schema_version` 1 |
 | `--limit N` | 20 | Rows per table |
 | `--paths` | off | List the most re-read file paths |
+| `--usd-per-mtok USD` | off | Show each token estimate in US dollars at this price per million tokens (above 0, up to 1000) |
 
-Columns ending in `tokens est` (`_tokens_est` in JSON) estimate tokens as the characters beside them divided by 4, rounded up in each row, so rows need not add up to a total.
+Columns ending in `tokens est` (`_tokens_est` in JSON) estimate tokens as the characters beside them divided by 4, rounded up in each row, so rows need not add up to a total. With `--usd-per-mtok`, each gains a column ending in `usd est` (`_usd_est`): that estimate at the given price, rounded to cents. It prices each estimate once as uncached input, so it is an illustration, not a bill: cached re-sends cost less, and text kept in context costs again in later turns. `startup`'s recorded request tokens include cache reads, so they are not priced.
 
 Exit codes: 0 success, 1 a runtime error such as a missing transcript folder or a bad `--since`, 2 a usage error.
 

@@ -79,6 +79,51 @@ pub fn ratio(num: u64, den: u64) -> Value {
     json!((r * 100.0).round() / 100.0)
 }
 
+/// The dollar column for a token estimate column.
+fn usd_column(tokens: &str) -> Option<&'static str> {
+    match tokens {
+        "poll_tokens_est" => Some("poll_usd_est"),
+        "reread_tokens_est" => Some("reread_usd_est"),
+        "idle_tokens_est" => Some("idle_usd_est"),
+        _ => None,
+    }
+}
+
+/// Adds a dollar column after each token estimate column of `section`: the estimate at
+/// `usd_per_mtok` US dollars per million tokens, rounded to cents, with a note on what
+/// that figure is and is not. Measured tokens, such as startup's, are left unpriced.
+pub fn price(section: &mut Section, usd_per_mtok: f64) {
+    let mut priced = false;
+    for t in &mut section.tables {
+        for i in (0..t.columns.len()).rev() {
+            let column = t.columns[i];
+            debug_assert!(
+                !column.ends_with("_tokens_est") || usd_column(column).is_some(),
+                "{column} has no dollar column"
+            );
+            let Some(usd) = usd_column(column) else {
+                continue;
+            };
+            t.columns.insert(i + 1, usd);
+            for row in &mut t.rows {
+                let dollars = row
+                    .get(i)
+                    .and_then(Value::as_f64)
+                    .map_or(Value::Null, |tokens| {
+                        json!((tokens * usd_per_mtok / 1e4).round() / 100.0)
+                    });
+                row.insert(i + 1, dollars);
+            }
+            priced = true;
+        }
+    }
+    if priced {
+        section.notes.push(format!(
+            "Dollars (usd est) price each token estimate once at US${usd_per_mtok} per million tokens, the rate given with --usd-per-mtok, as uncached input: an illustration, not a bill. Cached re-sends cost less, text kept in context costs again in later turns, and the model's own prices and cache use are not read."
+        ));
+    }
+}
+
 /// The median of `v`, or 0 when empty.
 #[must_use]
 pub fn median(v: &[u64]) -> u64 {
@@ -163,12 +208,20 @@ pub fn text(meta: &Meta<'_>, sections: &[Section]) -> String {
     out
 }
 
+/// Dollars show to the cent; every other value as [`cell`] gives it.
+fn text_cell((v, column): (&Value, &&str)) -> String {
+    match v.as_f64() {
+        Some(dollars) if column.ends_with("_usd_est") => format!("{dollars:.2}"),
+        _ => cell(v),
+    }
+}
+
 fn render_table(out: &mut String, t: &Table) {
     let head: Vec<String> = t.columns.iter().map(|c| c.replace('_', " ")).collect();
     let cells: Vec<Vec<String>> = t
         .rows
         .iter()
-        .map(|r| r.iter().map(cell).collect())
+        .map(|r| r.iter().zip(&t.columns).map(text_cell).collect())
         .collect();
     let mut widths: Vec<usize> = head.iter().map(|h| h.chars().count()).collect();
     for row in &cells {
@@ -278,6 +331,52 @@ mod tests {
         assert_eq!(percentile(&v, 90), 5);
         assert_eq!(percentile(&[], 90), 0);
         assert_eq!(median(&[7, 9]), 7);
+    }
+
+    #[test]
+    fn pricing_adds_dollars_beside_each_token_estimate() {
+        let mut table = Table::new("t", vec!["agent", "poll_chars", "poll_tokens_est"]);
+        table.rows = vec![
+            vec![json!("codex"), json!(4_000_000), json!(1_000_000)],
+            vec![json!("claude"), json!(1_600_000), json!(400_000)],
+            vec![json!("claude"), json!(3), json!(1)],
+        ];
+        let mut section = Section {
+            name: "polls",
+            tables: vec![table],
+            ..Section::default()
+        };
+        price(&mut section, 3.0);
+        let t = &section.tables[0];
+        assert_eq!(
+            t.columns,
+            ["agent", "poll_chars", "poll_tokens_est", "poll_usd_est"]
+        );
+        let usd: Vec<&Value> = t.rows.iter().map(|r| &r[3]).collect();
+        assert_eq!(usd, [&json!(3.0), &json!(1.2), &json!(0.0)]);
+        assert_eq!(section.notes.len(), 1);
+        assert!(
+            section.notes[0].contains("US$3 per million"),
+            "{:?}",
+            section.notes
+        );
+        let mut out = String::new();
+        render_table(&mut out, t);
+        assert!(
+            out.contains(" 3.00\n") && out.contains(" 1.20\n") && out.contains(" 0.00\n"),
+            "{out}"
+        );
+
+        // A section with no token estimate, such as startup, is left as it was.
+        let mut startup = Section {
+            name: "startup",
+            summary: vec![("median_first_request_tokens".to_owned(), json!(5))],
+            tables: vec![Table::new("t", vec!["source", "chars"])],
+            ..Section::default()
+        };
+        price(&mut startup, 3.0);
+        assert_eq!(startup.tables[0].columns, ["source", "chars"]);
+        assert!(startup.notes.is_empty());
     }
 
     #[test]
