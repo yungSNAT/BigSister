@@ -401,7 +401,7 @@ struct Lingering {
 /// cell printed one result per command and has one command, or Codex recorded no item
 /// whilst the call was open, as older Codex versions record none, or it is the one
 /// command left untied, every tied command's result is printed whole in its own place
-/// and the result in its place shows no tied command's item (`in_order`).
+/// and the result in its place is no tied command's item cut to its end (`in_order`).
 pub struct CodexCalls<T> {
     /// The ids of the session's calls so far.
     seen: HashSet<String>,
@@ -685,8 +685,11 @@ fn ties(keys: &[String], items: Vec<Item>, ambiguous: &[String]) -> Vec<Option<C
 
 /// Whether the one command `ties` leaves untied can take the result printed in its
 /// place: every tied command's result is printed whole in its own place, and the one
-/// left shows no tied command's item, so it cannot be a tied command's result moved
-/// there by an untied command's equal one.
+/// left is no tied command's item cut to its end. Another pairing that gave the untied
+/// command another result would be a chain of tied commands, each taking a result that
+/// shows its item, the last taking the untied command's; a link that is not whole makes
+/// that result a tied item cut to its end, and with every link whole the untied
+/// command's result is the same either way.
 fn in_order(ties: &[Option<CommandResult>], printed: &[CommandResult]) -> bool {
     let mut untied = (0..ties.len()).filter(|&k| ties[k].is_none());
     let (Some(u), None) = (untied.next(), untied.next()) else {
@@ -701,7 +704,7 @@ fn in_order(ties: &[Option<CommandResult>], printed: &[CommandResult]) -> bool {
         })
     }) && printed
         .get(u)
-        .is_some_and(|x| !tied().any(|item| shows(x, item)))
+        .is_some_and(|x| !tied().any(|item| shows(x, item) && x.output != item.output))
 }
 
 /// Whether printed result `x` shows the item's: the same exit code, and the item's
