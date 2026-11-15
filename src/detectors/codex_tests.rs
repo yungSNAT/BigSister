@@ -818,6 +818,20 @@ fn a_printed_result_counts_as_poll_characters_only_for_the_one_command_it_shows(
 }
 
 #[test]
+fn a_printed_result_an_untied_command_could_own_counts_for_no_tied_one() {
+    let lines = in_window(&[
+        exec_at("a", &commands(&["git log"]), T),
+        ran("git log", 0, "x", T + 1),
+        output("a", &[(0, json!("x"))]),
+        // git diff has no item and the one result printed may be its own.
+        exec_at("b", &commands(&["git log", "git diff"]), T + 10),
+        ran("git log", 0, "x", T + 11),
+        output("b", &[(0, json!("x"))]),
+    ]);
+    assert_eq!(polls(&lines), (counts(1, 0, 0), json!(1)));
+}
+
+#[test]
 fn a_tied_result_whose_end_is_printed_does_not_place_an_untied_one() {
     // git log's output ends with git diff's, and the cell prints git diff's first.
     let lines = in_window(&[

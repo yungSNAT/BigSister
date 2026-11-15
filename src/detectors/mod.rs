@@ -624,7 +624,7 @@ impl<T> CodexCalls<T> {
                 })
             });
         let by_position = out.results.len() == n && (n == 1 || !saw_items || in_order);
-        let shown = printed_for(&out.results, &ties);
+        let shown = printed_for(&out.results, &ties, by_position);
         let mut missing = 0;
         let paired = runs
             .into_iter()
@@ -699,11 +699,19 @@ fn shows(x: &CommandResult, item: &CommandResult) -> bool {
 
 /// For each tied command, the result the cell printed of it: one that shows its item
 /// and no other tied command's, preferring its whole output. A printed result that
-/// could be more than one command's counts for none.
+/// could be more than one command's counts for none. Where a command is untied, which
+/// could own any printed result, a tied command has only the result in its own place,
+/// and only when the cell's results pair `by_position`.
 fn printed_for<'a>(
     printed: &'a [CommandResult],
     ties: &[Option<CommandResult>],
+    by_position: bool,
 ) -> Vec<Option<&'a CommandResult>> {
+    if ties.iter().any(Option::is_none) {
+        return (0..ties.len())
+            .map(|k| printed.get(k).filter(|_| by_position && ties[k].is_some()))
+            .collect();
+    }
     let owners: Vec<Option<usize>> = printed
         .iter()
         .map(|x| {
