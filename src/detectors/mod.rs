@@ -400,8 +400,8 @@ struct Lingering {
 /// A command not tied pairs with the result the cell printed at its position when the
 /// cell printed one result per command and has one command, or Codex recorded no item
 /// whilst the call was open, as older Codex versions record none, or it is the one
-/// command left untied and every tied command's result is printed whole in its own
-/// place.
+/// command left untied, every tied command's result is printed whole in its own place
+/// and the result in its place shows no tied command's item (`in_order`).
 pub struct CodexCalls<T> {
     /// The ids of the session's calls so far.
     seen: HashSet<String>,
@@ -615,15 +615,8 @@ impl<T> CodexCalls<T> {
         let n = runs.len();
         // With every other command tied to the result printed whole in its own place,
         // the one result left is the untied command's.
-        let in_order = ties.iter().filter(|t| t.is_none()).count() == 1
-            && ties.iter().enumerate().all(|(k, tie)| {
-                tie.as_ref().is_none_or(|item| {
-                    out.results
-                        .get(k)
-                        .is_some_and(|x| x.exit_code == item.exit_code && x.output == item.output)
-                })
-            });
-        let by_position = out.results.len() == n && (n == 1 || !saw_items || in_order);
+        let by_position =
+            out.results.len() == n && (n == 1 || !saw_items || in_order(&ties, &out.results));
         let shown = printed_for(&out.results, &ties, by_position);
         let mut missing = 0;
         let paired = runs
@@ -688,6 +681,27 @@ fn ties(keys: &[String], items: Vec<Item>, ambiguous: &[String]) -> Vec<Option<C
             item.take().map(|i| i.result)
         })
         .collect()
+}
+
+/// Whether the one command `ties` leaves untied can take the result printed in its
+/// place: every tied command's result is printed whole in its own place, and the one
+/// left shows no tied command's item, so it cannot be a tied command's result moved
+/// there by an untied command's equal one.
+fn in_order(ties: &[Option<CommandResult>], printed: &[CommandResult]) -> bool {
+    let mut untied = (0..ties.len()).filter(|&k| ties[k].is_none());
+    let (Some(u), None) = (untied.next(), untied.next()) else {
+        return false;
+    };
+    let tied = || ties.iter().flatten();
+    ties.iter().enumerate().all(|(k, tie)| {
+        tie.as_ref().is_none_or(|item| {
+            printed
+                .get(k)
+                .is_some_and(|x| x.exit_code == item.exit_code && x.output == item.output)
+        })
+    }) && printed
+        .get(u)
+        .is_some_and(|x| !tied().any(|item| shows(x, item)))
 }
 
 /// Whether printed result `x` shows the item's: the same exit code, and the item's
