@@ -41,6 +41,18 @@ pub struct Cli {
     /// Also list re-read file paths (rereads only)
     #[arg(long, global = true)]
     pub paths: bool,
+
+    /// Show each token estimate in US dollars at this price per million tokens (above 0, up to 1000)
+    #[arg(long, global = true, value_name = "USD", value_parser = parse_usd_per_mtok)]
+    pub usd_per_mtok: Option<f64>,
+}
+
+/// A price per million tokens: a finite number above 0 and at most 1000.
+fn parse_usd_per_mtok(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(usd) if usd > 0.0 && usd <= 1000.0 => Ok(usd),
+        _ => Err("expected a number above 0 and at most 1000".to_owned()),
+    }
 }
 
 /// What to report.

@@ -79,6 +79,51 @@ pub fn ratio(num: u64, den: u64) -> Value {
     json!((r * 100.0).round() / 100.0)
 }
 
+/// The dollar column for a token estimate column.
+fn usd_column(tokens: &str) -> Option<&'static str> {
+    match tokens {
+        "poll_tokens_est" => Some("poll_usd_est"),
+        "reread_tokens_est" => Some("reread_usd_est"),
+        "idle_tokens_est" => Some("idle_usd_est"),
+        _ => None,
+    }
+}
+
+/// Adds a dollar column after each token estimate column of `section`: the estimate at
+/// `usd_per_mtok` US dollars per million tokens, rounded to cents, with a note on what
+/// that figure is and is not. Measured tokens, such as startup's, are left unpriced.
+pub fn price(section: &mut Section, usd_per_mtok: f64) {
+    let mut priced = false;
+    for t in &mut section.tables {
+        for i in (0..t.columns.len()).rev() {
+            let column = t.columns[i];
+            debug_assert!(
+                !column.ends_with("_tokens_est") || usd_column(column).is_some(),
+                "{column} has no dollar column"
+            );
+            let Some(usd) = usd_column(column) else {
+                continue;
+            };
+            t.columns.insert(i + 1, usd);
+            for row in &mut t.rows {
+                let dollars = row
+                    .get(i)
+                    .and_then(Value::as_f64)
+                    .map_or(Value::Null, |tokens| {
+                        json!((tokens * usd_per_mtok / 1e4).round() / 100.0)
+                    });
+                row.insert(i + 1, dollars);
+            }
+            priced = true;
+        }
+    }
+    if priced {
+        section.notes.push(format!(
+            "Dollars (usd est) price each token estimate once at US${usd_per_mtok} per million tokens, the rate given with --usd-per-mtok, as uncached input: an illustration, not a bill. Cached re-sends cost less, text kept in context costs again in later turns, and the model's own prices and cache use are not read."
+        ));
+    }
+}
+
 /// The median of `v`, or 0 when empty.
 #[must_use]
 pub fn median(v: &[u64]) -> u64 {
@@ -168,7 +213,15 @@ fn render_table(out: &mut String, t: &Table) {
     let cells: Vec<Vec<String>> = t
         .rows
         .iter()
-        .map(|r| r.iter().map(cell).collect())
+        .map(|r| {
+            r.iter()
+                .zip(&t.columns)
+                .map(|(v, c)| match v.as_f64() {
+                    Some(dollars) if c.ends_with("_usd_est") => format!("{dollars:.2}"),
+                    _ => cell(v),
+                })
+                .collect()
+        })
         .collect();
     let mut widths: Vec<usize> = head.iter().map(|h| h.chars().count()).collect();
     for row in &cells {

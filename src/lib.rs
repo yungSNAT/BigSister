@@ -38,6 +38,9 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         .iter()
         .map(|d| {
             let mut s = d.section(&opts);
+            if let Some(usd) = cli.usd_per_mtok {
+                report::price(&mut s, usd);
+            }
             if !d.agents().iter().any(|a| scanned.contains(a)) {
                 let names: Vec<&str> = d.agents().iter().map(|a| a.name()).collect();
                 s.notes.insert(
