@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      # CodeQL refuses a workflow whose init and analyze steps differ in version.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
+    ignore:
+      # Policy pins move by hand to a reviewed release-policy commit.
+      - dependency-name: "ryanduguid/release-policy/.github/workflows/*"
+  - package-ecosystem: cargo
+    directories: [/, /fuzz]
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      rust-dependencies:
+        patterns:
+          - "*"
