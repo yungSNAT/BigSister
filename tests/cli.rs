@@ -1316,13 +1316,17 @@ fn rows_of(doc: &Value, detector: &str) -> Vec<Value> {
 
 const PRICED_CLAUDE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/priced/claude");
 const PRICED_CODEX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/priced/codex");
+const PRICED_MIXED: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/priced-mixed/claude"
+);
 
-/// `shaphan all --json` over the priced fixtures, with `extra` options.
-fn priced(extra: &[&str]) -> Value {
+/// `shaphan all --json` over the priced Codex fixtures and `claude`, with `extra` options.
+fn priced(claude: &str, extra: &[&str]) -> Value {
     let mut args = vec![
         "all",
         "--claude-root",
-        PRICED_CLAUDE,
+        claude,
         "--codex-root",
         PRICED_CODEX,
         "--since",
@@ -1337,7 +1341,7 @@ fn priced(extra: &[&str]) -> Value {
 
 #[test]
 fn each_estimate_is_priced_at_the_model_that_read_it() {
-    let doc = priced(&[]);
+    let doc = priced(PRICED_CLAUDE, &[]);
     let polls = rows(&doc, "polls", 0);
     // Claude: 3 polls of 10,000 characters. The first is read by Claude Fable 5.2 at
     // US$8 per million; the second only by a synthetic reply and a model with no
@@ -1380,13 +1384,36 @@ fn each_estimate_is_priced_at_the_model_that_read_it() {
 
 #[test]
 fn a_given_rate_prices_every_estimate_and_leaves_none_unpriced() {
-    let doc = priced(&["--usd-per-mtok", "1000"]);
+    let doc = priced(PRICED_CLAUDE, &["--usd-per-mtok", "1000"]);
     let claude = find(rows(&doc, "polls", 0), &[("agent", json!("claude"))]);
     assert_eq!(claude["poll_usd_est"], json!(7.5));
     assert_eq!(claude["unpriced_tokens_est"], json!(0));
     let notes = doc["detectors"]["polls"]["notes"].to_string();
     assert!(notes.contains("--usd-per-mtok"), "{notes}");
     assert!(!notes.contains("15 November 2026"), "{notes}");
+}
+
+#[test]
+fn a_copy_of_a_reply_written_after_a_result_does_not_read_it() {
+    let doc = priced(PRICED_MIXED, &[]);
+    // The poll's 10,000 characters are read by the Fable 5.2 reply (US$8 per million),
+    // not by the copy of the Opus 5.5 reply (US$4) written before it.
+    let claude = find(rows(&doc, "polls", 0), &[("agent", json!("claude"))]);
+    assert_eq!(claude["poll_chars"], json!(10000));
+    assert_eq!(claude["poll_usd_est"], json!(0.02));
+    assert_eq!(claude["unpriced_tokens_est"], json!(0));
+}
+
+#[test]
+fn idle_schemas_of_a_session_with_models_of_different_prices_stay_unpriced() {
+    let doc = priced(PRICED_MIXED, &[]);
+    let idle = find(
+        rows(&doc, "schemas", 0),
+        &[("tool", json!("mcp__mixed__*"))],
+    );
+    assert_eq!(idle["idle_usd_est"], json!(0.0));
+    assert_eq!(idle["unpriced_tokens_est"], idle["idle_tokens_est"]);
+    assert!(idle["idle_tokens_est"].as_u64() > Some(4000), "{idle}");
 }
 
 #[test]
