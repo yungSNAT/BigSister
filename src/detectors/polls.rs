@@ -119,7 +119,7 @@ impl Detector for Polls {
 
     fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
         for (agent, scope, class, n) in self.unread.drain(..) {
-            let mut add = |c: &mut Counts| c.poll_priced.add(n, usd_per_mtok);
+            let add = |c: &mut Counts| c.poll_priced.add(n, usd_per_mtok);
             add(self.totals.entry((agent, scope)).or_default());
             add(self.verbs.entry((agent, class)).or_default());
         }

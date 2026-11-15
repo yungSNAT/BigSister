@@ -397,8 +397,10 @@ mod tests {
             out.contains(" 3.00 ") && out.contains(" 1.20 ") && out.contains(" 0.00 "),
             "{out}"
         );
+    }
 
-        // A section with no token estimate, such as startup, is left as it was.
+    #[test]
+    fn a_rate_leaves_a_section_without_token_estimates_as_it_was() {
         let mut startup = Section {
             name: "startup",
             summary: vec![("median_first_request_tokens".to_owned(), json!(5))],

@@ -13,6 +13,21 @@ use crate::report::{Opts, Section, Table, display_path, ratio};
 use crate::scan::{Agent, Detector, Record, Session};
 use crate::shell::{normalise_path, read_targets};
 
+const COLUMNS: [&str; 12] = [
+    "agent",
+    "scope",
+    "sessions_compacted",
+    "compactions",
+    "reads",
+    "rereads",
+    "reread_chars",
+    "reread_tokens_est",
+    "reread_usd_est",
+    "unpriced_tokens_est",
+    "rereads_per_compaction",
+    "reread_share",
+];
+
 #[derive(Default, Clone, Copy)]
 struct Counts {
     sessions: u64,
@@ -126,23 +141,7 @@ impl Detector for Rereads {
     }
 
     fn section(&self, opts: &Opts) -> Section {
-        let mut table = Table::new(
-            "By agent and scope",
-            vec![
-                "agent",
-                "scope",
-                "sessions_compacted",
-                "compactions",
-                "reads",
-                "rereads",
-                "reread_chars",
-                "reread_tokens_est",
-                "reread_usd_est",
-                "unpriced_tokens_est",
-                "rereads_per_compaction",
-                "reread_share",
-            ],
-        );
+        let mut table = Table::new("By agent and scope", COLUMNS.to_vec());
         for ((agent, scope), c) in &self.totals {
             table.rows.push(vec![
                 json!(agent.name()),
