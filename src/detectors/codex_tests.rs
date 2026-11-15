@@ -860,15 +860,11 @@ fn an_untied_result_equal_to_a_tied_item_places_the_untied_command() {
         // git diff has no item and printed what git show did. Whichever of the 2 is in
         // git show's place, each command's result is XYZ, so the cell pairs by position.
         exec_at("b", &commands(&["git log", "git show", "git diff"]), T + 10),
-        ran("git log", 0, "prefixXYZ", T + 11),
+        ran("git log", 0, "ABC", T + 11),
         ran("git show", 0, "XYZ", T + 12),
         output(
             "b",
-            &[
-                (0, json!("prefixXYZ")),
-                (0, json!("XYZ")),
-                (0, json!("XYZ")),
-            ],
+            &[(0, json!("ABC")), (0, json!("XYZ")), (0, json!("XYZ"))],
         ),
     ]);
     assert_eq!(polls(&lines), (counts(1, 0, 3), json!(0)));
