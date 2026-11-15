@@ -1107,6 +1107,31 @@ const s = readFile('C:\\hub\\b.md'); await tools.apply_patch(p);"#;
     }
 
     #[test]
+    fn values_built_from_other_values_are_not_commands_or_reads() {
+        for cell in [
+            "tools.exec_command({cmd: 'cargo test ' + name});",
+            "tools.exec_command({cmd: `cargo test ${name}`});",
+            "tools.exec_command({cmd: 'git log -'.concat(n)});",
+            "tools.exec_command({cmd:\n  \"rg \"\n  + pattern, yield_time_ms: 1000});",
+            "readFile('docs/' + name); readFileSync(`${dir}`, 'utf8');",
+        ] {
+            assert!(codex_steps(cell).is_empty(), "{cell}");
+            assert!(codex_read_calls(cell).is_empty(), "{cell}");
+        }
+        // A literal that is the whole value still counts, before a comma, a closing
+        // bracket, a comment or the end of the cell; an escaped `${` is text.
+        let whole = "x({cmd: `echo \\${HOME}`, yield_time_ms: 5}); y({cmd: 'ls' /* c */});\n\
+            z({cmd: 'pwd' // c\n}); readFile('a.md', 'utf8'); w({cmd: 'git status'";
+        assert_eq!(
+            codex_steps(whole),
+            ["echo ${HOME}", "ls", "pwd", "git status"]
+                .map(|c| Step::Command(c.to_owned()))
+                .to_vec()
+        );
+        assert_eq!(codex_read_calls(whole), vec!["a.md"]);
+    }
+
+    #[test]
     fn codex_steps_keep_source_order() {
         let input = r#"await tools.apply_patch(p); await tools.exec_command({cmd: "git status"}); writeFile('x', y);"#;
         assert_eq!(
