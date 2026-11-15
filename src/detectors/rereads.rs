@@ -174,13 +174,9 @@ impl Rereads {
             for path in from_commands.chain(call.reads.iter().cloned()) {
                 reread |= self.read(s, &path, r.in_window);
             }
-            if call.exec {
-                self.codex
-                    .call(&call.call_id, reread.then(Vec::new), r.in_window);
-            } else if reread {
-                self.codex.not_paired(0, r.in_window);
-            }
-        } else if let Some(out) = codex_output(r)
+            self.codex.call(r, &call, reread.then(Vec::new));
+        } else if !self.codex.record(r)
+            && let Some(out) = codex_output(r)
             && self.codex.take(&out)
         {
             self.returned(s, out.chars);
