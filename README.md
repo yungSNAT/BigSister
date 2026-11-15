@@ -54,7 +54,7 @@ A matching checksum shows the download is intact, not who built it. To check tha
 With Rust 1.99 or later installed, this builds and installs `shaphan`:
 
 ```bash
-cargo install --locked --git https://github.com/yungSNAT/ShaphansAudit
+cargo install --locked --git https://github.com/yungSNAT/ShaphansAudit shaphansaudit
 ```
 
 To build from a clone instead, with the compiler pinned in `rust-toolchain.toml` (rustup installs it if needed):
