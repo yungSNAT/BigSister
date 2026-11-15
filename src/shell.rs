@@ -25,10 +25,11 @@ static FAIL: LazyLock<Regex> = LazyLock::new(|| {
 });
 static PASS: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)test result: ok|passed|# pass|\bok\b").expect("valid regex"));
-// shortcut: Codex cells are read with regexes, not a JavaScript parser. Any `cmd:` key
-// with a string literal counts as a command, a `cmd` built from variables is missed,
-// and calls inside strings and comments count. Strings must count: Codex passes code
-// that runs to REPL tools as a string. Patch bodies are skipped (`PATCH_BODY`).
+// shortcut: Codex cells are read with regexes, not a JavaScript parser. A `cmd:` key
+// whose value is one string literal counts as a command (`whole_literal`); a `cmd`
+// built from variables or other values is missed, and calls inside strings and
+// comments count. Strings must count: Codex passes code that runs to REPL tools as a
+// string. Patch bodies are skipped (`PATCH_BODY`).
 static CMD_LITERAL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"(?s)\bcmd["']?\s*:\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)"#)
         .expect("valid regex")
@@ -751,6 +752,7 @@ pub fn codex_steps(input: &str) -> Vec<Step> {
     let mut steps: Vec<(usize, Step)> = CMD_LITERAL
         .captures_iter(input)
         .filter_map(|c| c.get(1))
+        .filter(|m| whole_literal(input, m))
         .map(|m| (m.start(), Step::Command(js_unescape(m.as_str()))))
         .collect();
     for call in EDIT_CALLS {
@@ -763,11 +765,44 @@ pub fn codex_steps(input: &str) -> Vec<Step> {
 /// Paths a Codex `exec` cell reads with `readFile` or `readFileSync`.
 #[must_use]
 pub fn codex_read_calls(input: &str) -> Vec<String> {
+    let input = without_patch_bodies(input);
     READ_CALL
-        .captures_iter(&without_patch_bodies(input))
-        .map(|c| js_unescape(&c[1]))
+        .captures_iter(&input)
+        .filter_map(|c| c.get(1))
+        .filter(|m| whole_literal(&input, m))
+        .map(|m| js_unescape(m.as_str()))
         .filter(|p| is_literal_path(p))
         .collect()
+}
+
+/// Whether the string literal `lit` in `input` is a whole value rather than part of
+/// one built from other values: no `${}` substitution in a template literal, and
+/// nothing after it but a comma, a closing bracket, a semicolon, a comment or the end.
+/// A literal joined to a value with `+` or a method would otherwise stand for every
+/// command built from it.
+fn whole_literal(input: &str, lit: &regex::Match<'_>) -> bool {
+    let text = lit.as_str();
+    let rest = input[lit.end()..].trim_start();
+    !(text.starts_with('`') && substitutes(text))
+        && (rest.is_empty()
+            || rest.starts_with([',', ')', ']', '}', ';'])
+            || rest.starts_with("//")
+            || rest.starts_with("/*"))
+}
+
+/// Whether template literal text holds a `${` that is not escaped.
+fn substitutes(template: &str) -> bool {
+    let mut chars = template.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next();
+            }
+            '$' if chars.as_str().starts_with('{') => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The value of a JavaScript string literal, quotes included in `lit`.
@@ -1104,6 +1139,31 @@ const s = readFile('C:\\hub\\b.md'); await tools.apply_patch(p);"#;
             codex_steps(r#"tools.exec_command({"cmd": `git status`})"#),
             vec![Step::Command("git status".to_owned())]
         );
+    }
+
+    #[test]
+    fn values_built_from_other_values_are_not_commands_or_reads() {
+        for cell in [
+            "tools.exec_command({cmd: 'cargo test ' + name});",
+            "tools.exec_command({cmd: `cargo test ${name}`});",
+            "tools.exec_command({cmd: 'git log -'.concat(n)});",
+            "tools.exec_command({cmd:\n  \"rg \"\n  + pattern, yield_time_ms: 1000});",
+            "readFile('docs/' + name); readFileSync(`${dir}`, 'utf8');",
+        ] {
+            assert!(codex_steps(cell).is_empty(), "{cell}");
+            assert!(codex_read_calls(cell).is_empty(), "{cell}");
+        }
+        // A literal that is the whole value still counts, before a comma, a closing
+        // bracket, a comment or the end of the cell; an escaped `${` is text.
+        let whole = "x({cmd: `echo \\${HOME}`, yield_time_ms: 5}); y({cmd: 'ls' /* c */});\n\
+            z({cmd: 'pwd' // c\n}); readFile('a.md', 'utf8'); w({cmd: 'git status'";
+        assert_eq!(
+            codex_steps(whole),
+            ["echo ${HOME}", "ls", "pwd", "git status"]
+                .map(|c| Step::Command(c.to_owned()))
+                .to_vec()
+        );
+        assert_eq!(codex_read_calls(whole), vec!["a.md"]);
     }
 
     #[test]

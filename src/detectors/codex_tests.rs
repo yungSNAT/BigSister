@@ -861,3 +861,24 @@ fn a_tied_result_whose_end_is_printed_does_not_place_an_untied_one() {
     ]);
     assert_eq!(not_paired(&lines), (json!(1), json!(1)));
 }
+
+#[test]
+fn commands_built_from_values_are_not_polls_of_each_other() {
+    // Each cell runs `cat` on a different file; before the fix both read as `cat `.
+    let cat = |id: &str, file: &str| {
+        let cell = format!(
+            "const f = {}; text(await tools.exec_command({{cmd: 'cat ' + f}}));",
+            json!(file)
+        );
+        exec(id, &cell)
+    };
+    let lines = in_window(&[
+        exec("s", &commands(&["git status"])),
+        output("s", &[(0, json!("clean"))]),
+        cat("a", "a.md"),
+        output("a", &[(1, json!("no such file"))]),
+        cat("b", "b.md"),
+        output("b", &[(0, json!("text"))]),
+    ]);
+    assert_eq!(polls(&lines), (counts(0, 0, 0), json!(0)));
+}
