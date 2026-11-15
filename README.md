@@ -129,12 +129,12 @@ By hook name and command, most cancellations first
 | `--agent` | `all` | `claude`, `codex` or `all` |
 | `--claude-root DIR` | `~/.claude/projects` | Claude Code transcript folder |
 | `--codex-root DIR` | `~/.codex/sessions` and `~/.codex/archived_sessions` | Codex transcript folder; a given folder replaces both |
-| `--json` | off | Print one JSON object with `schema_version` 1 |
+| `--json` | off | Print one JSON object with `schema_version` 2 |
 | `--limit N` | 20 | Rows per table |
 | `--paths` | off | List the most re-read file paths |
-| `--usd-per-mtok USD` | off | Show each token estimate in US dollars at this price per million tokens (above 0, up to 1000) |
+| `--usd-per-mtok USD` | off | Price every token estimate at this one rate in US dollars per million tokens, instead of each model's bundled price (above 0, up to 1000) |
 
-Columns ending in `tokens est` (`_tokens_est` in JSON) estimate tokens as the characters beside them divided by 4, rounded up in each row, so rows need not add up to a total. With `--usd-per-mtok`, each gains a column ending in `usd est` (`_usd_est`): that estimate at the given price, rounded to cents. It prices each estimate once as uncached input, so it is an illustration, not a bill: cached re-sends cost less, and text kept in context costs again in later turns. `startup`'s recorded request tokens include cache reads, so they are not priced.
+Columns ending in `tokens est` (`_tokens_est` in JSON) estimate tokens as the characters beside them divided by 4, rounded up in each row, so rows need not add up to a total. Each is followed by a column ending in `usd est` (`_usd_est`): those characters, divided by 4, at the published price for uncached input of the model whose reply read them, rounded to cents. The prices ship with `shaphan`, read from Anthropic's and OpenAI's pricing pages on 15 November 2026, so pricing makes no network call; a model released or repriced since is not reflected. A Claude result is read by the next reply in its transcript (not a copy of an earlier reply), a Codex result by the model of its turn, and an idle tool schema by the session's replies. `unpriced tokens est` counts the part read by a model without a bundled price (such as Claude Haiku 5.5, whose price depends on the prompt's size) or by no reply, and the idle schemas of a session whose replies used models of different prices. Dollars price each estimate once as uncached input, so they are an illustration, not a bill: cached re-sends cost less, and text kept in context costs again in later turns. `--usd-per-mtok` prices every estimate at one rate instead. `startup`'s recorded request tokens include cache reads, so they are not priced.
 
 Exit codes: 0 success, 1 a runtime error such as a missing transcript folder or a bad `--since`, 2 a usage error.
 

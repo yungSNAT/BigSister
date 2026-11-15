@@ -629,7 +629,7 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[0]["files"], 3);
     assert_eq!(roots[0]["lines_skipped"], 1);
     assert_eq!(roots[1]["files"], 2);
-    assert_eq!(doc["schema_version"], 1);
+    assert_eq!(doc["schema_version"], 2);
     assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(6));
 }
 
@@ -1276,10 +1276,11 @@ fn a_rate_prices_each_token_estimate_and_nothing_else() {
             let want = (row[tokens].as_f64().unwrap() * 1000.0 / 1e6 * 100.0).round() / 100.0;
             assert_eq!(row[usd].as_f64(), Some(want), "{detector} {row}");
         }
+        // Without a rate, the fixtures name no model, so nothing is priced.
         assert!(
             rows_of(&plain, detector)
                 .iter()
-                .all(|r| r.get(usd).is_none())
+                .all(|r| r[usd] == json!(0.0) && r["unpriced_tokens_est"] == r[tokens])
         );
         let notes = priced["detectors"][detector]["notes"].to_string();
         assert!(notes.contains("not a bill"), "{detector} {notes}");
@@ -1311,4 +1312,111 @@ fn rows_of(doc: &Value, detector: &str) -> Vec<Value> {
         .iter()
         .flat_map(|t| t["rows"].as_array().expect("rows").clone())
         .collect()
+}
+
+const PRICED_CLAUDE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/priced/claude");
+const PRICED_CODEX: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/priced/codex");
+const PRICED_MIXED: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/priced-mixed/claude"
+);
+
+/// `shaphan all --json` over the priced Codex fixtures and `claude`, with `extra` options.
+fn priced(claude: &str, extra: &[&str]) -> Value {
+    let mut args = vec![
+        "all",
+        "--claude-root",
+        claude,
+        "--codex-root",
+        PRICED_CODEX,
+        "--since",
+        SINCE,
+        "--json",
+    ];
+    args.extend_from_slice(extra);
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+#[test]
+fn each_estimate_is_priced_at_the_model_that_read_it() {
+    let doc = priced(PRICED_CLAUDE, &[]);
+    let polls = rows(&doc, "polls", 0);
+    // Claude: 3 polls of 10,000 characters. The first is read by Claude Fable 5.2 at
+    // US$8 per million; the second only by a synthetic reply and a model with no
+    // bundled price; the third by no reply at all.
+    let claude = find(polls, &[("agent", json!("claude"))]);
+    assert_eq!(
+        [&claude["poll_chars"], &claude["poll_tokens_est"]],
+        [&json!(30000), &json!(7500)]
+    );
+    assert_eq!(claude["poll_usd_est"], json!(0.02));
+    assert_eq!(claude["unpriced_tokens_est"], json!(5000));
+    // Codex: 3 polls of 20,000 characters. Only the one in the GPT-6.1 Sol turn is
+    // priced (US$2 per million); the others come before any turn and in a turn whose
+    // model has no bundled price.
+    let codex = find(polls, &[("agent", json!("codex"))]);
+    assert_eq!(codex["poll_tokens_est"], json!(15000));
+    assert_eq!(codex["poll_usd_est"], json!(0.01));
+    assert_eq!(codex["unpriced_tokens_est"], json!(10000));
+    // Schemas: the idle server is read last by Claude Opus 5.5 at US$4 per million.
+    let idle = find(rows(&doc, "schemas", 0), &[("tool", json!("mcp__idle__*"))]);
+    let chars = idle["idle_chars"].as_f64().expect("idle chars");
+    assert!(chars > 19_000.0, "{idle}");
+    assert_eq!(
+        idle["idle_usd_est"].as_f64(),
+        Some((chars / 4.0 * 4.0 / 1e6 * 100.0).round() / 100.0)
+    );
+    assert_eq!(idle["unpriced_tokens_est"], json!(0));
+    // Rereads: a 40,000-character re-read read by Claude Sonnet 5.5 at US$2 per million.
+    let reread = find(rows(&doc, "rereads", 0), &[("agent", json!("claude"))]);
+    assert_eq!(reread["reread_chars"], json!(40000));
+    assert_eq!(reread["reread_usd_est"], json!(0.02));
+    assert_eq!(reread["unpriced_tokens_est"], json!(0));
+    let notes = doc["detectors"]["polls"]["notes"].to_string();
+    assert!(
+        notes.contains("15 November 2026") && notes.contains("not a bill"),
+        "{notes}"
+    );
+    assert_eq!(doc["schema_version"], 2);
+}
+
+#[test]
+fn a_given_rate_prices_every_estimate_and_leaves_none_unpriced() {
+    let doc = priced(PRICED_CLAUDE, &["--usd-per-mtok", "1000"]);
+    let claude = find(rows(&doc, "polls", 0), &[("agent", json!("claude"))]);
+    assert_eq!(claude["poll_usd_est"], json!(7.5));
+    assert_eq!(claude["unpriced_tokens_est"], json!(0));
+    let notes = doc["detectors"]["polls"]["notes"].to_string();
+    assert!(notes.contains("--usd-per-mtok"), "{notes}");
+    assert!(!notes.contains("15 November 2026"), "{notes}");
+}
+
+#[test]
+fn a_copy_of_a_reply_written_after_a_result_does_not_read_it() {
+    let doc = priced(PRICED_MIXED, &[]);
+    // The poll's 10,000 characters are read by the Fable 5.2 reply (US$8 per million),
+    // not by the copy of the Opus 5.5 reply (US$4) written before it.
+    let claude = find(rows(&doc, "polls", 0), &[("agent", json!("claude"))]);
+    assert_eq!(claude["poll_chars"], json!(10000));
+    assert_eq!(claude["poll_usd_est"], json!(0.02));
+    assert_eq!(claude["unpriced_tokens_est"], json!(0));
+}
+
+#[test]
+fn idle_schemas_of_a_session_with_models_of_different_prices_stay_unpriced() {
+    let doc = priced(PRICED_MIXED, &[]);
+    let idle = find(
+        rows(&doc, "schemas", 0),
+        &[("tool", json!("mcp__mixed__*"))],
+    );
+    assert_eq!(idle["idle_usd_est"], json!(0.0));
+    assert_eq!(idle["unpriced_tokens_est"], idle["idle_tokens_est"]);
+    assert!(idle["idle_tokens_est"].as_u64() > Some(4000), "{idle}");
+}
+
+#[test]
+fn model_ids_never_reach_the_output() {
+    assert_no_sentinel(PRICED_CLAUDE, PRICED_CODEX);
 }

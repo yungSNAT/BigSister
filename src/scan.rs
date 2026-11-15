@@ -76,6 +76,9 @@ pub trait Detector {
         false
     }
     fn end(&mut self, _s: &Session) {}
+    /// A model has read the session's context so far: its uncached input price per
+    /// million tokens, or `None` when it has no bundled price or no model did.
+    fn read_by(&mut self, _s: &Session, _usd_per_mtok: Option<f64>) {}
     fn section(&self, opts: &Opts) -> Section;
 }
 
@@ -351,6 +354,7 @@ fn scan_file(
         session,
         since,
         last_time: None,
+        codex_model: None,
         uuids: HashSet::new(),
         earlier,
         dets,
@@ -369,6 +373,12 @@ fn scan_file(
         }
     };
     feed.st.bad_lines += lines.over_long;
+    // A Codex turn's model reads its results; a Claude result no reply read stays
+    // unpriced.
+    if agent == Agent::Codex {
+        let price = feed.codex_model.flatten();
+        feed.read_by(price);
+    }
     for &i in active {
         feed.dets[i].end(&session);
     }
@@ -396,6 +406,8 @@ struct Feed<'a> {
     session: Session,
     since: DateTime<Utc>,
     last_time: Option<DateTime<Utc>>,
+    /// The price of the model of the latest Codex `turn_context`, once one is seen.
+    codex_model: Option<Option<f64>>,
     /// The `uuid` of each Claude record parsed so far in the file.
     uuids: HashSet<String>,
     /// The `uuid` of each Claude record parsed in an earlier file.
@@ -416,13 +428,14 @@ impl Feed<'_> {
             self.st.bad_lines += 1;
             return;
         }
+        let reply = self.model(line);
         let wanting: Vec<usize> = self
             .active
             .iter()
             .copied()
             .filter(|&i| self.dets[i].wants(&self.session, line))
             .collect();
-        if wanting.is_empty() {
+        if wanting.is_empty() && reply.is_none() {
             if let Some(t) = raw_timestamp(line) {
                 self.last_time = Some(t);
             }
@@ -432,17 +445,14 @@ impl Feed<'_> {
             self.st.bad_lines += 1;
             return;
         };
-        // Claude Code can write a record again later in its file, with the same uuid. A
-        // resumed session's file starts with copies of the earlier file's records; such a
-        // copy still builds the session's state but counts nowhere.
-        let mut copied = false;
-        if self.session.agent == Agent::Claude
-            && let Some(uuid) = value.get("uuid").and_then(Value::as_str)
+        let Some(copied) = self.copied(&value) else {
+            return;
+        };
+        // A reply reads the results before it; a copy of one reads nothing.
+        if let Some(price) = reply
+            && !copied
         {
-            if !self.uuids.insert(uuid.to_owned()) {
-                return;
-            }
-            copied = self.earlier.contains(uuid);
+            self.read_by(price);
         }
         if let Some(t) = value
             .get("timestamp")
@@ -457,6 +467,71 @@ impl Feed<'_> {
         };
         for i in wanting {
             self.dets[i].record(&self.session, &rec);
+        }
+    }
+}
+
+impl Feed<'_> {
+    /// Whether a parsed record copies an earlier file's record, or `None` when it
+    /// repeats one of this file's. Claude Code can write a record again later in its
+    /// file, with the same uuid; such a record counts nowhere. A resumed session's file
+    /// starts with copies of the earlier file's records; such a copy still builds the
+    /// session's state but counts nowhere.
+    fn copied(&mut self, value: &Value) -> Option<bool> {
+        if self.session.agent != Agent::Claude {
+            return Some(false);
+        }
+        let Some(uuid) = value.get("uuid").and_then(Value::as_str) else {
+            return Some(false);
+        };
+        if !self.uuids.insert(uuid.to_owned()) {
+            return None;
+        }
+        Some(self.earlier.contains(uuid))
+    }
+
+    fn read_by(&mut self, usd_per_mtok: Option<f64>) {
+        for &i in self.active {
+            self.dets[i].read_by(&self.session, usd_per_mtok);
+        }
+    }
+
+    /// Finds where a model reads what came before. A new Codex turn ends the last
+    /// turn, whose model read that turn's results; the detectors are told here. A
+    /// Claude reply reads the results before it: its model's price, if bundled, is
+    /// returned for `line` to pass on once the record is known to be no copy.
+    ///
+    /// shortcut: a Claude reply is found by `"message":{"model":"`, as Claude Code writes
+    /// `model` first in an assistant message, so a reply written otherwise reads nothing
+    /// and its results stay unpriced; parsing every line would be the upgrade, at
+    /// several times the cost. Each reply's uuid is kept to find copies, which adds
+    /// replies no detector reads to the uuids held for the scan.
+    fn model(&mut self, line: &str) -> Option<Option<f64>> {
+        match self.session.agent {
+            Agent::Claude => {
+                const KEY: &str = "\"message\":{\"model\":\"";
+                let at = line.find(KEY)?;
+                let rest = &line[at + KEY.len()..];
+                let model = rest.split('"').next().unwrap_or("");
+                // Claude Code writes a synthetic reply itself; no model read anything.
+                (model != "<synthetic>").then(|| crate::prices::usd_per_mtok(model))
+            }
+            Agent::Codex => {
+                if !line.contains("\"type\":\"turn_context\"") {
+                    return None;
+                }
+                let v = serde_json::from_str::<Value>(line).ok()?;
+                if v.get("type").and_then(Value::as_str) != Some("turn_context") {
+                    return None;
+                }
+                let price = v
+                    .pointer("/payload/model")
+                    .and_then(Value::as_str)
+                    .and_then(crate::prices::usd_per_mtok);
+                let ended = self.codex_model.replace(price).flatten();
+                self.read_by(ended);
+                None
+            }
         }
     }
 }
