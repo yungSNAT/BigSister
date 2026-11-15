@@ -89,35 +89,48 @@ fn usd_column(tokens: &str) -> Option<&'static str> {
     }
 }
 
-/// Adds a dollar column after each token estimate column of `section`: the estimate at
-/// `usd_per_mtok` US dollars per million tokens, rounded to cents, with a note on what
-/// that figure is and is not. Measured tokens, such as startup's, are left unpriced.
+/// Prices each token estimate of `section` at `usd_per_mtok` US dollars per million
+/// tokens, the rate given with `--usd-per-mtok`, instead of each model's bundled price:
+/// its dollar column becomes the estimate at that rate, rounded to cents, no token is
+/// left unpriced, and the note says so. Measured tokens, such as startup's, are left
+/// unpriced.
 pub fn price(section: &mut Section, usd_per_mtok: f64) {
     let mut priced = false;
     for t in &mut section.tables {
-        for i in (0..t.columns.len()).rev() {
-            let column = t.columns[i];
-            debug_assert!(
-                !column.ends_with("_tokens_est") || usd_column(column).is_some(),
-                "{column} has no dollar column"
-            );
-            let Some(usd) = usd_column(column) else {
-                continue;
-            };
-            t.columns.insert(i + 1, usd);
+        let at = |name: &str| t.columns.iter().position(|c| *c == name);
+        let unpriced = at("unpriced_tokens_est");
+        let pairs: Vec<(usize, usize)> = t
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| {
+                debug_assert!(
+                    !c.ends_with("_tokens_est")
+                        || *c == "unpriced_tokens_est"
+                        || usd_column(c).and_then(at).is_some(),
+                    "{c} has no dollar column"
+                );
+                Some((i, usd_column(c).and_then(at)?))
+            })
+            .collect();
+        for (tokens, usd) in pairs {
             for row in &mut t.rows {
                 let dollars = row
-                    .get(i)
+                    .get(tokens)
                     .and_then(Value::as_f64)
                     .map_or(Value::Null, |tokens| {
                         json!((tokens * usd_per_mtok / 1e4).round() / 100.0)
                     });
-                row.insert(i + 1, dollars);
+                row[usd] = dollars;
+                if let Some(u) = unpriced {
+                    row[u] = json!(0);
+                }
             }
             priced = true;
         }
     }
     if priced {
+        section.notes.retain(|n| n != crate::prices::NOTE);
         section.notes.push(format!(
             "Dollars (usd est) price each token estimate once at US${usd_per_mtok} per million tokens, the rate given with --usd-per-mtok, as uncached input: an illustration, not a bill. Cached re-sends cost less, text kept in context costs again in later turns, and the model's own prices and cache use are not read."
         ));
@@ -282,7 +295,7 @@ pub fn json(meta: &Meta<'_>, sections: &[Section]) -> String {
         detectors.insert(s.name.to_owned(), section_json(s));
     }
     let doc = json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "tool": "shaphan",
         "version": env!("CARGO_PKG_VERSION"),
         "since": meta.since.to_rfc3339(),
@@ -334,26 +347,44 @@ mod tests {
     }
 
     #[test]
-    fn pricing_adds_dollars_beside_each_token_estimate() {
-        let mut table = Table::new("t", vec!["agent", "poll_chars", "poll_tokens_est"]);
+    fn a_rate_reprices_each_token_estimate_and_leaves_none_unpriced() {
+        let columns = vec![
+            "agent",
+            "poll_chars",
+            "poll_tokens_est",
+            "poll_usd_est",
+            "unpriced_tokens_est",
+        ];
+        let mut table = Table::new("t", columns.clone());
         table.rows = vec![
-            vec![json!("codex"), json!(4_000_000), json!(1_000_000)],
-            vec![json!("claude"), json!(1_600_000), json!(400_000)],
-            vec![json!("claude"), json!(3), json!(1)],
+            vec![
+                json!("codex"),
+                json!(4_000_000),
+                json!(1_000_000),
+                json!(0.5),
+                json!(5),
+            ],
+            vec![
+                json!("claude"),
+                json!(1_600_000),
+                json!(400_000),
+                json!(0.0),
+                json!(400_000),
+            ],
+            vec![json!("claude"), json!(3), json!(1), json!(0.0), json!(1)],
         ];
         let mut section = Section {
             name: "polls",
             tables: vec![table],
+            notes: vec![crate::prices::NOTE.to_owned()],
             ..Section::default()
         };
         price(&mut section, 3.0);
         let t = &section.tables[0];
-        assert_eq!(
-            t.columns,
-            ["agent", "poll_chars", "poll_tokens_est", "poll_usd_est"]
-        );
+        assert_eq!(t.columns, columns);
         let usd: Vec<&Value> = t.rows.iter().map(|r| &r[3]).collect();
         assert_eq!(usd, [&json!(3.0), &json!(1.2), &json!(0.0)]);
+        assert!(t.rows.iter().all(|r| r[4] == json!(0)));
         assert_eq!(section.notes.len(), 1);
         assert!(
             section.notes[0].contains("US$3 per million"),
@@ -363,7 +394,7 @@ mod tests {
         let mut out = String::new();
         render_table(&mut out, t);
         assert!(
-            out.contains(" 3.00\n") && out.contains(" 1.20\n") && out.contains(" 0.00\n"),
+            out.contains(" 3.00 ") && out.contains(" 1.20 ") && out.contains(" 0.00 "),
             "{out}"
         );
 

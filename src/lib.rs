@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod detectors;
+pub mod prices;
 pub mod programs;
 pub mod report;
 pub mod scan;

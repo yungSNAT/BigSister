@@ -9,6 +9,7 @@ use super::{
     ClaudeCalls, CodexCalls, EST_NOTE, codex_call, codex_call_line, codex_output, est_tokens,
     input_str, name_of, result_chars, tool_results, tool_uses,
 };
+use crate::prices::{self, Priced};
 use crate::programs::Programs;
 use crate::report::{Opts, Section, Table};
 use crate::scan::{Agent, Detector, Record, Session};
@@ -22,26 +23,32 @@ struct Counts {
     polls: u64,
     polls_after_failure: u64,
     poll_chars: u64,
+    /// The part of `poll_chars` a priced model read.
+    poll_priced: Priced,
     reruns_after_edit: u64,
 }
 
 impl Counts {
     /// The columns every row shares, after those that key it.
-    const COLUMNS: [&'static str; 5] = [
+    const COLUMNS: [&'static str; 7] = [
         "polls",
         "polls_after_failure",
         "poll_chars",
         "poll_tokens_est",
+        "poll_usd_est",
+        "unpriced_tokens_est",
         "reruns_after_edit",
     ];
 
     /// The cells under `COLUMNS`.
-    fn cells(&self) -> [Value; 5] {
+    fn cells(&self) -> [Value; 7] {
         [
             json!(self.polls),
             json!(self.polls_after_failure),
             json!(self.poll_chars),
             json!(est_tokens(self.poll_chars)),
+            json!(self.poll_priced.usd()),
+            json!(self.poll_priced.unpriced_tokens(self.poll_chars)),
             json!(self.reruns_after_edit),
         ]
     }
@@ -79,6 +86,8 @@ pub struct Polls {
     /// By command, its latest run's awaited result or failure. A command whose latest
     /// run succeeded, or whose result will never be read, has no entry.
     latest: HashMap<String, Latest>,
+    /// Poll characters of this file that no model has read yet, with their rows.
+    unread: Vec<(Agent, &'static str, String, u64)>,
     totals: BTreeMap<(Agent, &'static str), Counts>,
     verbs: BTreeMap<(Agent, String), Counts>,
     programs: Rc<Programs>,
@@ -101,10 +110,19 @@ impl Detector for Polls {
         self.edits = 0;
         self.claude.clear();
         self.latest.clear();
+        self.unread.clear();
     }
 
     fn end(&mut self, _s: &Session) {
         self.codex.end();
+    }
+
+    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
+        for (agent, scope, class, n) in self.unread.drain(..) {
+            let mut add = |c: &mut Counts| c.poll_priced.add(n, usd_per_mtok);
+            add(self.totals.entry((agent, scope)).or_default());
+            add(self.verbs.entry((agent, class)).or_default());
+        }
     }
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
@@ -187,6 +205,7 @@ impl Detector for Polls {
                 "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
                 "Polls after failure repeat a command whose previous run's result was read before the repeat and marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results, for Codex only of what the exec cell printed of them. A Codex command's result is the CommandExecution record Codex wrote as it ended, tied to the command by its text; a command no record ties takes the result its exec cell printed in its place only when the cell printed one result per command and has one command, Codex wrote no such record whilst the cell ran, or it is the one command left untied and each tied command's result is printed whole in its own place; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the calls in the window whose results could not all be paired: a function_call, whose output is not read, or an exec cell that had no call id, whose call id another exec cell in the session had, whose output never came or with a command neither tied nor paired. Codex commands not paired counts those commands, whose results were not judged.".to_owned(),
                 EST_NOTE.to_owned(),
+                prices::NOTE.to_owned(),
             ],
         }
     }
@@ -290,7 +309,11 @@ impl Polls {
                 .entry((s.agent, s.scope()))
                 .or_default()
                 .poll_chars += n;
-            self.verbs.entry((s.agent, class)).or_default().poll_chars += n;
+            self.verbs
+                .entry((s.agent, class.clone()))
+                .or_default()
+                .poll_chars += n;
+            self.unread.push((s.agent, s.scope(), class, n));
         }
         if self.latest.get(&run.command) != Some(&Latest::Awaited(run.run)) {
             return;

@@ -6,10 +6,11 @@ use serde_json::{Value, json};
 
 use super::startup::loaded_tools;
 use super::{EST_NOTE, est_tokens, name_of, tool_uses};
+use crate::prices::{self, Priced};
 use crate::report::{Opts, Section, Table, median};
 use crate::scan::{Agent, Detector, Record, Session};
 
-const COLUMNS: [&str; 9] = [
+const COLUMNS: [&str; 11] = [
     "scope",
     "tool",
     "tools",
@@ -19,6 +20,8 @@ const COLUMNS: [&str; 9] = [
     "median_chars",
     "idle_chars",
     "idle_tokens_est",
+    "idle_usd_est",
+    "unpriced_tokens_est",
 ];
 
 #[derive(Default)]
@@ -26,6 +29,8 @@ struct Current {
     loaded: BTreeMap<String, u64>,
     called: BTreeMap<String, u64>,
     in_window: bool,
+    /// The price of the model of the session's latest reply, if any.
+    model: Option<f64>,
 }
 
 #[derive(Default)]
@@ -36,6 +41,8 @@ struct Group {
     calls: u64,
     chars: Vec<u64>,
     idle_chars: u64,
+    /// The part of `idle_chars` a priced model read.
+    idle_priced: Priced,
 }
 
 /// Loaded-against-called counts, by tool or MCP server.
@@ -69,6 +76,10 @@ impl Detector for Schemas {
 
     fn begin(&mut self, _s: &Session) {
         self.cur = Current::default();
+    }
+
+    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
+        self.cur.model = usd_per_mtok;
     }
 
     fn record(&mut self, _s: &Session, r: &Record<'_>) {
@@ -114,6 +125,7 @@ impl Detector for Schemas {
                 g.sessions_called += 1;
             } else {
                 g.idle_chars += chars;
+                g.idle_priced.add(chars, cur.model);
             }
         }
     }
@@ -135,6 +147,8 @@ impl Detector for Schemas {
                         json!(median(&g.chars)),
                         json!(g.idle_chars),
                         json!(est_tokens(g.idle_chars)),
+                        json!(g.idle_priced.usd()),
+                        json!(g.idle_priced.unpriced_tokens(g.idle_chars)),
                     ],
                 )
             })
@@ -157,6 +171,8 @@ impl Detector for Schemas {
             notes: vec![
                 "Idle characters are schema characters loaded in sessions that never called the tool.".to_owned(),
                 EST_NOTE.to_owned(),
+                "Idle characters are priced at the model of the session's last reply.".to_owned(),
+                prices::NOTE.to_owned(),
                 "Tools sent with defer_loading are not counted as loaded, and a tool only ever sent that way gets no row.".to_owned(),
             ],
         }

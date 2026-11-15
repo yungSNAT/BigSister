@@ -8,6 +8,7 @@ use super::{
     ClaudeCalls, CodexCalls, EST_NOTE, codex_call, codex_call_line, codex_output, est_tokens,
     input_str, name_of, result_chars, tool_results, tool_uses,
 };
+use crate::prices::{self, Priced};
 use crate::report::{Opts, Section, Table, display_path, ratio};
 use crate::scan::{Agent, Detector, Record, Session};
 use crate::shell::{normalise_path, read_targets};
@@ -19,6 +20,8 @@ struct Counts {
     reads: u64,
     rereads: u64,
     reread_chars: u64,
+    /// The part of `reread_chars` a priced model read.
+    reread_priced: Priced,
 }
 
 /// Re-reads per compaction, for both agents.
@@ -34,6 +37,8 @@ pub struct Rereads {
     codex: CodexCalls<()>,
     totals: BTreeMap<(Agent, &'static str), Counts>,
     paths: HashMap<String, u64>,
+    /// Re-read characters of this file that no model has read yet, with their rows.
+    unread: Vec<(Agent, &'static str, u64)>,
 }
 
 impl Detector for Rereads {
@@ -61,6 +66,14 @@ impl Detector for Rereads {
         self.current.clear();
         self.compacted_in_window = false;
         self.claude.clear();
+        self.unread.clear();
+    }
+
+    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
+        for (agent, scope, n) in self.unread.drain(..) {
+            let c = self.totals.entry((agent, scope)).or_default();
+            c.reread_priced.add(n, usd_per_mtok);
+        }
     }
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
@@ -124,6 +137,8 @@ impl Detector for Rereads {
                 "rereads",
                 "reread_chars",
                 "reread_tokens_est",
+                "reread_usd_est",
+                "unpriced_tokens_est",
                 "rereads_per_compaction",
                 "reread_share",
             ],
@@ -138,6 +153,8 @@ impl Detector for Rereads {
                 json!(c.rereads),
                 json!(c.reread_chars),
                 json!(est_tokens(c.reread_chars)),
+                json!(c.reread_priced.usd()),
+                json!(c.reread_priced.unpriced_tokens(c.reread_chars)),
                 ratio(c.rereads, c.compactions),
                 ratio(c.rereads, c.reads),
             ]);
@@ -160,6 +177,7 @@ impl Detector for Rereads {
                 "Reread share divides re-reads by every read in the window, in compacted sessions or not.".to_owned(),
                 "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed; Codex outputs not paired counts the calls in the window that re-read but were a function_call, whose output is not read, or an exec cell that had no call id, shared it with another exec cell in the session or whose output never came.".to_owned(),
                 EST_NOTE.to_owned(),
+                prices::NOTE.to_owned(),
             ],
         }
     }
@@ -201,6 +219,7 @@ impl Rereads {
             .entry((s.agent, s.scope()))
             .or_default()
             .reread_chars += size;
+        self.unread.push((s.agent, s.scope(), size));
     }
 
     /// Notes one read and says whether it is a re-read counted in the window.

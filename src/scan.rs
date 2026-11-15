@@ -76,6 +76,9 @@ pub trait Detector {
         false
     }
     fn end(&mut self, _s: &Session) {}
+    /// A model has read the session's context so far: its uncached input price per
+    /// million tokens, or `None` when it has no bundled price or no model did.
+    fn read_by(&mut self, _s: &Session, _usd_per_mtok: Option<f64>) {}
     fn section(&self, opts: &Opts) -> Section;
 }
 
@@ -351,6 +354,7 @@ fn scan_file(
         session,
         since,
         last_time: None,
+        codex_model: None,
         uuids: HashSet::new(),
         earlier,
         dets,
@@ -369,6 +373,12 @@ fn scan_file(
         }
     };
     feed.st.bad_lines += lines.over_long;
+    // A Codex turn's model reads its results; a Claude result no reply read stays
+    // unpriced.
+    if agent == Agent::Codex {
+        let price = feed.codex_model.flatten();
+        feed.read_by(price);
+    }
     for &i in active {
         feed.dets[i].end(&session);
     }
@@ -396,6 +406,8 @@ struct Feed<'a> {
     session: Session,
     since: DateTime<Utc>,
     last_time: Option<DateTime<Utc>>,
+    /// The price of the model of the latest Codex `turn_context`, once one is seen.
+    codex_model: Option<Option<f64>>,
     /// The `uuid` of each Claude record parsed so far in the file.
     uuids: HashSet<String>,
     /// The `uuid` of each Claude record parsed in an earlier file.
@@ -416,6 +428,7 @@ impl Feed<'_> {
             self.st.bad_lines += 1;
             return;
         }
+        self.model(line);
         let wanting: Vec<usize> = self
             .active
             .iter()
@@ -457,6 +470,56 @@ impl Feed<'_> {
         };
         for i in wanting {
             self.dets[i].record(&self.session, &rec);
+        }
+    }
+}
+
+impl Feed<'_> {
+    fn read_by(&mut self, usd_per_mtok: Option<f64>) {
+        for &i in self.active {
+            self.dets[i].read_by(&self.session, usd_per_mtok);
+        }
+    }
+
+    /// Tells the detectors when a model reads what came before: a Claude reply, which
+    /// reads the results before it, or a new Codex turn, whose start ends the last
+    /// turn, whose model read that turn's results.
+    ///
+    /// shortcut: a Claude reply is found by `"message":{"model":"`, as Claude Code writes
+    /// `model` first in an assistant message, so a reply written otherwise reads nothing
+    /// and its results stay unpriced; parsing every line would be the upgrade, at
+    /// several times the cost.
+    fn model(&mut self, line: &str) {
+        match self.session.agent {
+            Agent::Claude => {
+                const KEY: &str = "\"message\":{\"model\":\"";
+                let Some(at) = line.find(KEY) else {
+                    return;
+                };
+                let rest = &line[at + KEY.len()..];
+                let model = rest.split('"').next().unwrap_or("");
+                // Claude Code writes a synthetic reply itself; no model read anything.
+                if model != "<synthetic>" {
+                    self.read_by(crate::prices::usd_per_mtok(model));
+                }
+            }
+            Agent::Codex => {
+                if !line.contains("\"type\":\"turn_context\"") {
+                    return;
+                }
+                let Ok(v) = serde_json::from_str::<Value>(line) else {
+                    return;
+                };
+                if v.get("type").and_then(Value::as_str) != Some("turn_context") {
+                    return;
+                }
+                let price = v
+                    .pointer("/payload/model")
+                    .and_then(Value::as_str)
+                    .and_then(crate::prices::usd_per_mtok);
+                let ended = self.codex_model.replace(price).flatten();
+                self.read_by(ended);
+            }
         }
     }
 }
