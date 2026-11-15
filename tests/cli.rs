@@ -1264,7 +1264,7 @@ fn roots_no_detector_reads_are_left_out_and_cut_lines_still_count() {
 #[test]
 fn a_rate_prices_each_token_estimate_and_nothing_else() {
     let plain = report("all", &[]);
-    let priced = report("all", &["--usd-per-mtok", "2500"]);
+    let priced = report("all", &["--usd-per-mtok", "1000"]);
     for (detector, tokens, usd) in [
         ("polls", "poll_tokens_est", "poll_usd_est"),
         ("rereads", "reread_tokens_est", "reread_usd_est"),
@@ -1273,7 +1273,7 @@ fn a_rate_prices_each_token_estimate_and_nothing_else() {
         let rows = rows(&priced, detector, 0);
         assert!(!rows.is_empty(), "{detector}");
         for row in rows {
-            let want = (row[tokens].as_f64().unwrap() * 2500.0 / 1e6 * 100.0).round() / 100.0;
+            let want = (row[tokens].as_f64().unwrap() * 1000.0 / 1e6 * 100.0).round() / 100.0;
             assert_eq!(row[usd].as_f64(), Some(want), "{detector} {row}");
         }
         assert!(
