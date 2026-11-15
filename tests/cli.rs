@@ -1290,9 +1290,13 @@ fn a_rate_prices_each_token_estimate_and_nothing_else() {
         plain["detectors"]["startup"]
     );
 
-    let (code, text, _) = run(&fixture_args("polls", &["--usd-per-mtok", "3"]));
+    let (code, text, stderr) = run(&fixture_args("polls", &["--usd-per-mtok", "3"]));
     assert_eq!(code, 0);
     assert!(text.contains("poll usd est"), "{text}");
+    // The option is global, so it may also come before the subcommand.
+    let mut first = vec!["--usd-per-mtok", "3"];
+    first.extend(fixture_args("polls", &[]));
+    assert_eq!(run(&first), (0, text, stderr));
     for bad in ["0", "-1", "NaN", "inf", "1001", "x"] {
         let (code, _, stderr) = run(&fixture_args("polls", &["--usd-per-mtok", bad]));
         assert_eq!(code, 2, "{bad}: {stderr}");
