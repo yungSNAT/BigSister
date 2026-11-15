@@ -29,8 +29,9 @@ struct Current {
     loaded: BTreeMap<String, u64>,
     called: BTreeMap<String, u64>,
     in_window: bool,
-    /// The price of the model of the session's latest reply, if any.
-    model: Option<f64>,
+    /// The price of the models of the session's replies, once one is seen: `None`
+    /// inside when a model has no bundled price or 2 models' prices differ.
+    model: Option<Option<f64>>,
 }
 
 #[derive(Default)]
@@ -79,7 +80,8 @@ impl Detector for Schemas {
     }
 
     fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
-        self.cur.model = usd_per_mtok;
+        let same = self.cur.model.is_none_or(|m| m == usd_per_mtok);
+        self.cur.model = Some(usd_per_mtok.filter(|_| same));
     }
 
     fn record(&mut self, _s: &Session, r: &Record<'_>) {
@@ -125,7 +127,7 @@ impl Detector for Schemas {
                 g.sessions_called += 1;
             } else {
                 g.idle_chars += chars;
-                g.idle_priced.add(chars, cur.model);
+                g.idle_priced.add(chars, cur.model.flatten());
             }
         }
     }
@@ -171,7 +173,7 @@ impl Detector for Schemas {
             notes: vec![
                 "Idle characters are schema characters loaded in sessions that never called the tool.".to_owned(),
                 EST_NOTE.to_owned(),
-                "Idle characters are priced at the model of the session's last reply.".to_owned(),
+                "Idle characters are priced at the model of the session's replies, and stay unpriced when its replies' models differ in price.".to_owned(),
                 prices::NOTE.to_owned(),
                 "Tools sent with defer_loading are not counted as loaded, and a tool only ever sent that way gets no row.".to_owned(),
             ],
