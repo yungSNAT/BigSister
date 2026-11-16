@@ -423,6 +423,7 @@ dependencies = [
  "csv",
  "regex",
  "ruzstd",
+ "serde",
  "serde_json",
 ]
 

@@ -30,7 +30,7 @@ struct Current {
     called: BTreeMap<String, u64>,
     in_window: bool,
     /// The price of the models of the session's replies, once one is seen: `None`
-    /// inside when a model has no bundled price or 2 models' prices differ.
+    /// inside when a model has no price or 2 models' prices differ.
     model: Option<Option<f64>>,
 }
 
