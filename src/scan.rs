@@ -514,7 +514,8 @@ impl Feed<'_> {
                 let rest = &line[at + KEY.len()..];
                 let model = rest.split('"').next().unwrap_or("");
                 // Claude Code writes a synthetic reply itself; no model read anything.
-                (model != "<synthetic>").then(|| crate::prices::usd_per_mtok(model))
+                (model != "<synthetic>")
+                    .then(|| crate::prices::usd_per_mtok(model, || prompt_tokens(line)))
             }
             Agent::Codex => {
                 if !line.contains("\"type\":\"turn_context\"") {
@@ -527,13 +528,20 @@ impl Feed<'_> {
                 let price = v
                     .pointer("/payload/model")
                     .and_then(Value::as_str)
-                    .and_then(crate::prices::usd_per_mtok);
+                    .and_then(|model| crate::prices::usd_per_mtok(model, || None));
                 let ended = self.codex_model.replace(price).flatten();
                 self.read_by(ended);
                 None
             }
         }
     }
+}
+
+/// The prompt a Claude reply was sent with, in tokens, as
+/// [`crate::detectors::startup::input_tokens`] counts it. Parses the line, so it is
+/// asked for only by a model priced by prompt size.
+fn prompt_tokens(line: &str) -> Option<u64> {
+    crate::detectors::startup::input_tokens(&serde_json::from_str(line).ok()?)
 }
 
 /// A record's top-level `timestamp`, read without parsing the line: Codex writes
