@@ -191,8 +191,9 @@ fn scan_files(
 }
 
 /// Reads the OpenCode sessions in `root`'s `opencode.db`, each as one transcript. A
-/// folder without the file holds none. A database that cannot be read counts as one
-/// unreadable file, and none of its sessions are read.
+/// folder without the file holds none. A database that cannot be read, or whose
+/// presence cannot be checked, counts as one unreadable file, and none of its sessions
+/// are read.
 fn scan_opencode(
     root: &Path,
     since: DateTime<Utc>,
@@ -202,7 +203,7 @@ fn scan_opencode(
     earlier: &mut Earlier,
 ) {
     let db = root.join("opencode.db");
-    if !db.is_file() {
+    if std::fs::metadata(&db).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) {
         return;
     }
     let Ok(sessions) = crate::opencode::read(&db, since) else {

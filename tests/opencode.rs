@@ -176,6 +176,14 @@ fn sessions(conn: &Connection) {
 /// A folder holding an `opencode.db` with the sessions, and the open connection that
 /// wrote it in WAL mode, as OpenCode keeps its database whilst it runs.
 fn database(name: &str) -> (PathBuf, Connection) {
+    let (dir, conn) = empty(name);
+    sessions(&conn);
+    (dir, conn)
+}
+
+/// A folder holding an `opencode.db` with OpenCode's tables and no session, and the open
+/// connection that wrote it in WAL mode.
+fn empty(name: &str) -> (PathBuf, Connection) {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("folder");
@@ -183,7 +191,6 @@ fn database(name: &str) -> (PathBuf, Connection) {
     conn.pragma_update(None, "journal_mode", "WAL")
         .expect("WAL");
     conn.execute_batch(SCHEMA).expect("schema");
-    sessions(&conn);
     (dir, conn)
 }
 
@@ -287,12 +294,19 @@ fn opencode_sessions_feed_rereads_and_tools() {
     );
 }
 
-/// The files in `dir`, by name, with their bytes.
-fn files(dir: &Path) -> Vec<(String, Vec<u8>)> {
+/// The files in `dir`, by name, with their bytes and modification times.
+fn files(dir: &Path) -> Vec<(String, Vec<u8>, std::time::SystemTime)> {
     let mut out: Vec<_> = std::fs::read_dir(dir)
         .expect("folder")
         .map(|e| e.expect("entry").path())
-        .map(|p| (p.display().to_string(), std::fs::read(&p).expect("read")))
+        .map(|p| {
+            let modified = std::fs::metadata(&p).and_then(|m| m.modified());
+            (
+                p.display().to_string(),
+                std::fs::read(&p).expect("read"),
+                modified.expect("time"),
+            )
+        })
         .collect();
     out.sort();
     out
@@ -410,4 +424,193 @@ fn a_database_missing_a_table_counts_as_unreadable_with_no_sessions() {
         "{}",
         doc["detectors"]["polls"]
     );
+}
+
+/// Whilst OpenCode runs, the database, its log and the log's index are read and none of
+/// them is written, not even the index's time.
+#[test]
+fn a_live_database_is_read_without_changing_its_log_or_index() {
+    let (dir, _writer) = database("opencode-live");
+    let before = files(&dir);
+    assert_eq!(
+        before.len(),
+        3,
+        "{:?}",
+        before.iter().map(|f| &f.0).collect::<Vec<_>>()
+    );
+    let (stdout, _) = report(&dir, &["--json"]);
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(doc["roots"][0]["files"], json!(2), "{}", doc["roots"]);
+    assert!(files(&dir) == before, "the database folder changed");
+}
+
+/// `%` and `#` in the folder's name are escaped in the URI SQLite opens, so the database
+/// read is the one in that folder.
+#[test]
+fn a_folder_name_with_uri_characters_is_read() {
+    let (dir, writer) = database("opencode-a%25#b");
+    drop(writer);
+    let (stdout, _) = report(&dir, &["--json"]);
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(
+        [&doc["roots"][0]["files"], &doc["roots"][0]["unreadable"]],
+        [&json!(2), &json!(0)],
+        "{}",
+        doc["roots"]
+    );
+}
+
+/// On Unix, `\` is a character of a folder's name: the database in `a\b` is read, not
+/// the one in `a/b`, which holds no session.
+#[cfg(unix)]
+#[test]
+fn a_backslash_in_a_unix_folder_name_is_kept() {
+    let (decoy, decoy_writer) = empty("opencode-bs/x");
+    drop(decoy_writer);
+    let (dir, writer) = database("opencode-bs\\x");
+    drop(writer);
+    assert!(decoy.join("opencode.db").exists());
+    let (stdout, _) = report(&dir, &["--json"]);
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(doc["roots"][0]["files"], json!(2), "{}", doc["roots"]);
+}
+
+/// A database whose presence cannot be checked counts as one unreadable file, not as
+/// no database.
+#[cfg(unix)]
+#[test]
+fn a_database_that_cannot_be_checked_counts_as_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, writer) = database("opencode-denied");
+    drop(writer);
+    let set = |mode| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode));
+    set(0o000).expect("deny");
+    let denied = std::fs::metadata(dir.join("opencode.db")).is_err();
+    let root = dir.to_str().expect("UTF-8 path");
+    let out = run(&[
+        "all",
+        "--agent",
+        "opencode",
+        "--opencode-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    set(0o755).expect("allow");
+    if !denied {
+        // Running as root, which no permission denies.
+        return;
+    }
+    let doc: Value = serde_json::from_str(&out.1).expect("valid JSON");
+    assert_eq!(
+        [&doc["roots"][0]["files"], &doc["roots"][0]["unreadable"]],
+        [&json!(1), &json!(1)],
+        "{}",
+        doc["roots"]
+    );
+}
+
+/// A report over one main session with `messages` in a database of its own.
+fn one_session(name: &str, messages: &Messages) -> (String, Value) {
+    let (dir, writer) = empty(name);
+    add_session(&writer, "ses_x", None, messages);
+    drop(writer);
+    let (stdout, _) = report(&dir, &["--json"]);
+    let doc = serde_json::from_str(&stdout).expect("valid JSON");
+    (stdout, doc)
+}
+
+/// Reads of one file at 3 offsets, each failing, are 3 different calls: 3 errors and
+/// no retry churn.
+#[test]
+fn reads_differing_only_in_offset_are_different_calls() {
+    let read = |call: &str, offset: u64| {
+        tool(
+            call,
+            "read",
+            json!({"filePath": "/w/b.rs", "offset": offset}),
+            Some(("no", true)),
+        )
+    };
+    let messages: Messages = vec![(
+        "assistant",
+        vec![
+            start(),
+            read("r1", 1),
+            finish(),
+            start(),
+            read("r2", 2),
+            finish(),
+            start(),
+            read("r3", 3),
+            finish(),
+        ],
+    )];
+    let (_, doc) = one_session("opencode-offsets", &messages);
+    let reads = row(&doc, "tools", &[("agent", "opencode"), ("tool", "Read")]);
+    assert_eq!(
+        [&reads["calls"], &reads["errors"]],
+        [&json!(3), &json!(3)],
+        "{reads}"
+    );
+    let summary = &doc["detectors"]["tools"]["summary"];
+    assert_eq!(summary["retry_churn_calls"], json!(0), "{summary}");
+}
+
+/// Files a call attached count as images and documents; their addresses never print.
+#[test]
+fn attached_files_count_as_images_and_documents() {
+    let mut read = tool(
+        "a1",
+        "read",
+        json!({"filePath": "/w/c.png"}),
+        Some(("ok", false)),
+    );
+    read["state"]["attachments"] = json!([
+        {"type": "file", "mime": "image/png", "url": "data:image/png;base64,sentinel"},
+        {"type": "file", "mime": "application/pdf", "url": "https://sentinel.example/d.pdf"}
+    ]);
+    let messages: Messages = vec![("assistant", vec![start(), read, finish()])];
+    let (stdout, doc) = one_session("opencode-attachments", &messages);
+    let reads = row(&doc, "tools", &[("agent", "opencode"), ("tool", "Read")]);
+    assert_eq!(
+        [
+            &reads["images"],
+            &reads["documents"],
+            &reads["result_chars"]
+        ],
+        [&json!(1), &json!(1), &json!(2)],
+        "{reads}"
+    );
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+}
+
+/// A row that cannot be read after a valid session makes the whole database unreadable:
+/// the sessions already read count nowhere.
+#[test]
+fn a_late_unreadable_row_leaves_no_partial_report() {
+    let (dir, writer) = database("opencode-late-blob");
+    writer
+        .execute(
+            "INSERT INTO session VALUES ('ses_z', 'p', NULL, 's', '/d', 't', ?1, ?1)",
+            params![T0 + 10],
+        )
+        .expect("session");
+    writer
+        .execute(
+            "INSERT INTO message VALUES ('ses_z-m0', 'ses_z', ?1, ?1, ?2)",
+            params![T0 + 10, vec![0u8, 159, 146, 150]],
+        )
+        .expect("message");
+    drop(writer);
+    let (stdout, _) = report(&dir, &["--json"]);
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(
+        [&doc["roots"][0]["files"], &doc["roots"][0]["unreadable"]],
+        [&json!(1), &json!(1)],
+        "{}",
+        doc["roots"]
+    );
+    assert_eq!(doc["detectors"]["polls"]["tables"][0]["rows"], json!([]));
 }

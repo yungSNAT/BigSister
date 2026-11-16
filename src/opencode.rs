@@ -5,7 +5,7 @@
 //! its data folder: a `session` table, a `message` table and a `part` table whose `data`
 //! columns hold JSON (`packages/schema/src/v1/session.ts`). The same database holds
 //! account tokens and credentials, so only those 3 tables are queried, with fixed SQL,
-//! and the file is opened read-only.
+//! SQLite refuses a read of any other, and the file is opened read-only.
 //!
 //! An assistant message holds one or more steps, each a model call: a `step-start` part,
 //! its `tool` parts and a `step-finish` part with the call's token usage. Each step
@@ -18,9 +18,11 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use serde_json::{Map, Value, json};
 
 /// One OpenCode session, as Claude Code records.
@@ -31,13 +33,30 @@ pub struct Session {
     pub lines: Vec<String>,
 }
 
+/// The tables `shaphan` reads. SQLite refuses a read of any other, among them those
+/// holding OpenCode's account tokens and credentials.
+const TABLES: [&str; 3] = ["session", "message", "part"];
+
 /// The sessions in database `db` updated at or after `since`, oldest first.
 ///
 /// # Errors
-/// When the database cannot be opened or read, or lacks the tables or columns used.
-pub fn read(db: &Path, since: DateTime<Utc>) -> rusqlite::Result<Vec<Session>> {
-    let conn = open(db)?;
-    let sessions: Vec<(String, bool)> = conn
+/// When the database cannot be opened or read, lacks the tables or columns used, or
+/// changed whilst it was read as an immutable file.
+pub fn read(db: &Path, since: DateTime<Utc>) -> Result<Vec<Session>, String> {
+    let (mut conn, stamp) = open(db)?;
+    let out = sessions(&mut conn, since).map_err(|e| e.to_string())?;
+    drop(conn);
+    if stamp.is_some_and(|s| Stamp::of(db) != Some(s)) {
+        return Err("the database changed whilst it was read".to_owned());
+    }
+    Ok(out)
+}
+
+/// Reads the sessions in one read transaction, so that every query sees the same
+/// database.
+fn sessions(conn: &mut Connection, since: DateTime<Utc>) -> rusqlite::Result<Vec<Session>> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+    let sessions: Vec<(String, bool)> = tx
         .prepare(
             "SELECT id, parent_id IS NOT NULL FROM session WHERE time_updated >= ?1 \
              ORDER BY time_created, id",
@@ -46,11 +65,11 @@ pub fn read(db: &Path, since: DateTime<Utc>) -> rusqlite::Result<Vec<Session>> {
             Ok((r.get(0)?, r.get(1)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
-    let mut messages = conn.prepare(
+    let mut messages = tx.prepare(
         "SELECT id, time_created, data FROM message WHERE session_id = ?1 \
          ORDER BY time_created, id",
     )?;
-    let mut parts = conn.prepare(
+    let mut parts = tx.prepare(
         "SELECT id, message_id, time_created, data FROM part WHERE session_id = ?1 \
          ORDER BY time_created, id",
     )?;
@@ -83,45 +102,86 @@ pub fn read(db: &Path, since: DateTime<Utc>) -> rusqlite::Result<Vec<Session>> {
     Ok(out)
 }
 
-/// Opens database `db` read-only, creating no file beside it.
-///
-/// Whilst OpenCode runs, its write-ahead log (`-wal`) and the log's index (`-shm`) sit
-/// beside the database; a read-only connection reads the log and shares the index, as
-/// any reader does, changing neither the database nor the log. With no log beside it,
-/// SQLite would create both, so the file is opened as immutable instead: nothing is
-/// pending in a log that does not exist. A log without
-/// its index fails, rather than creating the index or reading the database without the
-/// log's content.
-fn open(db: &Path) -> rusqlite::Result<Connection> {
-    let beside = |suffix: &str| {
-        let mut name = db.as_os_str().to_owned();
-        name.push(suffix);
-        Path::new(&name).exists()
-    };
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    match (beside("-wal"), beside("-shm")) {
-        (true, true) => Connection::open_with_flags(db, flags),
-        (true, false) => Err(rusqlite::Error::InvalidPath(db.to_path_buf())),
-        (false, _) => {
-            Connection::open_with_flags(immutable(db)?, flags | OpenFlags::SQLITE_OPEN_URI)
-        }
+/// What the database file and the files beside it were when it was opened.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    len: u64,
+    modified: SystemTime,
+    wal: bool,
+    shm: bool,
+}
+
+impl Stamp {
+    fn of(db: &Path) -> Option<Self> {
+        let m = std::fs::metadata(db).ok()?;
+        let beside = |suffix: &str| {
+            let mut name = db.as_os_str().to_owned();
+            name.push(suffix);
+            Path::new(&name).exists()
+        };
+        Some(Self {
+            len: m.len(),
+            modified: m.modified().ok()?,
+            wal: beside("-wal"),
+            shm: beside("-shm"),
+        })
     }
 }
 
-/// An SQLite URI naming `db` with `immutable=1`: its absolute path with forward slashes,
-/// and `%`, `?` and `#` escaped, as SQLite's URI rules ask.
-fn immutable(db: &Path) -> rusqlite::Result<String> {
-    let absolute =
-        std::path::absolute(db).map_err(|_| rusqlite::Error::InvalidPath(db.to_path_buf()))?;
-    let path = absolute
+/// Opens database `db` read-only, writing to and creating no file beside it, with
+/// reads of tables other than `TABLES` refused; and the stamp to compare after reading
+/// when it was opened as an immutable file.
+///
+/// Whilst OpenCode runs, its write-ahead log (`-wal`) and the log's index (`-shm`) sit
+/// beside the database: the index is opened read-only (`readonly_shm`), and SQLite's
+/// locks keep the reads to one committed state. With no log beside it, the file is
+/// opened as immutable, so SQLite creates neither file; it is read again only if it is
+/// unchanged and still has no log afterwards. A log without its index fails, rather than
+/// creating the index or reading the database without the log's content.
+fn open(db: &Path) -> Result<(Connection, Option<Stamp>), String> {
+    let stamp = Stamp::of(db).ok_or("the database's size and time cannot be read")?;
+    let (query, stamp) = match (stamp.wal, stamp.shm) {
+        (true, true) => ("mode=ro&readonly_shm=1", None),
+        (true, false) => return Err("a write-ahead log without its index".to_owned()),
+        (false, _) => ("immutable=1", Some(stamp)),
+    };
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let mut conn =
+        Connection::open_with_flags(uri(db, query)?, flags).map_err(|e| e.to_string())?;
+    conn.authorizer(Some(only_tables))
+        .map_err(|e| e.to_string())?;
+    Ok((conn, stamp))
+}
+
+/// Allows a query to read only `TABLES`, and a read transaction to begin and end.
+fn only_tables(ctx: AuthContext<'_>) -> Authorization {
+    match ctx.action {
+        AuthAction::Select | AuthAction::Transaction { .. } => Authorization::Allow,
+        AuthAction::Read { table_name, .. } if TABLES.contains(&table_name) => Authorization::Allow,
+        _ => Authorization::Deny,
+    }
+}
+
+/// An SQLite URI naming `db` with `query`: its absolute path, with Windows' separators
+/// written as `/`, and `%`, `?` and `#` escaped, as SQLite's URI rules ask. A `\` in a
+/// Unix name is a character of the name, so it stays.
+fn uri(db: &Path, query: &str) -> Result<String, String> {
+    let absolute = std::path::absolute(db).map_err(|e| e.to_string())?;
+    let mut path = absolute
         .to_str()
-        .ok_or_else(|| rusqlite::Error::InvalidPath(db.to_path_buf()))?
-        .replace('\\', "/")
+        .ok_or("a database path that is not UTF-8")?
+        .to_owned();
+    if cfg!(windows) {
+        path = path.replace('\\', "/");
+    }
+    let path = path
         .replace('%', "%25")
         .replace('?', "%3f")
         .replace('#', "%23");
     let slash = if path.starts_with('/') { "" } else { "/" };
-    Ok(format!("file://{slash}{path}?immutable=1"))
+    Ok(format!("file://{slash}{path}?{query}"))
 }
 
 /// A part of a message: its id, time and parsed `data`, which is null when it is not a
@@ -187,6 +247,10 @@ fn message(id: &str, at: i64, data: &str, parts: &[Part], lines: &mut Vec<String
     for p in parts {
         match p.kind() {
             "step-start" => {
+                // A step OpenCode left without its step-finish has no usage.
+                if let Some(first) = start.or(step.first().copied()) {
+                    self::step(model, first, None, &step, lines);
+                }
                 step.clear();
                 start = Some(p);
             }
@@ -241,14 +305,21 @@ fn step(
 
 /// A tool part's call as a Claude `tool_use` block, with OpenCode's built-in tools named
 /// as Claude Code's: `bash` runs commands as `Bash` does, `read` reads `filePath` as
-/// `Read` reads `file_path`, and `edit` and `write` change files.
+/// `Read` reads `file_path`, and `edit` and `write` change files. Every other input
+/// field is kept, so that calls differing only in them stay different calls.
 fn tool_use(p: &Part) -> Value {
     let input = p
         .data
         .pointer("/state/input")
         .cloned()
         .unwrap_or(Value::Null);
-    let path = || json!({"file_path": input.get("filePath").cloned().unwrap_or(Value::Null)});
+    let path = || {
+        let mut fields = input.as_object().cloned().unwrap_or_default();
+        if let Some(file) = fields.remove("filePath") {
+            fields.insert("file_path".to_owned(), file);
+        }
+        Value::Object(fields)
+    };
     let (name, input) = match p.data.get("tool").and_then(Value::as_str).unwrap_or("") {
         "bash" => ("Bash", input.clone()),
         "read" => ("Read", path()),
@@ -261,7 +332,9 @@ fn tool_use(p: &Part) -> Value {
 }
 
 /// A finished tool part's result as a Claude `tool_result` block: its output, or its
-/// error marked as one. A call still pending or running has none.
+/// error marked as one. A call still pending or running has none. Each file the call
+/// attached adds an `image` block, for an `image/` type, or a `document` block, which
+/// keep neither its address nor its content.
 fn tool_result(p: &Part) -> Option<Value> {
     let state = p.data.get("state")?;
     let (content, error) = match state.get("status").and_then(Value::as_str)? {
@@ -269,9 +342,24 @@ fn tool_result(p: &Part) -> Option<Value> {
         "error" => (state.get("error"), true),
         _ => return None,
     };
+    let mut content = content.cloned().unwrap_or(Value::Null);
+    if let Some(files) = state.get("attachments").and_then(Value::as_array)
+        && !files.is_empty()
+    {
+        let text = json!({"type": "text", "text": content});
+        content = std::iter::once(text)
+            .chain(files.iter().map(|f| {
+                let image = f
+                    .get("mime")
+                    .and_then(Value::as_str)
+                    .is_some_and(|m| m.starts_with("image/"));
+                json!({"type": if image { "image" } else { "document" }})
+            }))
+            .collect();
+    }
     Some(json!({"type": "tool_result",
                 "tool_use_id": p.data.get("callID").cloned().unwrap_or(Value::Null),
-                "content": content.cloned().unwrap_or(Value::Null), "is_error": error}))
+                "content": content, "is_error": error}))
 }
 
 /// A step's token usage under Claude's names, as the scan reads a prompt's size from them.
@@ -288,4 +376,99 @@ fn usage(tokens: Option<&Value>) -> Value {
         }
     }
     Value::Object(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn part(id: &str, data: &Value) -> Part {
+        Part::new(id.to_owned(), 0, &data.to_string())
+    }
+
+    fn call(id: &str) -> Value {
+        json!({"type": "tool", "callID": id, "tool": "bash",
+               "state": {"status": "completed", "input": {"command": "ls"}, "output": "x"}})
+    }
+
+    /// A step-start before the previous step's step-finish closes that step: both
+    /// steps' calls and results are kept.
+    #[test]
+    fn a_step_left_without_its_finish_keeps_its_calls() {
+        let parts = [
+            part("p0", &json!({"type": "step-start"})),
+            part("p1", &call("a")),
+            part("p2", &json!({"type": "step-start"})),
+            part("p3", &call("b")),
+            part(
+                "p4",
+                &json!({"type": "step-finish", "tokens": {"input": 5}}),
+            ),
+        ];
+        let mut lines = Vec::new();
+        message("m", 0, r#"{"role": "assistant"}"#, &parts, &mut lines);
+        let text = lines.join("\n");
+        for id in [r#""tool_use_id":"a""#, r#""tool_use_id":"b""#] {
+            assert!(text.contains(id), "{id} missing:\n{text}");
+        }
+        assert_eq!(
+            lines
+                .iter()
+                .filter(|l| l.contains(r#""type":"assistant""#))
+                .count(),
+            2,
+            "{text}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_path_becomes_a_uri_with_forward_slashes() {
+        assert_eq!(
+            uri(Path::new(r"C:\a%b#c\opencode.db"), "immutable=1").as_deref(),
+            Ok("file:///C:/a%25b%23c/opencode.db?immutable=1")
+        );
+    }
+
+    /// A `\` is a character of a Unix name, not a separator.
+    #[cfg(unix)]
+    #[test]
+    fn a_unix_path_keeps_its_backslashes() {
+        assert_eq!(
+            uri(Path::new(r"/t/a\b?%#/opencode.db"), "immutable=1").as_deref(),
+            Ok(r"file:///t/a\b%3f%25%23/opencode.db?immutable=1")
+        );
+    }
+
+    /// Only `TABLES` can be read through the connection `open` gives.
+    #[test]
+    fn a_table_other_than_sessions_messages_and_parts_is_refused() {
+        let dir = std::env::temp_dir().join(format!("shaphan-opencode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("folder");
+        let db = dir.join("opencode.db");
+        Connection::open(&db)
+            .expect("database")
+            .execute_batch(
+                "CREATE TABLE session (id text); CREATE TABLE message (id text);
+                 CREATE TABLE part (id text); CREATE TABLE account (token text);
+                 INSERT INTO account VALUES ('secret');",
+            )
+            .expect("tables");
+        let (conn, _) = open(&db).expect("open");
+        for table in TABLES {
+            let rows = conn
+                .prepare(&format!("SELECT id FROM {table}"))
+                .and_then(|mut q| q.query([]).map(|_| ()));
+            assert!(rows.is_ok(), "{table}: {rows:?}");
+        }
+        for refused in [
+            "SELECT token FROM account",
+            "SELECT * FROM sqlite_master",
+            "SELECT count(*) FROM session",
+        ] {
+            assert!(conn.prepare(refused).is_err(), "{refused} was allowed");
+        }
+        drop(conn);
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
 }
