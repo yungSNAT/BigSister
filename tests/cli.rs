@@ -1326,10 +1326,6 @@ const PRICED_MIXED: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/priced-mixed/claude"
 );
-const PRICED_PROMPT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/priced-prompt/claude"
-);
 
 /// `shaphan all --json` over the priced Codex fixtures and `claude`, with `extra` options.
 fn priced(claude: &str, extra: &[&str]) -> Value {
@@ -1392,13 +1388,67 @@ fn each_estimate_is_priced_at_the_model_that_read_it() {
     assert_eq!(doc["schema_version"], 2);
 }
 
+/// A Claude transcript of `git status` run once, then by each of `readers` (a model id
+/// and its reply's `usage`, if any); each reader but the first reads a poll of 80,000
+/// characters.
+fn polls_read_by(name: &str, readers: &[(&str, Option<Value>)]) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("proj")).expect("folder");
+    // Written as text: Claude Code puts `model` first in a reply's message, and shaphan
+    // finds a reply by that.
+    let reply = |minute: usize, model: &str, usage: Option<&Value>| {
+        let usage = usage.map_or(String::new(), |u| format!(",\"usage\":{u}"));
+        format!(
+            "{{\"type\":\"assistant\",\"timestamp\":\"2026-11-09T05:{minute:02}:00.000Z\",\
+             \"message\":{{\"model\":\"{model}\",\"role\":\"assistant\",\"content\":[{{\
+             \"type\":\"tool_use\",\"id\":\"p{minute}\",\"name\":\"Bash\",\
+             \"input\":{{\"command\":\"git status\"}}}}]{usage}}}}}\n"
+        )
+    };
+    let result = |minute: usize, size: usize| {
+        format!(
+            "{{\"type\":\"user\",\"timestamp\":\"2026-11-09T05:{minute:02}:30.000Z\",\
+             \"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"tool_result\",\
+             \"tool_use_id\":\"p{minute}\",\"content\":\"{}\"}}]}}}}\n",
+            "x".repeat(size)
+        )
+    };
+    let mut text = reply(0, "claude-opus-5-5", None) + &result(0, 4);
+    for (at, (model, usage)) in readers.iter().enumerate() {
+        text += &reply(at + 1, model, usage.as_ref());
+        // The poll the next reader reads.
+        if at + 1 < readers.len() {
+            text += &result(at + 1, 80_000);
+        }
+    }
+    std::fs::write(dir.join("proj").join("s.jsonl"), text).expect("transcript");
+    dir
+}
+
 #[test]
 fn haiku_5_5_is_priced_by_the_size_of_the_prompt_that_read_it() {
-    let doc = priced(PRICED_PROMPT, &[]);
-    // 4 polls of 80,000 characters, 20,000 tokens est each, read by Haiku 5.5 with a
-    // 50,000-token prompt (US$0.10 per million), Haiku 5.5 with a 150,000-token prompt
-    // (US$0.50), Haiku 5.5 with no usage recorded (unpriced) and Claude Opus 4.5 by its
-    // dated id (US$5): US$0.002 + 0.01 + 0.1, rounded to cents.
+    let usage = |fresh: u64, written: u64, read: u64| {
+        Some(
+            json!({"input_tokens": fresh, "cache_creation_input_tokens": written,
+            "cache_read_input_tokens": read, "output_tokens": 10}),
+        )
+    };
+    // The first reply reads the first run, not a poll. Then 4 polls of 20,000 tokens est,
+    // read by Haiku 5.5 with a 50,000-token prompt (US$0.10 per million), Haiku 5.5 with
+    // a 150,000-token prompt (US$0.50), Haiku 5.5 with no usage recorded (unpriced) and
+    // Claude Opus 4.5 by its dated id (US$5): US$0.002 + 0.01 + 0.1, rounded to cents.
+    let dir = polls_read_by(
+        "priced-by-prompt",
+        &[
+            ("claude-opus-4-8", None),
+            ("claude-haiku-5-5", usage(2, 10_000, 39_998)),
+            ("claude-haiku-5-5", usage(150_000, 0, 0)),
+            ("claude-haiku-5-5", None),
+            ("claude-opus-4-5-20251101", None),
+        ],
+    );
+    let doc = priced(dir.to_str().expect("UTF-8 path"), &[]);
     let claude = find(rows(&doc, "polls", 0), &[("agent", json!("claude"))]);
     assert_eq!(claude["poll_tokens_est"], json!(80000));
     assert_eq!(claude["poll_usd_est"], json!(0.11));
