@@ -208,6 +208,35 @@ impl Detector for Polls {
         );
         table.rows = rows.into_iter().map(|(_, r)| r).collect();
         table.truncate(opts.limit);
+        Section {
+            name: "polls",
+            title: "commands repeated exactly within a session",
+            summary: vec![
+                (
+                    "codex_outputs_not_paired".to_owned(),
+                    json!(self.codex.unpaired),
+                ),
+                (
+                    "codex_commands_not_paired".to_owned(),
+                    json!(self.codex.unpaired_commands),
+                ),
+            ],
+            tables: vec![totals, table, self.results_table(opts)],
+            notes: vec![
+                "A poll repeats a command with no file edit since its last run; a rerun follows an edit.".to_owned(),
+                "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
+                "Command results count every command in the window by verb class, polled or not: results are those read, and result chars their characters of text, for Codex only what the exec cell printed of them, which is what reached the model.".to_owned(),
+                "Polls after failure repeat a command whose previous run's result was read before the repeat and marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results, for Codex only of what the exec cell printed of them. A Codex command's result is the CommandExecution record Codex wrote as it ended, tied to the command by its text; a command no record ties takes the result its exec cell printed in its place only when the cell printed one result per command and has one command, Codex wrote no such record whilst the cell ran, or it is the one command left untied and each tied command's result is printed whole in its own place; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the calls in the window whose results could not all be paired: a function_call, whose output is not read, or an exec cell that had no call id, whose call id another exec cell in the session had, whose output never came or with a command neither tied nor paired. Codex commands not paired counts those commands, whose results were not judged.".to_owned(),
+                EST_NOTE.to_owned(),
+                prices::NOTE.to_owned(),
+            ],
+        }
+    }
+}
+
+impl Polls {
+    /// The table of command results by agent and verb class, largest first.
+    fn results_table(&self, opts: &Opts) -> Table {
         let mut results: Vec<(u64, Vec<Value>)> = self
             .results
             .iter()
@@ -241,33 +270,9 @@ impl Detector for Polls {
         );
         by_result.rows = results.into_iter().map(|(_, r)| r).collect();
         by_result.truncate(opts.limit);
-        Section {
-            name: "polls",
-            title: "commands repeated exactly within a session",
-            summary: vec![
-                (
-                    "codex_outputs_not_paired".to_owned(),
-                    json!(self.codex.unpaired),
-                ),
-                (
-                    "codex_commands_not_paired".to_owned(),
-                    json!(self.codex.unpaired_commands),
-                ),
-            ],
-            tables: vec![totals, table, by_result],
-            notes: vec![
-                "A poll repeats a command with no file edit since its last run; a rerun follows an edit.".to_owned(),
-                "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
-                "Command results count every command in the window by verb class, polled or not: results are those read, and result chars their characters of text, for Codex only what the exec cell printed of them, which is what reached the model.".to_owned(),
-                "Polls after failure repeat a command whose previous run's result was read before the repeat and marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results, for Codex only of what the exec cell printed of them. A Codex command's result is the CommandExecution record Codex wrote as it ended, tied to the command by its text; a command no record ties takes the result its exec cell printed in its place only when the cell printed one result per command and has one command, Codex wrote no such record whilst the cell ran, or it is the one command left untied and each tied command's result is printed whole in its own place; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the calls in the window whose results could not all be paired: a function_call, whose output is not read, or an exec cell that had no call id, whose call id another exec cell in the session had, whose output never came or with a command neither tied nor paired. Codex commands not paired counts those commands, whose results were not judged.".to_owned(),
-                EST_NOTE.to_owned(),
-                prices::NOTE.to_owned(),
-            ],
-        }
+        by_result
     }
-}
 
-impl Polls {
     pub(super) fn new(programs: Rc<Programs>) -> Self {
         Self {
             programs,
