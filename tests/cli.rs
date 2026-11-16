@@ -1424,8 +1424,9 @@ fn tool_calls(name: &str, calls: &[(&str, Value, Value, bool)]) -> PathBuf {
     dir
 }
 
-#[test]
-fn tools_report_result_sizes_errors_cascades_and_retry_churn() {
+/// The tools section's JSON for a transcript of results of several tools: one large, one
+/// with an image, and runs of errors.
+fn mixed_tool_calls() -> Value {
     let fail = || json!({"command": "false"});
     let boom = || json!("boom");
     let dir = tool_calls(
@@ -1471,7 +1472,12 @@ fn tools_report_result_sizes_errors_cascades_and_retry_churn() {
         "--json",
     ]);
     assert_eq!(code, 0, "{stderr}");
-    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+#[test]
+fn tools_report_result_sizes_errors_cascades_and_retry_churn() {
+    let doc = mixed_tool_calls();
     let summary = &doc["detectors"]["tools"]["summary"];
     assert_eq!(summary["cascades"], json!(1), "{summary}");
     assert_eq!(summary["calls_in_cascades"], json!(4), "{summary}");
