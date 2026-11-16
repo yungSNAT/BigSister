@@ -314,13 +314,33 @@ mod tests {
     fn the_bundled_file_prices_every_listed_model() {
         let p = Prices::bundled();
         assert_eq!(p.models.len(), 27);
-        let tiered: Vec<&String> = p
+        let mut tiered: Vec<&str> = p
             .models
             .iter()
             .filter(|(_, price)| !price.above.is_empty())
-            .map(|(id, _)| id)
+            .map(|(id, _)| id.as_str())
             .collect();
-        assert_eq!(tiered, ["claude-haiku-5-5"]);
+        tiered.sort_unstable();
+        assert_eq!(
+            tiered,
+            [
+                "claude-haiku-5-5",
+                "gpt-5.6-luna",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-6-astra",
+                "gpt-6-luna",
+                "gpt-6-sol",
+                "gpt-6.1-sol",
+                "gpt-6.1-terra"
+            ]
+        );
+        // OpenAI's long context doubles each GPT-6 and GPT-5.6 input price.
+        for (id, price) in p.models.iter().filter(|(id, _)| id.starts_with("gpt-")) {
+            if id != "gpt-5.3-codex" {
+                assert_eq!(price.above, [(272_000, 2.0 * price.usd_per_mtok)], "{id}");
+            }
+        }
         assert!(p.models.values().all(|price| price.usd_per_mtok > 0.0));
         assert_eq!(p.note(), NOTE);
     }
