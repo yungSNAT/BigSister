@@ -213,6 +213,29 @@ impl Detector for Schemas {
         );
         table.rows = rows.into_iter().map(|(_, r)| r).collect();
         table.truncate(opts.limit);
+        Section {
+            name: "schemas",
+            title: "tool schemas loaded against tools called, and skills listed against skills used (Claude)",
+            summary: vec![
+                ("main_sessions".to_owned(), json!(self.sessions.get("main").copied().unwrap_or(0))),
+                ("subagent_sessions".to_owned(), json!(self.sessions.get("subagent").copied().unwrap_or(0))),
+            ],
+            tables: vec![table, self.skill_table(opts)],
+            notes: vec![
+                "Idle characters are schema characters loaded in sessions that never called the tool.".to_owned(),
+                "A skill is listed when a skill listing in the window names it, which costs its listing characters: its line and the lines after it up to the next skill's, each with a newline. It is used when a Skill call names it or a slash command runs it. Its idle characters are those listed in sessions that never used it.".to_owned(),
+                EST_NOTE.to_owned(),
+                "Idle characters, of schemas and skills alike, are priced at the model of the session's replies, and stay unpriced when its replies' models differ in price.".to_owned(),
+                prices::NOTE.to_owned(),
+                "Tools sent with defer_loading are not counted as loaded, and a tool only ever sent that way gets no row.".to_owned(),
+            ],
+        }
+    }
+}
+
+impl Schemas {
+    /// The table by scope and skill, most idle characters first.
+    fn skill_table(&self, opts: &Opts) -> Table {
         let mut skills: Vec<(u64, Vec<Value>)> = self
             .skills
             .iter()
@@ -241,27 +264,9 @@ impl Detector for Schemas {
         );
         skill_table.rows = skills.into_iter().map(|(_, r)| r).collect();
         skill_table.truncate(opts.limit);
-        Section {
-            name: "schemas",
-            title: "tool schemas loaded against tools called, and skills listed against skills used (Claude)",
-            summary: vec![
-                ("main_sessions".to_owned(), json!(self.sessions.get("main").copied().unwrap_or(0))),
-                ("subagent_sessions".to_owned(), json!(self.sessions.get("subagent").copied().unwrap_or(0))),
-            ],
-            tables: vec![table, skill_table],
-            notes: vec![
-                "Idle characters are schema characters loaded in sessions that never called the tool.".to_owned(),
-                "A skill is listed when a skill listing in the window names it, which costs its listing characters: its line and the lines after it up to the next skill's, each with a newline. It is used when a Skill call names it or a slash command runs it. Its idle characters are those listed in sessions that never used it.".to_owned(),
-                EST_NOTE.to_owned(),
-                "Idle characters, of schemas and skills alike, are priced at the model of the session's replies, and stay unpriced when its replies' models differ in price.".to_owned(),
-                prices::NOTE.to_owned(),
-                "Tools sent with defer_loading are not counted as loaded, and a tool only ever sent that way gets no row.".to_owned(),
-            ],
-        }
+        skill_table
     }
-}
 
-impl Schemas {
     /// Adds a session's skills, listed in the window, against its uses.
     fn end_skills(&mut self, s: &Session, cur: &Current) {
         // Names that print alike, as `(other)` does, count as one skill of the session.
