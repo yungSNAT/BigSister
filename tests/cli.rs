@@ -730,7 +730,7 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[0]["lines_skipped"], 1);
     assert_eq!(roots[1]["files"], 2);
     assert_eq!(doc["schema_version"], 2);
-    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(7));
+    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(8));
 }
 
 /// `shaphan all` over the Claude transcripts in a fixture folder, which must hold 2.

@@ -52,9 +52,6 @@ struct Writes {
 
 impl Writes {
     fn add(&mut self, tokens: u64, multiplier: f64, usd_per_mtok: Option<f64>) {
-        if tokens == 0 {
-            return;
-        }
         #[expect(
             clippy::cast_precision_loss,
             reason = "token counts stay far below 2^52"
@@ -270,7 +267,7 @@ fn notes(opts: &Opts) -> Vec<String> {
     vec![
         "Each reply's cache writes (cache_creation_input_tokens) are measured. Rebuilt tokens are an estimate of what was cached again: of the tokens the previous reply in the session left cached (its cache reads and writes), those this reply did not read, up to what it wrote. They assume each reply extends the previous one's prompt, as Claude Code's replies in one file do; the rest of a reply's writes are new context, and a reply after a compaction writes new context only.".to_owned(),
         "A rebuild follows an idle gap when the time between the 2 replies exceeds the cache's lifetime: 1 hour once a reply of the session has written 1-hour cache, otherwise 5 minutes. Otherwise it follows a model switch when the model changed, and is rebuilt otherwise when neither holds, as after a rewind or a changed prefix.".to_owned(),
-        format!("Dollars (write usd est) estimate what the writes cost, not what could have been saved: the tokens at the cache write price, 1.25 times the input price for 5-minute writes and 2 times for 1-hour writes, split as the reply records (1.25 times when it does not), where the input price is {price}. A warm cache would have read rebuilt tokens at a tenth of the input price. Unpriced tokens are those of a model without a price. An illustration, not a bill."),
+        format!("Dollars (write usd est) estimate what the writes cost, not what could have been saved: the tokens at the cache write price, 1.25 times the input price for 5-minute writes and 2 times for 1-hour writes, split as the reply records (1.25 times when it does not), where the input price is {price}. A warm cache would have read rebuilt tokens at a fraction of the input price: a tenth or less, by model. Unpriced tokens are those of a model without a price. An illustration, not a bill."),
     ]
 }
 
@@ -342,6 +339,10 @@ impl Cache {
         u: &Usage,
         price: Option<f64>,
     ) {
+        // A reply with no writes of this cause leaves no row behind.
+        if tokens == 0 {
+            return;
+        }
         self.writes
             .entry((scope, cause))
             .or_default()
