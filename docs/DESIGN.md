@@ -13,6 +13,7 @@ Leave usage and cost totals to [ccusage](https://github.com/ryoppippi/ccusage); 
 | `pipes` | Claude, Codex, pi | Test runs piped straight into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many of those printed a failure whilst the call reported success, in total and by agent |
 | `polls` | Claude, Codex, pi | Commands repeated exactly within a session, split into repeats with no file edit since the previous run (polls) and reruns after an edit, the polls of a command whose previous run's result was an error and the characters polls returned |
 | `rereads` | Claude, Codex, pi | Files read again after a context compaction that had been read before it, and the characters those re-reads returned |
+| `tools` | Claude, pi | Per agent and tool: calls, the characters their results returned (priced as other results are), errors and their characters, and image and document blocks; also cascades and retry churn, below |
 | `hooks` | Claude | Hook runs, cancellations, timeouts and durations, by event, matcher and hook |
 
 `shaphan all` runs every detector in one pass over the files.
@@ -40,6 +41,7 @@ Claude Code's and Codex's formats are undocumented and change between releases. 
 - A re-read is a read, after a compaction, of a file read before it and not yet read since. Reread share divides re-reads by every read in the window for that agent and scope, in compacted sessions or not. Reread characters are the size of the result of each Claude call that made a re-read counted in the window. A call that re-reads 2 files is counted once. A result holds what the tool returned, which can be more or less than the file: `Read` numbers each line and can return part of a file, and a shell command prints whatever it prints.
 - A command is compared with its earlier runs without leading or trailing white space. A blank command counts among a session's commands but is never a poll or a rerun.
 - A poll after a failure is a poll of a command whose previous run in the session, in the window or not, had a result read before the poll was issued with `is_error` set (Claude) or a non-zero `exit_code` (Codex). Only that run's result counts: whilst it is awaited, or if it never comes, the poll does not follow a failure, whatever earlier runs returned, and a result read after a later run of the command was issued is not used. So neither of 2 identical commands issued together, as parallel Claude calls or in one Codex cell, follows the other's failure. Claude Code sets it for a command that exits with an error status and for a call that a hook denied, so a denied call counts although it never ran. Poll characters are the size of the results of the polls counted in the window. A run whose result is not in the transcript adds nothing to either measure, and a failed run followed by an edit and the same command is a rerun, not a poll. A Codex run whose result is never read (one from a `function_call`, or from an `exec` call without a call id, whose id another call also carries, or whose output never comes or does not pair) leaves the command's last result unknown, so the next poll of it is not counted as after a failure. So does a Claude run whose `tool_use` id another block in the session also carries.
+- `tools` counts each call in the window under its tool name, and each result that pairs with it under the same name; an error is a result with `is_error` set, which a hook's denial also is. Image and document blocks in a result are counted, not sized, as their tokens depend on pixels and pages, which the transcript does not record. Web search and fetch rows measure what their results added to context, not what could have been avoided. A cascade is a run of 3 or more erroring results in a row within a session, in the order the results arrive; it is counted once, with its results, when a result that is not an error or the session's end closes it. Retry churn counts each erroring result of a call whose tool and exact input (compared as compact JSON) had erred at least twice before in the session with no success between, so the third such error is the first counted. A call can count in both. Results outside the window count nowhere and neither extend nor end a run. The threshold of 3 is Token Optimizer's. A tool name prints only when it is 1 to 128 ASCII letters, digits, `_`, `-`, `.` or `:`; any other name prints as `(other)`.
 
 ## Privacy
 
@@ -52,7 +54,7 @@ Fixtures in this repository are synthetic. Tests check, ignoring case, that no s
 ## Interface
 
 ```text
-shaphan <all|startup|schemas|pipes|polls|rereads|hooks> [--since 7d|24h|YYYY-MM-DD|RFC 3339]
+shaphan <all|startup|schemas|pipes|polls|rereads|tools|hooks> [--since 7d|24h|YYYY-MM-DD|RFC 3339]
         [--agent claude|codex|all] [--claude-root DIR] [--codex-root DIR] [--json | --csv] [--limit N] [--paths]
 ```
 
@@ -79,4 +81,4 @@ On one machine's rollouts (1,056 files, a snapshot taken on 14 November 2026), `
 
 ## Not in v0.1
 
-Large tool results, cache rewrites after idle gaps, colour codes in tool results, Codex startup and tool schemas, Hermes `state.db` and RTK `history.db`.
+Single large tool results (`tools` totals them by tool), cache rewrites after idle gaps (a cache write cannot yet be told apart from context growth), colour codes in tool results, Codex startup and tool schemas, Hermes `state.db` and RTK `history.db`.
