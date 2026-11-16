@@ -1,4 +1,4 @@
-//! Report sections and their text and JSON renderings.
+//! Report sections and their text, JSON and CSV renderings.
 
 use std::fmt::Write as _;
 
@@ -331,6 +331,53 @@ fn section_json(s: &Section) -> Value {
         })
         .collect();
     json!({"title": s.title, "summary": summary, "tables": tables, "notes": s.notes})
+}
+
+/// Renders the sections as one CSV table (RFC 4180, CRLF line ends) with a record for
+/// each value `json` prints for them: a section's title, summary pairs and notes, and a
+/// table's title, omitted count and cells, tables and rows by ordinal from 0. Each value
+/// is written as JSON, so parsing it gives back what `json` prints, and text starts with
+/// a quote, which a spreadsheet never reads as a formula. The run header is left out.
+#[must_use]
+pub fn csv(sections: &[Section]) -> String {
+    let mut out = String::new();
+    let mut record = |fields: [&str; 6]| {
+        let quoted: Vec<String> = fields.iter().map(|f| csv_field(f)).collect();
+        out.push_str(&quoted.join(","));
+        out.push_str("\r\n");
+    };
+    record(["section", "kind", "table", "row", "column", "value"]);
+    for s in sections {
+        let text = |t: &str| Value::from(t).to_string();
+        record([s.name, "section_title", "", "", "", &text(s.title)]);
+        for (key, v) in &s.summary {
+            record([s.name, "summary", "", "", key, &v.to_string()]);
+        }
+        for (t, table) in s.tables.iter().enumerate() {
+            let t = t.to_string();
+            record([s.name, "table_title", &t, "", "", &text(&table.title)]);
+            record([s.name, "omitted", &t, "", "", &table.omitted.to_string()]);
+            for (r, row) in table.rows.iter().enumerate() {
+                let r = r.to_string();
+                for (column, v) in table.columns.iter().zip(row) {
+                    record([s.name, "cell", &t, &r, column, &v.to_string()]);
+                }
+            }
+        }
+        for note in &s.notes {
+            record([s.name, "note", "", "", "", &text(note)]);
+        }
+    }
+    out
+}
+
+/// A CSV field, in quotes when it holds a comma, a quote or a line break.
+fn csv_field(field: &str) -> String {
+    if field.contains([',', '"', '\r', '\n']) {
+        format!("\"{}\"", field.replace('"', "\"\""))
+    } else {
+        field.to_owned()
+    }
 }
 
 #[cfg(test)]

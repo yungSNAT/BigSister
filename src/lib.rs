@@ -63,6 +63,8 @@ pub fn run(cli: &Cli) -> Result<String, String> {
     };
     Ok(if cli.json {
         report::json(&meta, &sections)
+    } else if cli.csv {
+        report::csv(&sections)
     } else {
         report::text(&meta, &sections)
     })

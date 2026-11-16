@@ -18,6 +18,9 @@ regex = "1"
 ruzstd = "0.9"
 serde_json = "1"
 
+[dev-dependencies]
+csv = "1"
+
 [lints.clippy]
 ref_option = "warn"
 too_many_lines = "warn"

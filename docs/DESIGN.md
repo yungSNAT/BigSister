@@ -52,10 +52,10 @@ Fixtures in this repository are synthetic. Tests check, ignoring case, that no s
 
 ```text
 shaphan <all|startup|schemas|pipes|polls|rereads|hooks> [--since 7d|24h|YYYY-MM-DD|RFC 3339]
-        [--agent claude|codex|all] [--claude-root DIR] [--codex-root DIR] [--json] [--limit N] [--paths]
+        [--agent claude|codex|all] [--claude-root DIR] [--codex-root DIR] [--json | --csv] [--limit N] [--paths]
 ```
 
-`--since` defaults to `7d`; a bare date means local midnight. `--limit` (default 20) caps each table's rows. `--json` prints one object with `schema_version` 2 (2 added the dollar and unpriced columns). Exit codes: 0 success, 1 a runtime error such as a missing transcript folder or a bad `--since`, 2 a usage error.
+`--since` defaults to `7d`; a bare date means local midnight. `--limit` (default 20) caps each table's rows. `--json` prints one object with `schema_version` 2 (2 added the dollar and unpriced columns). `--csv` prints the same detector values as one long CSV table (`section,kind,table,row,column,value`), each value JSON-encoded, and leaves out the run header. Exit codes: 0 success, 1 a runtime error such as a missing transcript folder or a bad `--since`, 2 a usage error.
 
 ## Codex results
 
