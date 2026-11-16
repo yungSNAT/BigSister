@@ -16,6 +16,8 @@ pub struct Opts {
     pub home: Option<String>,
     /// The rate given with `--usd-per-mtok`, for measured tokens a section prices itself.
     pub usd_per_mtok: Option<f64>,
+    /// The price file given with `--prices`, as the report shows it.
+    pub prices_file: Option<String>,
 }
 
 /// One table in a section. Column names are `snake_case`; the text view spaces them.
@@ -93,7 +95,7 @@ fn usd_column(tokens: &str) -> Option<&'static str> {
 }
 
 /// Prices each token estimate of `section` at `usd_per_mtok` US dollars per million
-/// tokens, the rate given with `--usd-per-mtok`, instead of each model's bundled price:
+/// tokens, the rate given with `--usd-per-mtok`, instead of each model's price:
 /// its dollar column becomes the estimate at that rate, rounded to cents, no token is
 /// left unpriced, and the note says so. Measured tokens, such as startup's, are left
 /// unpriced.

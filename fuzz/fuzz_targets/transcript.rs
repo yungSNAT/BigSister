@@ -9,6 +9,7 @@ use chrono::DateTime;
 use libfuzzer_sys::fuzz_target;
 use shaphansaudit::cli::Command;
 use shaphansaudit::detectors::build;
+use shaphansaudit::prices::Prices;
 use shaphansaudit::programs::Programs;
 use shaphansaudit::report::{self, Meta, Opts};
 use shaphansaudit::scan::{Agent, scan};
@@ -35,7 +36,7 @@ fuzz_target!(|data: &[u8]| {
         (Agent::Pi, dir),
     ];
     let since = DateTime::UNIX_EPOCH;
-    let stats = scan(&roots, since, &mut dets);
+    let stats = scan(&roots, since, &Prices::bundled(), &mut dets);
     // Each root lists both files, the compressed one counted as read or skipped.
     for st in &stats {
         assert_eq!(st.files + st.compressed, 2, "{st:?}");
@@ -45,6 +46,7 @@ fuzz_target!(|data: &[u8]| {
         paths: true,
         home: None,
         usd_per_mtok: None,
+        prices_file: None,
     };
     let sections: Vec<_> = dets.iter().map(|d| d.section(&opts)).collect();
     let meta = Meta {
