@@ -22,7 +22,7 @@ pub const READ: &str = "16 November 2026";
 /// <https://platform.claude.com/docs/en/about-claude/pricing>, for each model
 /// <https://platform.claude.com/docs/en/about-claude/model-deprecations> lists as active
 /// under its API id, and <https://developers.openai.com/api/docs/pricing> (standard,
-/// short context).
+/// short context, and long context above 272,000 input tokens).
 const BUNDLED: &str = include_str!("prices.json");
 
 /// The note of each section whose estimates are priced at each model's price, from the
