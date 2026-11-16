@@ -1456,6 +1456,35 @@ fn haiku_5_5_is_priced_by_the_size_of_the_prompt_that_read_it() {
 }
 
 #[test]
+fn a_haiku_5_5_prompt_of_unknown_size_leaves_what_it_read_unpriced() {
+    // 4 polls of 20,000 tokens est, read by Haiku 5.5 with a prompt of exactly 100,000
+    // tokens and no cache fields (US$0.10 per million: US$0.002), Haiku 5.5 whose prompt
+    // overflows a u64, Haiku 5.5 with a negative cache read (both unpriced) and Claude
+    // Opus 4.5 (US$5: US$0.10). At US$0.50 the first would add a cent.
+    let dir = polls_read_by(
+        "prompt-of-unknown-size",
+        &[
+            ("claude-opus-4-8", None),
+            ("claude-haiku-5-5", Some(json!({"input_tokens": 100_000}))),
+            (
+                "claude-haiku-5-5",
+                Some(json!({"input_tokens": u64::MAX, "cache_creation_input_tokens": 1})),
+            ),
+            (
+                "claude-haiku-5-5",
+                Some(json!({"input_tokens": 100_000, "cache_read_input_tokens": -1})),
+            ),
+            ("claude-opus-4-5-20251101", None),
+        ],
+    );
+    let doc = priced(dir.to_str().expect("UTF-8 path"), &[]);
+    let claude = find(rows(&doc, "polls", 0), &[("agent", json!("claude"))]);
+    assert_eq!(claude["poll_tokens_est"], json!(80000));
+    assert_eq!(claude["poll_usd_est"], json!(0.1));
+    assert_eq!(claude["unpriced_tokens_est"], json!(40000));
+}
+
+#[test]
 fn a_given_rate_prices_every_estimate_and_leaves_none_unpriced() {
     let doc = priced(PRICED_CLAUDE, &["--usd-per-mtok", "1000"]);
     let claude = find(rows(&doc, "polls", 0), &[("agent", json!("claude"))]);
