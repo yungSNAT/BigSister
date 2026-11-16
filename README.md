@@ -149,7 +149,7 @@ Columns ending in `tokens est` (`_tokens_est` in JSON) estimate tokens as the ch
 }
 ```
 
-A model missing from the file is unpriced, as is one priced by prompt size whose prompt size is not recorded (such as a Codex result no recorded call of its turn reads). A file that cannot be read, is not a JSON object, repeats a key within an object, has an entry that is not an object, a price that is not a number of at least 0, a tier field written another way or no priced model at all stops the run with exit code 1 and names the file and the entry.
+A model missing from the file is unpriced, as is one priced by prompt size whose prompt size is not recorded (such as a Codex result no recorded call of its turn reads). A file that cannot be read, is not a JSON object, repeats a key within an object, has an entry that is not an object, a price that is not a number of at least 0 (or is above 0 but below about 2.2e-308, too small to tell from 0), a tier field written another way or no priced model at all stops the run with exit code 1 and names the file and the entry.
 
 `--csv` prints a header, `section,kind,table,row,column,value`, then a record for each value `--json` prints under `detectors`: a section's title (`section_title`), summary pairs (`summary`, with the key as `column`) and notes (`note`), and each table's title (`table_title`), `omitted` count and cells (`cell`, with the column name). Tables and rows are numbered from 0. Each `value` is written as JSON, so text keeps its double quotes and a spreadsheet never reads it as a formula, and a JSON parser gives back the `--json` value. Fields follow RFC 4180, with CRLF line ends. The run header (version, window and folders) is left out.
 

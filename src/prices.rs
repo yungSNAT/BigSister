@@ -14,6 +14,7 @@ use std::fmt;
 
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
+use serde_json::value::RawValue;
 
 /// When the bundled prices were read from Anthropic's and OpenAI's pricing pages.
 pub const READ: &str = "16 November 2026";
@@ -109,7 +110,8 @@ const BASE: &str = "input_cost_per_token";
 /// # Errors
 /// Fails on text that is not a JSON object or has an object with a key twice (which JSON
 /// readers settle in different ways), an entry that is not an object, a price that
-/// is not a number of at least 0 or that is too large to multiply by a million, a tier
+/// is not a number of at least 0, that is too large to multiply by a million or that is
+/// above 0 but too small for an f64 to hold whole (below about 2.2e-308), a tier
 /// field not written as `input_cost_per_token_above_<N>k_tokens` with N a whole number
 /// without leading zeros
 /// and a tier without `input_cost_per_token`, and when no model has a price at all.
@@ -119,9 +121,12 @@ fn parse(text: &str) -> Result<HashMap<String, Price>, String> {
     let entries = doc
         .as_object()
         .ok_or("not a JSON object of model ids and their prices")?;
+    // Each entry's text as the file writes it, which keeps a price's digits whole.
+    let written: HashMap<String, Box<RawValue>> =
+        serde_json::from_str(text).map_err(|e| e.to_string())?;
     let mut models = HashMap::new();
     for (model, entry) in entries {
-        if let Some(price) = price(model, entry)? {
+        if let Some(price) = price(model, entry, &written[model])? {
             models.insert(model.clone(), price);
         }
     }
@@ -131,11 +136,14 @@ fn parse(text: &str) -> Result<HashMap<String, Price>, String> {
     Ok(models)
 }
 
-/// The price in `model`'s entry, or `None` when it has no `input_cost_per_token`.
-fn price(model: &str, entry: &Value) -> Result<Option<Price>, String> {
+/// The price in `model`'s entry, written in the file as `written`, or `None` when it has
+/// no `input_cost_per_token`.
+fn price(model: &str, entry: &Value, written: &RawValue) -> Result<Option<Price>, String> {
     let entry = entry
         .as_object()
         .ok_or_else(|| format!("{model}: not a JSON object"))?;
+    let written: HashMap<String, Box<RawValue>> =
+        serde_json::from_str(written.get()).map_err(|e| e.to_string())?;
     let mut base = None;
     let mut above = Vec::new();
     for (field, value) in entry {
@@ -158,6 +166,11 @@ fn price(model: &str, entry: &Value) -> Result<Option<Price>, String> {
             .and_then(|usd| format!("{usd}e6").parse::<f64>().ok())
             .filter(|usd| usd.is_finite() && *usd >= 0.0)
             .ok_or_else(|| format!("{model}: {field}: not a number of at least 0"))?;
+        if too_small(written[field].get()) {
+            return Err(format!(
+                "{model}: {field}: a price above 0 but too small to tell from 0 or from other such prices"
+            ));
+        }
         match most {
             None => base = Some(usd),
             Some(most) => above.push((most, usd)),
@@ -174,6 +187,16 @@ fn price(model: &str, entry: &Value) -> Result<Option<Price>, String> {
         None if above.is_empty() => Ok(None),
         None => Err(format!("{model}: a tier but no {BASE}")),
     }
+}
+
+/// Whether JSON number `written` is above 0 but below the smallest normal f64, which
+/// reads as 0 or loses digits, so that 2 such prices could read as one.
+fn too_small(written: &str) -> bool {
+    let digits = written.split(['e', 'E']).next().unwrap_or("");
+    digits.bytes().any(|b| matches!(b, b'1'..=b'9'))
+        && written
+            .parse::<f64>()
+            .is_ok_and(|n| n.abs() < f64::MIN_POSITIVE)
 }
 
 /// A JSON value none of whose objects repeats a key.
@@ -385,7 +408,7 @@ mod tests {
     }
 
     /// Malformed price files and the error each must give.
-    const MALFORMED: [(&str, &str); 19] = [
+    const MALFORMED: [(&str, &str); 22] = [
         ("", "not valid JSON"),
         ("{\"m\": {\"input_cost_per_token\": 1e-6}", "not valid JSON"),
         ("[]", "not a JSON object of model ids"),
@@ -405,6 +428,18 @@ mod tests {
         (
             "{\"m\": {\"input_cost_per_token\": 1e303}}",
             "m: input_cost_per_token: not a number of at least 0",
+        ),
+        (
+            "{\"m\": {\"input_cost_per_token\": 1e-324}}",
+            "m: input_cost_per_token: a price above 0 but too small to tell from 0",
+        ),
+        (
+            "{\"m\": {\"input_cost_per_token\": 1e-6, \"input_cost_per_token_above_200k_tokens\": 0.00001e-310}}",
+            "m: input_cost_per_token_above_200k_tokens: a price above 0 but too small",
+        ),
+        (
+            "{\"m\": {\"input_cost_per_token\": 2.5E-320}}",
+            "m: input_cost_per_token: a price above 0 but too small",
         ),
         (
             "{\"m\": {\"input_cost_per_token\": 1e-6, \"input_cost_per_token_above_1m_tokens\": 2e-6}}",
@@ -456,6 +491,20 @@ mod tests {
             assert!(err.starts_with("price file ~/p.json: "), "{err}");
             assert!(err.contains(wanted), "{text}: {err}");
         }
+    }
+
+    /// A zero price is one, however it is written, and the smallest price an f64 holds
+    /// whole is kept; below that, prices would read as 0 or as each other.
+    #[test]
+    fn zero_and_the_smallest_whole_price_are_kept() {
+        for zero in ["0", "0.0", "-0.0", "0e-400", "0.000E+5"] {
+            let text = format!(r#"{{"m": {{"input_cost_per_token": {zero}}}}}"#);
+            let p = Prices::from_file(&text, "p.json").expect(&text);
+            assert_eq!(flat(&p, "m"), Some(0.0), "{zero}");
+        }
+        let p = Prices::from_file(r#"{"m": {"input_cost_per_token": 2.3e-308}}"#, "p.json")
+            .expect("prices");
+        assert!(flat(&p, "m").is_some_and(|usd| usd > 0.0));
     }
 
     #[test]
