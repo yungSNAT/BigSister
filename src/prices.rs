@@ -294,8 +294,9 @@ mod tests {
         assert_eq!(flat(&p, "claude-opus-4-8"), Some(5.0));
         assert_eq!(flat(&p, "claude-opus-4-5-20251101"), Some(5.0));
         assert_eq!(flat(&p, "claude-haiku-4-5-20251001"), Some(1.0));
-        assert_eq!(flat(&p, "gpt-6.1-sol"), Some(2.0));
-        assert_eq!(flat(&p, "gpt-6-luna"), Some(0.1));
+        // GPT-6 models are priced by prompt size; these prompts are in the short tier.
+        assert_eq!(p.usd_per_mtok("gpt-6.1-sol", || Some(272_000)), Some(2.0));
+        assert_eq!(p.usd_per_mtok("gpt-6-luna", || Some(1)), Some(0.1));
         assert_eq!(flat(&p, "gpt-5.3-codex"), Some(1.75));
         for unpriced in [
             "claude-opus-4-5",
