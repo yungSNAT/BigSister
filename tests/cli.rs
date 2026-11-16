@@ -1470,6 +1470,54 @@ fn codex_results_are_priced_by_the_prompt_of_the_call_that_read_them() {
     assert_eq!(row["unpriced_tokens_est"], json!(10000), "{row}");
 }
 
+#[test]
+fn a_codex_result_is_priced_once_and_one_left_at_the_end_stays_unpriced() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("codex-prompt-once");
+    let _ = std::fs::remove_dir_all(&dir);
+    let day = dir.join("2026/11/09");
+    std::fs::create_dir_all(&day).expect("folder");
+    let usage = |tokens: u64| {
+        json!({"timestamp": "2026-11-09T04:04:00.000Z", "type": "token_usage_record",
+            "payload": {"turn_id": "t", "response_id": "later",
+            "usage": {"input_tokens": tokens, "cached_input_tokens": 0, "output_tokens": 10}}})
+    };
+    let mut lines = vec![
+        json!({"timestamp": "2026-11-09T04:00:00.000Z", "type": "session_meta",
+               "payload": {"id": "c-once", "cwd": "/work"}}),
+        codex_turn("gpt-6.1-sol"),
+    ];
+    codex_git_status(&mut lines, "c0", 4, Some(20_000));
+    // Read at a 20,000-token prompt; the later, larger calls and the next turn's call
+    // read it again but price it no more.
+    codex_git_status(&mut lines, "c1", 80_000, Some(20_000));
+    lines.push(usage(272_001));
+    lines.push(usage(272_001));
+    lines.push(codex_turn("gpt-6.1-sol"));
+    lines.push(usage(272_001));
+    // No call reads this one before the file ends, so its prompt size is not known.
+    codex_git_status(&mut lines, "c2", 80_000, None);
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(day.join("rollout-once.jsonl"), text).expect("transcript");
+    let codex = dir.to_str().expect("UTF-8 path");
+    let (code, stdout, stderr) = run(&[
+        "polls",
+        "--codex-root",
+        codex,
+        "--claude-root",
+        CLAUDE,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let row = find(rows(&doc, "polls", 0), &[("agent", json!("codex"))]);
+    assert_eq!(row["polls"], json!(2), "{row}");
+    // 20,000 tokens est at US$2, once, and 20,000 unpriced.
+    assert_eq!(row["poll_usd_est"], json!(0.04), "{row}");
+    assert_eq!(row["unpriced_tokens_est"], json!(20000), "{row}");
+}
+
 /// A Claude transcript of `calls`, each a tool name, its input, its result's content and
 /// whether the result is an error; each call is made by a reply of Claude Opus 5.5, which
 /// reads the result before it.

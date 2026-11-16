@@ -619,6 +619,13 @@ impl Feed<'_> {
                 match v.get("type").and_then(Value::as_str) {
                     // Codex writes a model call's usage as the call completes, so the call
                     // read the results before it, in a prompt of `input_tokens`.
+                    //
+                    // shortcut: a tool can finish whilst the call that asked for it is
+                    // still writing, so its result comes before that call's usage record
+                    // and is priced at a prompt that lacks it (6 of 92,410 results in
+                    // 895 real rollouts in November 2026). Only a tier boundary between
+                    // the 2 prompts changes the price; pairing each result's call_id
+                    // with the call that made it would be the upgrade.
                     Some("token_usage_record") => {
                         let price = self.codex_price(|| {
                             v.pointer("/payload/usage/input_tokens")
