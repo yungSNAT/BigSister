@@ -34,6 +34,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
+    /// Print the values --json prints for the detectors as one CSV table, a value a record
+    #[arg(long, global = true, conflicts_with = "json")]
+    pub csv: bool,
+
     /// Most rows to print in each table
     #[arg(long, global = true, default_value_t = 20, value_name = "N")]
     pub limit: usize,
