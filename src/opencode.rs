@@ -11,8 +11,10 @@
 //! its `tool` parts and a `step-finish` part with the call's token usage. Each step
 //! becomes a Claude `assistant` record holding a `tool_use` block for each of its tool
 //! calls, followed by a Claude `user` record for each call that finished, holding one
-//! `tool_result`; a `compaction` part becomes a `compact_boundary`. Every other message
-//! and part becomes a record holding only its time, which the detectors ignore.
+//! `tool_result`; a `compaction` part becomes a `compact_boundary`. Every message also
+//! becomes a record holding only its time, which the detectors ignore, and other parts
+//! become nothing. A message or part whose data is not a JSON object, or a tool part
+//! without its state, counts as a skipped line.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -122,7 +124,8 @@ fn immutable(db: &Path) -> rusqlite::Result<String> {
     Ok(format!("file://{slash}{path}?immutable=1"))
 }
 
-/// A part of a message: its id, time and parsed `data`.
+/// A part of a message: its id, time and parsed `data`, which is null when it is not a
+/// JSON object or is a tool call without its state.
 struct Part {
     id: String,
     at: i64,
@@ -134,7 +137,10 @@ impl Part {
         Self {
             id,
             at,
-            data: serde_json::from_str(data).unwrap_or(Value::Null),
+            data: serde_json::from_str::<Value>(data)
+                .ok()
+                .filter(|d| d.is_object() && (d["type"] != "tool" || d["state"].is_object()))
+                .unwrap_or(Value::Null),
         }
     }
 
@@ -150,10 +156,21 @@ fn time(ms: i64) -> Value {
     })
 }
 
+/// The line standing for a message or part that cannot be read: it does not end in `}`,
+/// so the scan counts it as a skipped line, and it holds no row content.
+const SKIPPED: &str = "(OpenCode row that cannot be read)";
+
 /// Appends the records of message `id`, created at `at`, with `data` and `parts`.
 fn message(id: &str, at: i64, data: &str, parts: &[Part], lines: &mut Vec<String>) {
     let data = serde_json::from_str::<Value>(data).unwrap_or(Value::Null);
+    if !data.is_object() {
+        // Its role is unknown, so its parts cannot be read either.
+        lines.extend(std::iter::repeat_n(SKIPPED.to_owned(), 1 + parts.len()));
+        return;
+    }
     lines.push(json!({"type": "opencode", "timestamp": time(at)}).to_string());
+    let skipped = parts.iter().filter(|p| !p.data.is_object()).count();
+    lines.extend(std::iter::repeat_n(SKIPPED.to_owned(), skipped));
     if data.get("role").and_then(Value::as_str) != Some("assistant") {
         for p in parts.iter().filter(|p| p.kind() == "compaction") {
             lines.push(

@@ -42,6 +42,9 @@ CREATE TABLE account (id text PRIMARY KEY, email text NOT NULL, url text NOT NUL
   access_token text NOT NULL, refresh_token text NOT NULL);
 CREATE TABLE credential (id text PRIMARY KEY, label text NOT NULL, value text NOT NULL);
 CREATE TABLE session_share (session_id text PRIMARY KEY, secret text NOT NULL, url text NOT NULL);
+CREATE TABLE control_account (email text NOT NULL, url text NOT NULL, access_token text NOT NULL);
+INSERT INTO control_account VALUES ('sentinel-control@example.com', 'https://sentinel.example',
+  'sentinel-control-token');
 INSERT INTO account VALUES ('a', 'sentinel-email@example.com', 'https://sentinel.example',
   'sentinel-access-token', 'sentinel-refresh-token');
 INSERT INTO credential VALUES ('c', 'sentinel-label', 'sentinel-credential');
@@ -341,4 +344,70 @@ fn a_log_without_its_index_counts_as_unreadable_and_is_left_alone() {
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(doc["roots"][0]["unreadable"], json!(1), "{}", doc["roots"]);
     assert!(files(&dir) == before, "the database folder changed");
+}
+
+/// A message or part whose data is not JSON, a part whose message cannot be read and a
+/// tool part with no state each count as a skipped line; a part of a type shaphan does
+/// not know is passed over; none of their text prints.
+#[test]
+fn malformed_rows_count_as_skipped_lines_and_print_nothing() {
+    let (dir, writer) = database("opencode-malformed");
+    writer
+        .execute_batch(&format!(
+            "INSERT INTO session VALUES ('ses_c', 'p', NULL, 's', '/d', 't', {T0}, {T0});
+             INSERT INTO message VALUES ('ses_c-m0', 'ses_c', {T0}, {T0}, 'sentinel-message {{');
+             INSERT INTO part VALUES ('ses_c-m0-p0', 'ses_c-m0', 'ses_c', {T0}, {T0}, '{{}}');
+             INSERT INTO message VALUES ('ses_c-m1', 'ses_c', {T1}, {T1},
+               '{{\"role\":\"assistant\",\"modelID\":\"claude-opus-5-5\"}}');
+             INSERT INTO part VALUES ('ses_c-m1-p0', 'ses_c-m1', 'ses_c', {T1}, {T1},
+               '{{\"type\":\"step-start\"}}');
+             INSERT INTO part VALUES ('ses_c-m1-p1', 'ses_c-m1', 'ses_c', {T1}, {T1},
+               'sentinel-part [');
+             INSERT INTO part VALUES ('ses_c-m1-p2', 'ses_c-m1', 'ses_c', {T1}, {T1},
+               '{{\"type\":\"sentinel-future\",\"text\":\"sentinel-future-text\"}}');
+             INSERT INTO part VALUES ('ses_c-m1-p3', 'ses_c-m1', 'ses_c', {T1}, {T1},
+               '{{\"type\":\"tool\",\"tool\":\"bash\"}}');
+             INSERT INTO part VALUES ('ses_c-m1-p4', 'ses_c-m1', 'ses_c', {T1}, {T1},
+               '{{\"type\":\"step-finish\"}}');",
+            T1 = T0 + 1
+        ))
+        .expect("rows");
+    let (stdout, stderr) = report(&dir, &["--json"]);
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(
+        [
+            &doc["roots"][0]["files"],
+            &doc["roots"][0]["unreadable"],
+            &doc["roots"][0]["lines_skipped"]
+        ],
+        [&json!(3), &json!(0), &json!(4)],
+        "{}",
+        doc["roots"]
+    );
+    let polls = row(&doc, "polls", &[("agent", "opencode"), ("scope", "main")]);
+    assert_eq!(polls["commands"], json!(5), "{polls}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    assert!(!stderr.to_lowercase().contains("sentinel"), "{stderr}");
+}
+
+/// A database that cannot be read whole gives no partial report: a missing `part` table
+/// counts it as one unreadable file and none of its sessions count.
+#[test]
+fn a_database_missing_a_table_counts_as_unreadable_with_no_sessions() {
+    let (dir, writer) = database("opencode-no-part");
+    writer.execute_batch("DROP TABLE part").expect("drop");
+    let (stdout, _) = report(&dir, &["--json"]);
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(
+        [&doc["roots"][0]["files"], &doc["roots"][0]["unreadable"]],
+        [&json!(1), &json!(1)],
+        "{}",
+        doc["roots"]
+    );
+    assert_eq!(
+        doc["detectors"]["polls"]["tables"][0]["rows"],
+        json!([]),
+        "{}",
+        doc["detectors"]["polls"]
+    );
 }
