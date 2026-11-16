@@ -91,6 +91,32 @@ impl Tools {
     }
 }
 
+/// The columns of the table, in order.
+const COLUMNS: [&str; 11] = [
+    "agent",
+    "tool",
+    "calls",
+    "result_chars",
+    "result_tokens_est",
+    "result_usd_est",
+    "unpriced_tokens_est",
+    "errors",
+    "error_chars",
+    "images",
+    "documents",
+];
+
+/// The section's notes.
+fn notes() -> Vec<String> {
+    vec![
+        "Result chars are the characters of text in each call's result, which the agent sends to the model; errors are results the agent marked as an error, which a hook's denial also is. Web search and fetch rows measure what their results added to context, not what could have been avoided.".to_owned(),
+        "Images and documents are counted, not sized: their tokens depend on pixels and pages, which the transcript does not record.".to_owned(),
+        "A cascade is a run of 3 or more erroring results in a row within a session, counted once with its calls. Retry churn counts a call whose tool and exact input erred twice before without succeeding in between, from its third erroring result on. A call can be in both. Results outside the window, and copies of an earlier session's records, count nowhere and neither extend nor end a run.".to_owned(),
+        EST_NOTE.to_owned(),
+        prices::NOTE.to_owned(),
+    ]
+}
+
 /// A tool name as printed: a name of letters, digits and `_`, `-`, `.` or `:`, up to 128
 /// characters, as tool names are; anything else, which only a malformed record holds,
 /// is `(other)`, so that no other text reaches the output.
@@ -176,22 +202,7 @@ impl Detector for Tools {
             })
             .collect();
         rows.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
-        let mut table = Table::new(
-            "By agent and tool, largest results first",
-            vec![
-                "agent",
-                "tool",
-                "calls",
-                "result_chars",
-                "result_tokens_est",
-                "result_usd_est",
-                "unpriced_tokens_est",
-                "errors",
-                "error_chars",
-                "images",
-                "documents",
-            ],
-        );
+        let mut table = Table::new("By agent and tool, largest results first", COLUMNS.to_vec());
         table.rows = rows.into_iter().map(|(_, r)| r).collect();
         table.truncate(opts.limit);
         Section {
@@ -199,17 +210,17 @@ impl Detector for Tools {
             title: "tool calls and their results, by tool",
             summary: vec![
                 ("cascades".to_owned(), json!(self.cascades)),
-                ("calls_in_cascades".to_owned(), json!(self.calls_in_cascades)),
-                ("retry_churn_calls".to_owned(), json!(self.retry_churn_calls)),
+                (
+                    "calls_in_cascades".to_owned(),
+                    json!(self.calls_in_cascades),
+                ),
+                (
+                    "retry_churn_calls".to_owned(),
+                    json!(self.retry_churn_calls),
+                ),
             ],
             tables: vec![table],
-            notes: vec![
-                "Result chars are the characters of text in each call's result, which the agent sends to the model; errors are results the agent marked as an error, which a hook's denial also is. Web search and fetch rows measure what their results added to context, not what could have been avoided.".to_owned(),
-                "Images and documents are counted, not sized: their tokens depend on pixels and pages, which the transcript does not record.".to_owned(),
-                "A cascade is a run of 3 or more erroring results in a row within a session, counted once with its calls. Retry churn counts a call whose tool and exact input erred twice before without succeeding in between, from its third erroring result on. A call can be in both. Results outside the window, and copies of an earlier session's records, count nowhere and neither extend nor end a run.".to_owned(),
-                EST_NOTE.to_owned(),
-                prices::NOTE.to_owned(),
-            ],
+            notes: notes(),
         }
     }
 }
