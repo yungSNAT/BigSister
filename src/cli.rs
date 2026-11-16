@@ -80,6 +80,8 @@ pub enum Command {
     Rereads,
     /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi)
     Tools,
+    /// Cache writes by cause: new context, or rebuilds after an idle gap, a model switch or otherwise (Claude)
+    Cache,
     /// Hook durations, cancellations and timeouts (Claude)
     Hooks,
 }

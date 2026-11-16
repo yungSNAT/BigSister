@@ -34,6 +34,7 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         limit: cli.limit,
         paths: cli.paths,
         home: home.clone(),
+        usd_per_mtok: cli.usd_per_mtok,
     };
     let scanned: Vec<Agent> = stats.iter().map(|s| s.agent).collect();
     let sections: Vec<_> = dets

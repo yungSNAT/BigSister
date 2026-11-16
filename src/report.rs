@@ -14,6 +14,8 @@ pub struct Opts {
     pub paths: bool,
     /// The home folder with forward slashes, shown as `~`; compared case-insensitively.
     pub home: Option<String>,
+    /// The rate given with `--usd-per-mtok`, for measured tokens a section prices itself.
+    pub usd_per_mtok: Option<f64>,
 }
 
 /// One table in a section. Column names are `snake_case`; the text view spaces them.
