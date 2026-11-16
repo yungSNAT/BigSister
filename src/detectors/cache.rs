@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{Value, json};
 
 use crate::report::{Opts, Section, Table, ratio};
@@ -15,7 +15,8 @@ use crate::time::parse_ts;
 enum Cause {
     /// The session's first reply, which has no earlier cache.
     First,
-    /// Context the previous reply had not cached: the new turn, or a compacted context.
+    /// Context the previous reply had not cached: the new turn, or all of a reply's writes
+    /// after a compaction or a reply with unreadable usage.
     New,
     /// Rebuilt after a gap longer than the cache's lifetime.
     Idle,
@@ -89,8 +90,9 @@ pub struct Cache {
     previous: Option<Previous>,
     /// Whether a reply of the session so far wrote at the 1-hour lifetime.
     one_hour: bool,
-    /// Whether a compaction came after the previous reply.
-    compacted: bool,
+    /// Whether the next reply's writes are all new context: a compaction came after the
+    /// previous reply, or a reply's usage could not be read.
+    fresh: bool,
     /// The message ids of the session's replies so far.
     ids: HashSet<String>,
     /// The price the scan gave for the reply about to be recorded.
@@ -127,12 +129,13 @@ fn usage(reply: &Value) -> Option<Usage> {
     let split = u.get("cache_creation").unwrap_or(&Value::Null);
     let five = count(split, "ephemeral_5m_input_tokens")?;
     let hour = count(split, "ephemeral_1h_input_tokens")?;
+    let both = five.checked_add(hour)?;
     #[expect(
         clippy::cast_precision_loss,
         reason = "token counts stay far below 2^52"
     )]
-    let multiplier = if five + hour > 0 {
-        (five as f64 * WRITE_5M + hour as f64 * WRITE_1H) / (five + hour) as f64
+    let multiplier = if both > 0 {
+        (five as f64 * WRITE_5M + hour as f64 * WRITE_1H) / both as f64
     } else {
         WRITE_5M
     };
@@ -156,7 +159,7 @@ impl Detector for Cache {
     fn begin(&mut self, _s: &Session) {
         self.previous = None;
         self.one_hour = false;
-        self.compacted = false;
+        self.fresh = false;
         self.ids.clear();
         self.price = None;
         self.counted = false;
@@ -183,7 +186,7 @@ impl Detector for Cache {
         if r.kind() == "system"
             && v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
         {
-            self.compacted = true;
+            self.fresh = true;
             return;
         }
         let model = v.pointer("/message/model").and_then(Value::as_str);
@@ -191,14 +194,18 @@ impl Detector for Cache {
             return;
         };
         // Claude Code writes a record for each block of a reply, each with its usage.
-        if let Some(id) = v.pointer("/message/id").and_then(Value::as_str)
-            && !self.ids.insert(id.to_owned())
-        {
+        let id = v.pointer("/message/id").and_then(Value::as_str);
+        if id.is_some_and(|id| self.ids.contains(id)) {
             return;
         }
         let Some(u) = usage(v) else {
+            // What the reply left cached is unknown, so nothing after it counts as rebuilt.
+            self.fresh = true;
             return;
         };
+        if let Some(id) = id {
+            self.ids.insert(id.to_owned());
+        }
         let at = v
             .get("timestamp")
             .and_then(Value::as_str)
@@ -216,7 +223,7 @@ impl Detector for Cache {
             }
         }
         self.one_hour |= u.one_hour;
-        self.compacted = false;
+        self.fresh = false;
         self.previous = Some(Previous {
             cached: u.read.saturating_add(u.write),
             model: model.to_owned(),
@@ -265,7 +272,7 @@ fn notes(opts: &Opts) -> Vec<String> {
         |rate| format!("US${rate} per million tokens, the rate given with --usd-per-mtok"),
     );
     vec![
-        "Each reply's cache writes (cache_creation_input_tokens) are measured. Rebuilt tokens are an estimate of what was cached again: of the tokens the previous reply in the session left cached (its cache reads and writes), those this reply did not read, up to what it wrote. They assume each reply extends the previous one's prompt, as Claude Code's replies in one file do; the rest of a reply's writes are new context, and a reply after a compaction writes new context only.".to_owned(),
+        "Each reply's cache writes (cache_creation_input_tokens) are measured. Rebuilt tokens are an estimate of what was cached again: of the tokens the previous reply in the session left cached (its cache reads and writes), those this reply did not read, up to what it wrote. They assume each reply extends the previous one's prompt, as Claude Code's replies in one file do; the rest of a reply's writes are new context, and a reply after a compaction, or after a reply whose usage cannot be read, writes new context only.".to_owned(),
         "A rebuild follows an idle gap when the time between the 2 replies exceeds the cache's lifetime: 1 hour once a reply of the session has written 1-hour cache, otherwise 5 minutes. Otherwise it follows a model switch when the model changed, and is rebuilt otherwise when neither holds, as after a rewind or a changed prefix.".to_owned(),
         format!("Dollars (write usd est) estimate what the writes cost, not what could have been saved: the tokens at the cache write price, 1.25 times the input price for 5-minute writes and 2 times for 1-hour writes, split as the reply records (1.25 times when it does not), where the input price is {price}. A warm cache would have read rebuilt tokens at a fraction of the input price: a tenth or less, by model. Unpriced tokens are those of a model without a price. An illustration, not a bill."),
     ]
@@ -277,7 +284,7 @@ impl Cache {
     fn cause(&self, model: &str, at: Option<DateTime<Utc>>, u: &Usage) -> (Cause, u64) {
         let p = match &self.previous {
             None => return (Cause::First, 0),
-            Some(_) if self.compacted => return (Cause::New, 0),
+            Some(_) if self.fresh => return (Cause::New, 0),
             Some(p) => p,
         };
         let ttl = if self.one_hour {
@@ -285,8 +292,10 @@ impl Cache {
         } else {
             FIVE_MINUTES
         };
-        let gap = at.zip(p.at).map(|(now, then)| (now - then).num_seconds());
-        let cause = if gap.is_some_and(|g| g > ttl) {
+        let cause = if at
+            .zip(p.at)
+            .is_some_and(|(now, then)| now - then > TimeDelta::seconds(ttl))
+        {
             Cause::Idle
         } else if p.model != model {
             Cause::Switch
@@ -347,5 +356,87 @@ impl Cache {
             .entry((scope, cause))
             .or_default()
             .add(tokens, u.multiplier, price);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reply(id: &str, at: &str, usage: &Value) -> Value {
+        json!({"type": "assistant", "timestamp": at,
+               "message": {"model": "m", "id": id, "usage": usage}})
+    }
+
+    #[test]
+    fn a_split_write_weighs_each_lifetime_and_an_overflowing_split_is_unreadable() {
+        let split = |five: u64, hour: u64| {
+            reply(
+                "a",
+                "2026-11-08T01:00:00Z",
+                &json!({"cache_creation": {
+                "ephemeral_5m_input_tokens": five, "ephemeral_1h_input_tokens": hour}}),
+            )
+        };
+        let u = usage(&split(1000, 1000)).expect("usage");
+        assert!((u.multiplier - 1.625).abs() < 1e-12, "{}", u.multiplier);
+        assert!(u.one_hour);
+        assert!(usage(&split(u64::MAX, 1)).is_none());
+    }
+
+    #[test]
+    fn a_gap_a_millisecond_over_the_lifetime_is_idle() {
+        let c = Cache {
+            previous: Some(Previous {
+                cached: 100,
+                model: "m".to_owned(),
+                at: parse_ts("2026-11-08T01:00:00.000Z"),
+            }),
+            ..Cache::default()
+        };
+        let u = Usage {
+            read: 0,
+            write: 100,
+            multiplier: WRITE_5M,
+            one_hour: false,
+        };
+        let cause = |at: &str| c.cause("m", parse_ts(at), &u).0;
+        assert!(cause("2026-11-08T01:05:00.001Z") == Cause::Idle);
+        assert!(cause("2026-11-08T01:05:00.000Z") == Cause::Other);
+    }
+
+    #[test]
+    fn an_unreadable_reply_makes_the_next_writes_new_context() {
+        let s = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let mut c = Cache::default();
+        c.begin(&s);
+        let write = json!({"cache_creation_input_tokens": 100});
+        for v in [
+            reply("a", "2026-11-08T01:00:00Z", &write),
+            // Unreadable, then readable in the reply's next block.
+            reply(
+                "b",
+                "2026-11-08T03:00:00Z",
+                &json!({"cache_creation_input_tokens": "x"}),
+            ),
+            reply("b", "2026-11-08T03:00:00Z", &write),
+            reply("c", "2026-11-08T05:00:00Z", &write),
+        ] {
+            c.record(
+                &s,
+                &Record {
+                    value: &v,
+                    in_window: true,
+                },
+            );
+        }
+        let tokens = |cause| c.writes.get(&("main", cause)).map(|w| w.tokens);
+        assert_eq!(tokens(Cause::First), Some(100));
+        // b counts once, as new context, and c rebuilds what b cached.
+        assert_eq!(tokens(Cause::New), Some(100));
+        assert_eq!(tokens(Cause::Idle), Some(100));
     }
 }
