@@ -1712,17 +1712,17 @@ fn pi_sessions_feed_pipes_polls_and_rereads_once_despite_a_fork() {
     assert_eq!(polls["commands"], json!(4));
     assert_eq!(polls["polls"], json!(1));
     assert_eq!(polls["reruns_after_edit"], json!(1));
-    // The poll's 20,000 characters, read by Claude Opus 5.5 at US$4 per million.
-    assert_eq!(polls["poll_chars"], json!(20000));
-    assert_eq!(polls["poll_usd_est"], json!(0.02));
+    // The poll's 4,000 characters, read by Claude Fable 5.1 at US$10 per million.
+    assert_eq!(polls["poll_chars"], json!(4000));
+    assert_eq!(polls["poll_usd_est"], json!(0.01));
     assert_eq!(polls["unpriced_tokens_est"], json!(0));
     let rereads = find(rows(&doc, "rereads", 0), &[("agent", json!("pi"))]);
     assert_eq!(rereads["compactions"], json!(1));
     assert_eq!(rereads["reads"], json!(2));
     assert_eq!(rereads["rereads"], json!(1));
-    // The re-read's 40,000 characters, read by Claude Sonnet 5.5 at US$2 per million.
-    assert_eq!(rereads["reread_chars"], json!(40000));
-    assert_eq!(rereads["reread_usd_est"], json!(0.02));
+    // The re-read's 4,000 characters, read by Claude Fable 5.1 at US$10 per million.
+    assert_eq!(rereads["reread_chars"], json!(4000));
+    assert_eq!(rereads["reread_usd_est"], json!(0.01));
     let roots = doc["roots"].as_array().expect("roots");
     assert_eq!(roots.len(), 1, "{roots:?}");
     assert_eq!(roots[0]["agent"], json!("pi"));
