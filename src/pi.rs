@@ -221,10 +221,7 @@ mod tests {
     fn a_reply_keeps_its_model_first_and_its_tool_calls_under_claude_names() {
         let line = r#"{"type":"message","id":"a1","parentId":null,"timestamp":"2026-11-09T06:00:00.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"t"},{"type":"toolCall","id":"c1","name":"read","arguments":{"path":"/w/a.rs","offset":3}},{"type":"toolCall","id":"c2","name":"powershell","arguments":{"command":"ls"}}],"model":"claude-haiku-5-5","usage":{"input":5,"output":1,"cacheRead":7,"cacheWrite":2}}}"#;
         let out = rewrite(line).expect("rewritten");
-        assert!(
-            out.contains("\"message\":{\"model\":\"claude-haiku-5-5\""),
-            "{out}"
-        );
+        assert!(out.contains("\"message\":{\"model\":\"claude-haiku-5-5\""));
         let v = parsed(line);
         assert_eq!(v["uuid"], "a1@2026-11-09T06:00:00.000Z");
         assert_eq!(
