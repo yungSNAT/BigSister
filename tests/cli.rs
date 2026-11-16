@@ -293,6 +293,24 @@ fn cache_dollars_take_the_given_rate_times_the_write_multiplier() {
 }
 
 #[test]
+fn cache_dollars_take_a_price_file_and_name_it() {
+    // Opus 5.5 at US$8 instead of US$4 doubles the first reply's 5-minute writes.
+    let file = price_file(
+        "prices-cache.json",
+        r#"{"claude-opus-5-5": {"input_cost_per_token": 8e-06}}"#,
+    );
+    let doc = cache_report(&["--prices", file.to_str().expect("UTF-8 path")]);
+    let first = find(
+        rows(&doc, "cache", 0),
+        &[("scope", json!("main")), ("cause", json!("first reply"))],
+    );
+    assert_eq!(first["write_usd_est"], 10.0);
+    let notes = doc["detectors"]["cache"]["notes"].to_string();
+    assert!(notes.contains("prices-cache.json"), "{notes}");
+    assert!(!notes.contains("bundled"), "{notes}");
+}
+
+#[test]
 fn schemas_report_idle_groups_first_and_skip_deferred_tools() {
     let doc = report("schemas", &[]);
     let s = &doc["detectors"]["schemas"]["summary"];

@@ -265,12 +265,26 @@ impl Detector for Cache {
     }
 }
 
+/// The input price dollars are reckoned from: the `--usd-per-mtok` rate, or the reply's
+/// model's price in the `--prices` file or the bundled prices.
+pub(super) fn input_price(opts: &Opts) -> String {
+    match (opts.usd_per_mtok, &opts.prices_file) {
+        (Some(rate), _) => {
+            format!("US${rate} per million tokens, the rate given with --usd-per-mtok")
+        }
+        (None, Some(file)) => format!(
+            "the uncached input price of the reply's model in the price file {file}, given with --prices"
+        ),
+        (None, None) => format!(
+            "the uncached input price of the reply's model, from prices bundled with this release and read on {}",
+            crate::prices::READ
+        ),
+    }
+}
+
 /// The section's notes.
 fn notes(opts: &Opts) -> Vec<String> {
-    let price = opts.usd_per_mtok.map_or_else(
-        || format!("the uncached input price of the reply's model, from prices bundled with this release and read on {}", crate::prices::READ),
-        |rate| format!("US${rate} per million tokens, the rate given with --usd-per-mtok"),
-    );
+    let price = input_price(opts);
     vec![
         "Each reply's cache writes (cache_creation_input_tokens) are measured. Rebuilt tokens are an estimate of what was cached again: of the tokens the previous reply in the session left cached (its cache reads and writes), those this reply did not read, up to what it wrote. They assume each reply extends the previous one's prompt, as Claude Code's replies in one file do; the rest of a reply's writes are new context, and a reply after a compaction, or after a reply whose usage cannot be read, writes new context only.".to_owned(),
         "A rebuild follows an idle gap when the time between the 2 replies exceeds the cache's lifetime: 1 hour once a reply of the session has written 1-hour cache, otherwise 5 minutes. Otherwise it follows a model switch when the model changed, and is rebuilt otherwise when neither holds, as after a rewind or a changed prefix.".to_owned(),

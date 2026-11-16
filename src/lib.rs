@@ -36,6 +36,7 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         paths: cli.paths,
         home: home.clone(),
         usd_per_mtok: cli.usd_per_mtok,
+        prices_file: prices.file().map(str::to_owned),
     };
     let scanned: Vec<Agent> = stats.iter().map(|s| s.agent).collect();
     let sections: Vec<_> = dets

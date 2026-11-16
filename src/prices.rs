@@ -90,6 +90,12 @@ impl Prices {
         Some(tier.map_or(price.usd_per_mtok, |&(_, usd)| usd))
     }
 
+    /// The price file as the report shows it, when one was given.
+    #[must_use]
+    pub fn file(&self) -> Option<&str> {
+        self.file.as_deref()
+    }
+
     /// The note of each section whose estimates are priced at each model's price.
     #[must_use]
     pub fn note(&self) -> String {

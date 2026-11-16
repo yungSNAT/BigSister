@@ -89,6 +89,7 @@ const OPTS: Opts = Opts {
     paths: false,
     home: None,
     usd_per_mtok: None,
+    prices_file: None,
 };
 
 /// A section's summary value under `key`, or null.
