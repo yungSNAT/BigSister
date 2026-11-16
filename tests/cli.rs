@@ -1490,13 +1490,37 @@ fn detectors_from_csv(text: &str) -> Value {
     Value::Object(detectors)
 }
 
+/// Checks that a `--csv` output holds `detectors` from `--json`, each value once: a
+/// repeated key would rebuild equal but print an extra record.
+fn assert_csv_holds(csv: &str, detectors: &Value) {
+    assert_eq!(&detectors_from_csv(csv), detectors);
+    let count: usize = detectors
+        .as_object()
+        .expect("sections")
+        .values()
+        .map(|s| {
+            let tables = s["tables"].as_array().expect("tables");
+            let cells: usize = tables
+                .iter()
+                .flat_map(|t| t["rows"].as_array().expect("rows"))
+                .map(|r| r.as_object().expect("a row").len())
+                .sum();
+            1 + s["summary"].as_object().expect("summary").len()
+                + s["notes"].as_array().expect("notes").len()
+                + 2 * tables.len()
+                + cells
+        })
+        .sum();
+    assert_eq!(csv_records(csv).len(), count);
+}
+
 #[test]
 fn csv_holds_every_value_json_holds() {
     let args = fixture_args("all", &["--paths"]);
     let json: Value = serde_json::from_str(&output(&args, "--json")).expect("valid JSON");
     let csv = output(&args, "--csv");
     assert!(csv.lines().count() > 50, "{csv}");
-    assert_eq!(detectors_from_csv(&csv), json["detectors"]);
+    assert_csv_holds(&csv, &json["detectors"]);
 }
 
 #[test]
@@ -1512,7 +1536,7 @@ fn csv_quotes_every_field_and_starts_no_text_like_a_formula() {
     ];
     let json: Value = serde_json::from_str(&output(&args, "--json")).expect("valid JSON");
     let csv = output(&args, "--csv");
-    assert_eq!(detectors_from_csv(&csv), json["detectors"]);
+    assert_csv_holds(&csv, &json["detectors"]);
     let tools: Vec<Value> = csv_records(&csv)
         .iter()
         .filter(|r| &r[1] == "cell" && &r[4] == "tool")
@@ -1526,6 +1550,8 @@ fn csv_quotes_every_field_and_starts_no_text_like_a_formula() {
         "say \"hi\", there",
         "line\nbreak",
         "\tlead",
+        "\rcr",
+        "naïve 名前",
     ] {
         assert!(
             tools.contains(&json!(name)),
