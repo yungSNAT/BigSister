@@ -252,7 +252,8 @@ fn schemas_list_skills_against_skill_calls_and_slash_commands() {
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
     let r = rows(&doc, "schemas", 1);
     let skill = |name: &str| find(r, &[("scope", json!("main")), ("skill", json!(name))]);
-    // Called with Skill in one session, listed and idle in the other.
+    // Called with Skill in one session, listed and idle in the other, where a second,
+    // shorter listing of it leaves its largest entry.
     let used = skill("used-skill");
     assert_eq!(
         [
@@ -279,11 +280,14 @@ fn schemas_list_skills_against_skill_calls_and_slash_commands() {
     assert_eq!(skill("bare-skill")["idle_chars"], 13);
     assert_eq!(skill("late-skill")["idle_chars"], 28);
     assert_eq!(skill("(other)")["idle_chars"], 26);
+    // A line goes to the longest name it starts: `- pre:fix:` is not `pre`'s.
+    assert_eq!(skill("pre")["idle_chars"], 18);
+    assert_eq!(skill("pre:fix")["idle_chars"], 22);
     assert_eq!(
         r[0]["skill"], "plug:idle-skill",
         "most idle characters first"
     );
-    assert_eq!(r.len(), 6);
+    assert_eq!(r.len(), 8);
     assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
 }
 
