@@ -206,26 +206,7 @@ impl Detector for Cache {
             .get("timestamp")
             .and_then(Value::as_str)
             .and_then(parse_ts);
-        let (cause, rebuilt) = match &self.previous {
-            None => (Cause::First, 0),
-            Some(_) if self.compacted => (Cause::New, 0),
-            Some(p) => {
-                let ttl = if self.one_hour {
-                    ONE_HOUR
-                } else {
-                    FIVE_MINUTES
-                };
-                let gap = at.zip(p.at).map(|(now, then)| (now - then).num_seconds());
-                let cause = if gap.is_some_and(|g| g > ttl) {
-                    Cause::Idle
-                } else if p.model != model {
-                    Cause::Switch
-                } else {
-                    Cause::Other
-                };
-                (cause, u.write.min(p.cached.saturating_sub(u.read)))
-            }
-        };
+        let (cause, rebuilt) = self.cause(model, at, &u);
         if r.in_window {
             self.counted = true;
             let scope = s.scope();
@@ -254,8 +235,72 @@ impl Detector for Cache {
                 .filter(|((_, c), _)| *c == Cause::Idle)
                 .map(|(_, w)| w)
         };
-        let idle_rebuilds: u64 = idle().map(|w| w.replies).sum();
         let idle_tokens: u64 = idle().map(|w| w.tokens).sum();
+        Section {
+            name: "cache",
+            title: "cache writes: new context, and rebuilds of what the previous reply had cached (Claude)",
+            summary: vec![
+                (
+                    "sessions".to_owned(),
+                    json!(self.sessions.values().sum::<u64>()),
+                ),
+                ("write_tokens".to_owned(), json!(total)),
+                (
+                    "idle_rebuilds".to_owned(),
+                    json!(idle().map(|w| w.replies).sum::<u64>()),
+                ),
+                (
+                    "sessions_with_idle_rebuilds".to_owned(),
+                    json!(self.sessions_idle),
+                ),
+                ("idle_rebuild_share".to_owned(), ratio(idle_tokens, total)),
+            ],
+            tables: vec![self.table(opts)],
+            notes: notes(opts),
+        }
+    }
+}
+
+/// The section's notes.
+fn notes(opts: &Opts) -> Vec<String> {
+    let price = opts.usd_per_mtok.map_or_else(
+        || format!("the uncached input price of the reply's model, from prices bundled with this release and read on {}", crate::prices::READ),
+        |rate| format!("US${rate} per million tokens, the rate given with --usd-per-mtok"),
+    );
+    vec![
+        "Each reply's cache writes (cache_creation_input_tokens) are measured. Rebuilt tokens are an estimate of what was cached again: of the tokens the previous reply in the session left cached (its cache reads and writes), those this reply did not read, up to what it wrote. They assume each reply extends the previous one's prompt, as Claude Code's replies in one file do; the rest of a reply's writes are new context, and a reply after a compaction writes new context only.".to_owned(),
+        "A rebuild follows an idle gap when the time between the 2 replies exceeds the cache's lifetime: 1 hour once a reply of the session has written 1-hour cache, otherwise 5 minutes. Otherwise it follows a model switch when the model changed, and is rebuilt otherwise when neither holds, as after a rewind or a changed prefix.".to_owned(),
+        format!("Dollars (write usd est) estimate what the writes cost, not what could have been saved: the tokens at the cache write price, 1.25 times the input price for 5-minute writes and 2 times for 1-hour writes, split as the reply records (1.25 times when it does not), where the input price is {price}. A warm cache would have read rebuilt tokens at a tenth of the input price. Unpriced tokens are those of a model without a price. An illustration, not a bill."),
+    ]
+}
+
+impl Cache {
+    /// Why a reply on `model`, recorded `at`, wrote to the cache, and how many of its
+    /// writes rebuilt what the previous reply had cached.
+    fn cause(&self, model: &str, at: Option<DateTime<Utc>>, u: &Usage) -> (Cause, u64) {
+        let p = match &self.previous {
+            None => return (Cause::First, 0),
+            Some(_) if self.compacted => return (Cause::New, 0),
+            Some(p) => p,
+        };
+        let ttl = if self.one_hour {
+            ONE_HOUR
+        } else {
+            FIVE_MINUTES
+        };
+        let gap = at.zip(p.at).map(|(now, then)| (now - then).num_seconds());
+        let cause = if gap.is_some_and(|g| g > ttl) {
+            Cause::Idle
+        } else if p.model != model {
+            Cause::Switch
+        } else {
+            Cause::Other
+        };
+        (cause, u.write.min(p.cached.saturating_sub(u.read)))
+    }
+
+    /// The table by scope and cause, with dollars at the bundled prices or the given rate.
+    fn table(&self, opts: &Opts) -> Table {
         let mut table = Table::new(
             "By scope and cause",
             vec![
@@ -271,13 +316,9 @@ impl Detector for Cache {
             .writes
             .iter()
             .map(|((scope, cause), w)| {
-                let usd = opts
-                    .usd_per_mtok
-                    .map_or(w.weighted_usd, |rate| w.weighted * rate);
-                let unpriced = if opts.usd_per_mtok.is_some() {
-                    0
-                } else {
-                    w.unpriced
+                let (usd, unpriced) = match opts.usd_per_mtok {
+                    Some(rate) => (w.weighted * rate, 0),
+                    None => (w.weighted_usd, w.unpriced),
                 };
                 vec![
                     json!(scope),
@@ -290,31 +331,9 @@ impl Detector for Cache {
             })
             .collect();
         table.truncate(opts.limit);
-        let price = opts.usd_per_mtok.map_or_else(
-            || format!("the uncached input price of the reply's model, from prices bundled with this release and read on {}", crate::prices::READ),
-            |rate| format!("US${rate} per million tokens, the rate given with --usd-per-mtok"),
-        );
-        Section {
-            name: "cache",
-            title: "cache writes: new context, and rebuilds of what the previous reply had cached (Claude)",
-            summary: vec![
-                ("sessions".to_owned(), json!(self.sessions.values().sum::<u64>())),
-                ("write_tokens".to_owned(), json!(total)),
-                ("idle_rebuilds".to_owned(), json!(idle_rebuilds)),
-                ("sessions_with_idle_rebuilds".to_owned(), json!(self.sessions_idle)),
-                ("idle_rebuild_share".to_owned(), ratio(idle_tokens, total)),
-            ],
-            tables: vec![table],
-            notes: vec![
-                "Each reply's cache writes (cache_creation_input_tokens) are measured. Rebuilt tokens are an estimate of what was cached again: of the tokens the previous reply in the session left cached (its cache reads and writes), those this reply did not read, up to what it wrote. They assume each reply extends the previous one's prompt, as Claude Code's replies in one file do; the rest of a reply's writes are new context, and a reply after a compaction writes new context only.".to_owned(),
-                "A rebuild follows an idle gap when the time between the 2 replies exceeds the cache's lifetime: 1 hour once a reply of the session has written 1-hour cache, otherwise 5 minutes. Otherwise it follows a model switch when the model changed, and is rebuilt otherwise when neither holds, as after a rewind or a changed prefix.".to_owned(),
-                format!("Dollars (write usd est) estimate what the writes cost, not what could have been saved: the tokens at the cache write price, 1.25 times the input price for 5-minute writes and 2 times for 1-hour writes, split as the reply records (1.25 times when it does not), where the input price is {price}. A warm cache would have read rebuilt tokens at a tenth of the input price. Unpriced tokens are those of a model without a price. An illustration, not a bill."),
-            ],
-        }
+        table
     }
-}
 
-impl Cache {
     fn add(
         &mut self,
         scope: &'static str,
