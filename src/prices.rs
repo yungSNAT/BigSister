@@ -27,7 +27,7 @@ const BUNDLED: &str = include_str!("prices.json");
 
 /// The note of each section whose estimates are priced at each model's price, from the
 /// bundled prices. [`Prices::note`] gives the note for the prices in use.
-pub const NOTE: &str = "Dollars (usd est) price the characters of each estimate, divided by 4, once as uncached input at the published price of the model whose reply read them, from prices bundled with this release and read on 16 November 2026: an illustration, not a bill. Cached re-sends cost less and text kept in context costs again in later turns. Unpriced tokens est are those read by a model without a bundled price, or by no reply, and add no dollars.";
+pub const NOTE: &str = "Dollars (usd est) price the characters of each estimate, divided by 4, once as uncached input at the published price of the model whose reply read them, from prices bundled with this release and read on 16 November 2026: an illustration, not a bill. Cached re-sends cost less and text kept in context costs again in later turns. Unpriced tokens est are those read by a model without a bundled price, by a model priced by prompt size whose prompt size is not recorded, or by no reply, and add no dollars.";
 
 /// One model's price for uncached input, in US dollars per million tokens.
 #[derive(Debug, PartialEq)]
@@ -95,7 +95,7 @@ impl Prices {
         match &self.file {
             None => NOTE.to_owned(),
             Some(file) => format!(
-                "Dollars (usd est) price the characters of each estimate, divided by 4, once as uncached input at the price of the model whose reply read them in the price file {file}, given with --prices: an illustration, not a bill. Cached re-sends cost less and text kept in context costs again in later turns. Unpriced tokens est are those read by a model the file gives no price, or by no reply, and add no dollars."
+                "Dollars (usd est) price the characters of each estimate, divided by 4, once as uncached input at the price of the model whose reply read them in the price file {file}, given with --prices: an illustration, not a bill. Cached re-sends cost less and text kept in context costs again in later turns. Unpriced tokens est are those read by a model the file gives no price, by a model priced by prompt size whose prompt size is not recorded, or by no reply, and add no dollars."
             ),
         }
     }
@@ -111,6 +111,7 @@ const BASE: &str = "input_cost_per_token";
 /// readers settle in different ways), an entry that is not an object, a price that
 /// is not a number of at least 0 or that is too large to multiply by a million, a tier
 /// field not written as `input_cost_per_token_above_<N>k_tokens` with N a whole number
+/// without leading zeros
 /// and a tier without `input_cost_per_token`, and when no model has a price at all.
 fn parse(text: &str) -> Result<HashMap<String, Price>, String> {
     let doc: Value = serde_json::from_str(text).map_err(|e| format!("not valid JSON: {e}"))?;
@@ -150,9 +151,11 @@ fn price(model: &str, entry: &Value) -> Result<Option<Price>, String> {
         } else {
             continue;
         };
+        // The decimal the file gives, shifted 6 places: `1e-7 * 1e6` would be
+        // 0.09999999999999999, a cent short on a 150,000-token estimate.
         let usd = value
             .as_f64()
-            .map(|usd| usd * 1e6)
+            .and_then(|usd| format!("{usd}e6").parse::<f64>().ok())
             .filter(|usd| usd.is_finite() && *usd >= 0.0)
             .ok_or_else(|| format!("{model}: {field}: not a number of at least 0"))?;
         match most {
@@ -235,7 +238,10 @@ impl<'de> Visitor<'de> for UniqueKeys {
 /// `N` of a tier's `<N>k`, in tokens.
 fn thousands(n: &str) -> Option<u64> {
     let digits = n.strip_suffix('k')?;
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+    if digits.is_empty()
+        || !digits.bytes().all(|b| b.is_ascii_digit())
+        || (digits.len() > 1 && digits.starts_with('0'))
+    {
         return None;
     }
     digits.parse::<u64>().ok()?.checked_mul(1000)
@@ -276,12 +282,9 @@ impl Priced {
 mod tests {
     use super::*;
 
-    /// A price in dollars per million tokens, rounded to remove the float error of
-    /// multiplying a per-token price by a million.
+    /// A price in dollars per million tokens.
     fn flat(prices: &Prices, model: &str) -> Option<f64> {
-        prices
-            .usd_per_mtok(model, || panic!("{model} is not priced by prompt size"))
-            .map(|usd| (usd * 1e6).round() / 1e6)
+        prices.usd_per_mtok(model, || panic!("{model} is not priced by prompt size"))
     }
 
     #[test]
@@ -325,10 +328,7 @@ mod tests {
     #[test]
     fn haiku_5_5_is_priced_by_the_prompt_that_read_it() {
         let p = Prices::bundled();
-        let haiku = |tokens| {
-            p.usd_per_mtok("claude-haiku-5-5", || tokens)
-                .map(|usd| (usd * 1e6).round() / 1e6)
-        };
+        let haiku = |tokens| p.usd_per_mtok("claude-haiku-5-5", || tokens);
         assert_eq!(haiku(Some(0)), Some(0.10));
         assert_eq!(haiku(Some(100_000)), Some(0.10));
         assert_eq!(haiku(Some(100_001)), Some(0.50));
@@ -353,10 +353,7 @@ mod tests {
         assert_eq!(flat(&p, "sample_spec"), Some(0.0));
         assert_eq!(flat(&p, "image-model"), None);
         assert_eq!(flat(&p, "claude-opus-5-5"), None);
-        let tiered = |tokens| {
-            p.usd_per_mtok("tiered", || Some(tokens))
-                .map(|usd| (usd * 1e6).round() / 1e6)
-        };
+        let tiered = |tokens| p.usd_per_mtok("tiered", || Some(tokens));
         assert_eq!(tiered(32_000), Some(1.0));
         assert_eq!(tiered(32_001), Some(1.5));
         assert_eq!(tiered(200_000), Some(1.5));
@@ -367,7 +364,7 @@ mod tests {
     }
 
     /// Malformed price files and the error each must give.
-    const MALFORMED: [(&str, &str); 18] = [
+    const MALFORMED: [(&str, &str); 19] = [
         ("", "not valid JSON"),
         ("{\"m\": {\"input_cost_per_token\": 1e-6}", "not valid JSON"),
         ("[]", "not a JSON object of model ids"),
@@ -405,6 +402,10 @@ mod tests {
             "a tier is written",
         ),
         (
+            "{\"m\": {\"input_cost_per_token\": 1e-6, \"input_cost_per_token_above_1k_tokens\": 2e-6, \"input_cost_per_token_above_01k_tokens\": 3e-6}}",
+            "m: input_cost_per_token_above_01k_tokens: a tier is written",
+        ),
+        (
             "{\"m\": {\"input_cost_per_token\": 1e-6, \"input_cost_per_token_above_200k_tokens\": true}}",
             "m: input_cost_per_token_above_200k_tokens: not a number",
         ),
@@ -434,6 +435,17 @@ mod tests {
             assert!(err.starts_with("price file ~/p.json: "), "{err}");
             assert!(err.contains(wanted), "{text}: {err}");
         }
+    }
+
+    #[test]
+    fn a_price_is_the_decimal_the_file_gives_so_cents_round_as_written() {
+        let p = Prices::from_file(r#"{"m": {"input_cost_per_token": 1e-7}}"#, "p.json")
+            .expect("prices");
+        assert_eq!(flat(&p, "m"), Some(0.1));
+        // 150,000 tokens est at US$0.10 per million: US$0.015, rounded to cents.
+        let mut priced = Priced::default();
+        priced.add(600_000, flat(&p, "m"));
+        assert_eq!(priced.usd(), 0.02);
     }
 
     #[test]
