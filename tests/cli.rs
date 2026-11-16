@@ -636,7 +636,7 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[0]["lines_skipped"], 1);
     assert_eq!(roots[1]["files"], 2);
     assert_eq!(doc["schema_version"], 2);
-    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(6));
+    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(7));
 }
 
 /// `shaphan all` over the Claude transcripts in a fixture folder, which must hold 2.
@@ -1078,7 +1078,9 @@ fn probe_inputs_never_reach_the_output() {
 fn text_output_has_a_section_per_detector() {
     let (code, stdout, _) = run(&fixture_args("all", &["--limit", "1"]));
     assert_eq!(code, 0);
-    for name in ["startup", "schemas", "pipes", "polls", "rereads", "hooks"] {
+    for name in [
+        "startup", "schemas", "pipes", "polls", "rereads", "tools", "hooks",
+    ] {
         assert!(stdout.contains(&format!("== {name}: ")), "{name}");
     }
     assert!(stdout.contains("more rows; raise --limit"));
@@ -1394,6 +1396,187 @@ fn each_estimate_is_priced_at_the_model_that_read_it() {
     assert_eq!(doc["schema_version"], 2);
 }
 
+/// A Claude transcript of `calls`, each a tool name, its input, its result's content and
+/// whether the result is an error; each call is made by a reply of Claude Opus 5.5, which
+/// reads the result before it.
+fn tool_calls(name: &str, calls: &[(&str, Value, Value, bool)]) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("proj")).expect("folder");
+    let text: String = tool_call_records("", 0, calls).concat();
+    std::fs::write(dir.join("proj").join("s.jsonl"), text).expect("transcript");
+    dir
+}
+
+/// The records of `calls`, as `tool_calls` writes them, 2 lines for each call: ids start
+/// with `tag` and times `minute` minutes after 05:00 on 9 November 2026.
+fn tool_call_records(
+    tag: &str,
+    minute: usize,
+    calls: &[(&str, Value, Value, bool)],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, (tool, input, content, error)) in calls.iter().enumerate() {
+        let time = format!(
+            "2026-11-09T05:{:02}:{:02}.000Z",
+            minute + i / 30,
+            i % 30 * 2
+        );
+        // Written as text: Claude Code puts `model` first in a reply's message, and
+        // shaphan finds a reply by that.
+        let use_block = json!({"type": "tool_use", "id": format!("{tag}t{i}"), "name": tool,
+                               "input": input});
+        let result = json!({"type": "user", "uuid": format!("{tag}u{i}"), "timestamp": time,
+            "message": {"role": "user", "content": [{"type": "tool_result",
+            "tool_use_id": format!("{tag}t{i}"), "content": content, "is_error": error}]}});
+        out.push(format!(
+            "{{\"type\":\"assistant\",\"uuid\":\"{tag}a{i}\",\"timestamp\":\"{time}\",\
+             \"message\":{{\"model\":\"claude-opus-5-5\",\"role\":\"assistant\",\
+             \"content\":[{use_block}]}}}}\n{result}\n"
+        ));
+    }
+    out
+}
+
+#[test]
+fn a_resumed_sessions_copied_errors_extend_no_cascade_or_churn() {
+    let fail = || ("Bash", json!({"command": "false"}), json!("boom"), true);
+    let first = tool_call_records(
+        "",
+        0,
+        &[
+            ("Bash", json!({"command": "true"}), json!(""), false),
+            fail(),
+            fail(),
+            fail(),
+        ],
+    );
+    let dir = tool_calls("tool-calls-resumed", &[]);
+    std::fs::write(dir.join("proj").join("s.jsonl"), first.concat()).expect("first");
+    // The resumed session starts with copies of the 3 errors, then errs once more: counted,
+    // the copies would make a second cascade of 4 and 2 more churn calls.
+    let resumed = first[1..].concat() + &tool_call_records("r", 5, &[fail()]).concat();
+    std::fs::write(dir.join("proj").join("r.jsonl"), resumed).expect("resumed");
+    let (code, stdout, stderr) = run(&[
+        "tools",
+        "--claude-root",
+        dir.to_str().expect("UTF-8 path"),
+        "--codex-root",
+        CODEX,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let summary = &doc["detectors"]["tools"]["summary"];
+    assert_eq!(
+        [
+            &summary["cascades"],
+            &summary["calls_in_cascades"],
+            &summary["retry_churn_calls"]
+        ],
+        [&json!(1), &json!(3), &json!(1)],
+        "{summary}"
+    );
+    let bash = find(rows(&doc, "tools", 0), &[("tool", json!("Bash"))]);
+    assert_eq!([&bash["calls"], &bash["errors"]], [&json!(5), &json!(4)]);
+}
+
+/// The tools section's JSON for a transcript of results of several tools: one large, one
+/// with an image, and runs of errors.
+fn mixed_tool_calls() -> Value {
+    let fail = || json!({"command": "false"});
+    let boom = || json!("boom");
+    let dir = tool_calls(
+        "tool-calls",
+        &[
+            (
+                "WebSearch",
+                json!({"query": "q"}),
+                json!("w".repeat(40_000)),
+                false,
+            ),
+            (
+                "Read",
+                json!({"file_path": "a.png"}),
+                json!([{"type": "text", "text": "img"},
+                       {"type": "image", "source": {"type": "base64", "data": "AAAA"}}]),
+                false,
+            ),
+            // 3 erroring runs of one call, then another tool's error: a cascade of 4,
+            // and retry churn from the third erroring run.
+            ("Bash", fail(), boom(), true),
+            ("Bash", fail(), boom(), true),
+            ("Bash", fail(), boom(), true),
+            ("Edit", json!({"file_path": "x"}), boom(), true),
+            ("Bash", json!({"command": "true"}), json!(""), false),
+            // The fourth erroring run of the call, with no success of it between: churn.
+            ("Bash", fail(), boom(), true),
+            // Once the call succeeds, its count starts again: 2 errors are no churn and,
+            // with no third in a row, no cascade.
+            ("Bash", fail(), json!("ok"), false),
+            ("Bash", fail(), boom(), true),
+            ("Grep", json!({"pattern": "p"}), boom(), true),
+        ],
+    );
+    let args = [
+        "tools",
+        "--claude-root",
+        dir.to_str().expect("UTF-8 path"),
+        "--codex-root",
+        CODEX,
+        "--since",
+        SINCE,
+    ];
+    let doc: Value = serde_json::from_str(&output(&args, "--json")).expect("valid JSON");
+    assert_csv_holds(&output(&args, "--csv"), &doc["detectors"]);
+    doc
+}
+
+#[test]
+fn tools_report_result_sizes_errors_cascades_and_retry_churn() {
+    let doc = mixed_tool_calls();
+    let summary = &doc["detectors"]["tools"]["summary"];
+    assert_eq!(summary["cascades"], json!(1), "{summary}");
+    assert_eq!(summary["calls_in_cascades"], json!(4), "{summary}");
+    assert_eq!(summary["retry_churn_calls"], json!(2), "{summary}");
+    let table = rows(&doc, "tools", 0);
+    assert_eq!(
+        table[0]["tool"],
+        json!("WebSearch"),
+        "largest results first"
+    );
+    // 10,000 tokens est read by Claude Opus 5.5 at US$4 per million.
+    let web = find(table, &[("tool", json!("WebSearch"))]);
+    assert_eq!(
+        [
+            &web["calls"],
+            &web["result_chars"],
+            &web["result_tokens_est"]
+        ],
+        [&json!(1), &json!(40000), &json!(10000)]
+    );
+    assert_eq!(web["result_usd_est"], json!(0.04));
+    assert_eq!(web["errors"], json!(0));
+    let read = find(table, &[("tool", json!("Read"))]);
+    assert_eq!(
+        [&read["images"], &read["result_chars"]],
+        [&json!(1), &json!(3)]
+    );
+    let bash = find(table, &[("tool", json!("Bash"))]);
+    assert_eq!(
+        [&bash["calls"], &bash["errors"], &bash["error_chars"]],
+        [&json!(7), &json!(5), &json!(20)]
+    );
+    // The last result is read by no reply, so it is unpriced.
+    let grep = find(table, &[("tool", json!("Grep"))]);
+    assert_eq!(
+        [&grep["errors"], &grep["unpriced_tokens_est"]],
+        [&json!(1), &json!(1)]
+    );
+}
+
 /// A Claude transcript of `git status` run once, then by each of `readers` (a model id
 /// and its reply's `usage`, if any); each reader but the first reads a poll of 80,000
 /// characters.
@@ -1496,6 +1679,11 @@ fn a_given_rate_prices_every_estimate_and_leaves_none_unpriced() {
     let claude = find(rows(&doc, "polls", 0), &[("agent", json!("claude"))]);
     assert_eq!(claude["poll_usd_est"], json!(7.5));
     assert_eq!(claude["unpriced_tokens_est"], json!(0));
+    let tools = rows(&doc, "tools", 0);
+    assert!(!tools.is_empty());
+    for row in tools {
+        assert_eq!(row["unpriced_tokens_est"], json!(0), "{row}");
+    }
     let notes = doc["detectors"]["polls"]["notes"].to_string();
     assert!(notes.contains("--usd-per-mtok"), "{notes}");
     assert!(!notes.contains("16 November 2026"), "{notes}");
@@ -1811,6 +1999,21 @@ fn pi_sessions_feed_pipes_polls_and_rereads_once_despite_a_fork() {
     assert_eq!(roots[0]["agent"], json!("pi"));
     assert_eq!(roots[0]["files"], json!(2));
     assert_eq!(roots[0]["lines_skipped"], json!(0));
+}
+
+#[test]
+fn pi_tool_calls_count_once_despite_a_fork() {
+    let doc = pi_report(&[]);
+    let table = rows(&doc, "tools", 0);
+    assert_eq!(table.len(), 3, "{table:?}");
+    for (tool, calls) in [("Bash", 4), ("Read", 2), ("Edit", 1)] {
+        let row = find(table, &[("agent", json!("pi")), ("tool", json!(tool))]);
+        assert_eq!(
+            [&row["calls"], &row["errors"]],
+            [&json!(calls), &json!(0)],
+            "{tool}"
+        );
+    }
 }
 
 #[test]

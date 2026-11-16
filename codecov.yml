@@ -1,0 +1,11 @@
+# Codecov reports line coverage for the README badge. Its statuses are informational,
+# so coverage never blocks a merge, and it posts no comments.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        informational: true
+comment: false
