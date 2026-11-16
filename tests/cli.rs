@@ -292,6 +292,116 @@ fn cache_dollars_take_the_given_rate_times_the_write_multiplier() {
     assert!(notes.contains("--usd-per-mtok"), "{notes}");
 }
 
+const MODELS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/models");
+
+fn models_report(extra: &[&str]) -> Value {
+    let mut args = vec![
+        "models",
+        "--claude-root",
+        MODELS,
+        "--agent",
+        "claude",
+        "--since",
+        SINCE,
+        "--json",
+    ];
+    args.extend_from_slice(extra);
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+/// The values of `keys` in a row or summary, as a JSON array.
+fn cells(row: &Value, keys: &[&str]) -> Value {
+    keys.iter().map(|k| row[*k].clone()).collect()
+}
+
+#[test]
+fn models_price_input_by_model_effort_and_agent_type() {
+    let doc = models_report(&[]);
+    let r = rows(&doc, "models", 0);
+    let keys = [
+        "scope",
+        "model",
+        "effort",
+        "agent_type",
+        "input_usd_est",
+        "input_usd_share",
+    ];
+    // Most input dollars first. Uncached input at the input price, writes at 1.25 or 2
+    // times, reads at 0.025 (Fable 5.2), 0.05 (Opus and Sonnet 5.5) or 0.1 times it.
+    let got: Value = r.iter().map(|row| cells(row, &keys)).collect();
+    let want = json!([
+        ["main", "claude-opus-5-5", "(none)", "(none)", 1.6, 0.42],
+        ["main", "claude-fable-5-2", "xhigh", "(none)", 1.21, 0.32],
+        ["subagent", "claude-fable-5-2", "high", "worker", 0.48, 0.13],
+        ["main", "claude-opus-5-5", "high", "(none)", 0.4, 0.11],
+        [
+            "subagent",
+            "claude-sonnet-5-5",
+            "low",
+            "mechanical",
+            0.1,
+            0.03
+        ],
+        ["subagent", "claude-opus-5-5", "high", "worker", 0.02, 0.01],
+        [
+            "subagent",
+            "claude-unpriced-x",
+            "(none)",
+            "(other)",
+            0.0,
+            0.0
+        ]
+    ]);
+    assert_eq!(got, want);
+    // A second block of a reply adds nothing; output is counted, not priced.
+    let tokens = [
+        "replies",
+        "input_tokens",
+        "cache_write_tokens",
+        "cache_read_tokens",
+        "output_tokens",
+    ];
+    assert_eq!(
+        cells(&r[1], &tokens),
+        json!([1, 1000, 100_000, 1_000_000, 5000])
+    );
+    assert_eq!(r[6]["unpriced_replies"], 1);
+}
+
+#[test]
+fn models_rank_subagents_against_the_parent_s_top_priced_model() {
+    let keys = [
+        "replies",
+        "unreadable_replies",
+        "subagent_sessions",
+        "subagent_sessions_on_top_model",
+        "subagent_sessions_below_top_model",
+        "subagent_sessions_indeterminate",
+        "on_top_input_usd_est",
+    ];
+    // A Fable 5.2 subagent is on top of its parent's Fable 5.2 (a dearer model before the
+    // window does not count); a Sonnet one is below; an unpriced one and one whose
+    // parent was not read are indeterminate.
+    let doc = models_report(&[]);
+    let s = &doc["detectors"]["models"]["summary"];
+    assert_eq!(cells(s, &keys), json!([7, 0, 4, 1, 1, 2, 0.48]));
+    // A rate prices every reply's weighted tokens, unpriced ones too, and ranks the same.
+    let doc = models_report(&["--usd-per-mtok", "10"]);
+    let s = &doc["detectors"]["models"]["summary"];
+    assert_eq!(cells(s, &keys), json!([7, 0, 4, 1, 1, 2, 0.6]));
+    let unpriced = find(
+        rows(&doc, "models", 0),
+        &[("model", json!("claude-unpriced-x"))],
+    );
+    assert_eq!(
+        cells(unpriced, &["input_usd_est", "unpriced_replies"]),
+        json!([0.13, 0])
+    );
+}
+
 #[test]
 fn schemas_report_idle_groups_first_and_skip_deferred_tools() {
     let doc = report("schemas", &[]);
@@ -730,7 +840,7 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[0]["lines_skipped"], 1);
     assert_eq!(roots[1]["files"], 2);
     assert_eq!(doc["schema_version"], 2);
-    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(8));
+    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(9));
 }
 
 /// `shaphan all` over the Claude transcripts in a fixture folder, which must hold 2.
@@ -1034,6 +1144,7 @@ fn output_never_contains_transcript_content() {
     assert_no_sentinel(RESULTS, CODEX_WRAPPED);
     assert_no_sentinel(KINDS, CODEX);
     assert_no_sentinel(CACHE, CODEX);
+    assert_no_sentinel(MODELS, CODEX);
 }
 
 /// One main session with the attachment kinds, hook errors and pipe result the main
@@ -1174,7 +1285,7 @@ fn text_output_has_a_section_per_detector() {
     let (code, stdout, _) = run(&fixture_args("all", &["--limit", "1"]));
     assert_eq!(code, 0);
     for name in [
-        "startup", "schemas", "pipes", "polls", "rereads", "tools", "cache", "hooks",
+        "startup", "schemas", "pipes", "polls", "rereads", "tools", "cache", "models", "hooks",
     ] {
         assert!(stdout.contains(&format!("== {name}: ")), "{name}");
     }

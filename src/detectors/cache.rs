@@ -106,24 +106,24 @@ pub struct Cache {
 }
 
 /// A reply's usage, as far as the cache goes.
-struct Usage {
-    read: u64,
-    write: u64,
+pub(super) struct Usage {
+    pub(super) read: u64,
+    pub(super) write: u64,
     /// The write price multiplier, weighted by the tokens written at each lifetime.
-    multiplier: f64,
+    pub(super) multiplier: f64,
     one_hour: bool,
 }
 
 /// A count in `usage`: a missing or null field is 0; any other value that is not a
 /// non-negative integer makes the usage unreadable.
-fn count(usage: &Value, key: &str) -> Option<u64> {
+pub(super) fn count(usage: &Value, key: &str) -> Option<u64> {
     match usage.get(key) {
         None | Some(Value::Null) => Some(0),
         Some(v) => v.as_u64(),
     }
 }
 
-fn usage(reply: &Value) -> Option<Usage> {
+pub(super) fn usage(reply: &Value) -> Option<Usage> {
     let u = reply.pointer("/message/usage")?;
     let write = count(u, "cache_creation_input_tokens")?;
     let split = u.get("cache_creation").unwrap_or(&Value::Null);

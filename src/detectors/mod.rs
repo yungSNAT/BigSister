@@ -2,6 +2,7 @@
 
 pub mod cache;
 pub mod hooks;
+pub mod models;
 pub mod pipes;
 pub mod polls;
 pub mod rereads;
@@ -49,6 +50,9 @@ pub fn build(cmd: Command, programs: &Rc<Programs>) -> Vec<Box<dyn Detector>> {
     }
     if all || cmd == Command::Cache {
         v.push(Box::<cache::Cache>::default());
+    }
+    if all || cmd == Command::Models {
+        v.push(Box::<models::Models>::default());
     }
     if all || cmd == Command::Hooks {
         v.push(Box::new(hooks::Hooks::new(Rc::clone(programs))));
