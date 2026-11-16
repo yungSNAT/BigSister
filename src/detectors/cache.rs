@@ -58,12 +58,14 @@ impl Writes {
             reason = "token counts stay far below 2^52"
         )]
         let weighted = tokens as f64 * multiplier;
+        // shortcut: sums saturate; with each count at most MAX_COUNT, that takes more than
+        // 2^24 replies of a row, each claiming over a trillion tokens.
         self.replies += 1;
-        self.tokens += tokens;
+        self.tokens = self.tokens.saturating_add(tokens);
         self.weighted += weighted;
         match usd_per_mtok {
             Some(usd) => self.weighted_usd += weighted * usd,
-            None => self.unpriced += tokens,
+            None => self.unpriced = self.unpriced.saturating_add(tokens),
         }
     }
 }
@@ -118,12 +120,16 @@ struct Usage {
     one_hour: bool,
 }
 
-/// A count in `usage`: a missing or null field is 0; any other value that is not a
-/// non-negative integer makes the usage unreadable.
+/// The largest token count read, 2^40: far more than any context holds, and small
+/// enough that sums of counts stay exact.
+const MAX_COUNT: u64 = 1 << 40;
+
+/// A count in `usage`: a missing or null field is 0; any other value that is not an
+/// integer from 0 to [`MAX_COUNT`] makes the usage unreadable.
 fn count(usage: &Value, key: &str) -> Option<u64> {
     match usage.get(key) {
         None | Some(Value::Null) => Some(0),
-        Some(v) => v.as_u64(),
+        Some(v) => v.as_u64().filter(|&n| n <= MAX_COUNT),
     }
 }
 
@@ -204,7 +210,7 @@ impl Detector for Cache {
             return;
         }
         let Some(u) = usage(v) else {
-            self.unreadable = Some(id.map(str::to_owned));
+            self.unreadable(id);
             return;
         };
         self.readable(id);
@@ -235,14 +241,18 @@ impl Detector for Cache {
     }
 
     fn section(&self, opts: &Opts) -> Section {
-        let total: u64 = self.writes.values().map(|w| w.tokens).sum();
+        let total = self
+            .writes
+            .values()
+            .map(|w| w.tokens)
+            .fold(0, u64::saturating_add);
         let idle = || {
             self.writes
                 .iter()
                 .filter(|((_, c), _)| *c == Cause::Idle)
                 .map(|(_, w)| w)
         };
-        let idle_tokens: u64 = idle().map(|w| w.tokens).sum();
+        let idle_tokens = idle().map(|w| w.tokens).fold(0, u64::saturating_add);
         Section {
             name: "cache",
             title: "cache writes: new context, and rebuilds of what the previous reply had cached (Claude)",
@@ -299,10 +309,11 @@ impl Cache {
     /// Why a reply on `model`, recorded `at`, wrote to the cache, and how many of its
     /// writes rebuilt what the previous reply had cached.
     fn cause(&self, model: &str, at: Option<DateTime<Utc>>, u: &Usage) -> (Cause, u64) {
-        let p = match &self.previous {
-            None => return (Cause::First, 0),
-            Some(_) if self.fresh => return (Cause::New, 0),
-            Some(p) => p,
+        if self.fresh {
+            return (Cause::New, 0);
+        }
+        let Some(p) = &self.previous else {
+            return (Cause::First, 0);
         };
         let ttl = if self.one_hour {
             ONE_HOUR
@@ -326,6 +337,19 @@ impl Cache {
             p.write.saturating_sub(u.read - p.read)
         };
         (cause, u.write.min(left))
+    }
+
+    /// Notes a reply with message id `id` whose usage cannot be read. After an earlier
+    /// unreadable reply other than this one, the chain is broken whatever follows.
+    fn unreadable(&mut self, id: Option<&str>) {
+        if self
+            .unreadable
+            .as_ref()
+            .is_some_and(|bad| bad.is_none() || bad.as_deref() != id)
+        {
+            self.fresh = true;
+        }
+        self.unreadable = Some(id.map(str::to_owned));
     }
 
     /// Notes a readable reply with message id `id`. After an unreadable reply other than
@@ -480,7 +504,60 @@ mod tests {
         // hours, and c what b cached.
         let b_bad = reply("b", "2026-11-08T03:00:00Z", &bad);
         let b_good = reply("b", "2026-11-08T03:00:00Z", &write);
-        assert_eq!(causes(&[a, b_bad, b_good, c]), [Some(100), None, Some(200)]);
+        assert_eq!(
+            causes(&[a.clone(), b_bad.clone(), b_good.clone(), c.clone()]),
+            [Some(100), None, Some(200)]
+        );
+    }
+
+    #[test]
+    fn after_an_unreadable_first_reply_the_writes_are_new_context() {
+        let a_bad = reply(
+            "a",
+            "2026-11-08T01:00:00Z",
+            &json!({"cache_creation_input_tokens": "x"}),
+        );
+        let b = reply(
+            "b",
+            "2026-11-08T01:01:00Z",
+            &json!({"cache_creation_input_tokens": 100}),
+        );
+        assert_eq!(causes(&[a_bad, b]), [None, Some(100), None]);
+    }
+
+    #[test]
+    fn a_break_stands_when_the_next_reply_is_unreadable_too() {
+        // b unreadable in every block, then c unreadable and readable in its next block:
+        // the break at b stands, so c's writes are new context, not an idle rebuild.
+        let write = json!({"cache_creation_input_tokens": 100});
+        let bad = json!({"cache_creation_input_tokens": "x"});
+        let replies = [
+            reply("a", "2026-11-08T01:00:00Z", &write),
+            reply("b", "2026-11-08T03:00:00Z", &bad),
+            reply("c", "2026-11-08T05:00:00Z", &bad),
+            reply("c", "2026-11-08T05:00:00Z", &write),
+        ];
+        assert_eq!(causes(&replies), [Some(100), Some(100), None]);
+    }
+
+    #[test]
+    fn a_count_above_2_40_is_unreadable() {
+        let writes = |n: u64| {
+            reply(
+                "a",
+                "2026-11-08T01:00:00Z",
+                &json!({"cache_creation_input_tokens": n}),
+            )
+        };
+        assert_eq!(usage(&writes(1 << 40)).map(|u| u.write), Some(1 << 40));
+        assert!(usage(&writes((1 << 40) + 1)).is_none());
+    }
+
+    #[test]
+    fn replies_writing_u64_max_add_nothing_and_never_overflow() {
+        let max = json!({"cache_creation_input_tokens": u64::MAX});
+        let replies = ["a", "b", "c"].map(|id| reply(id, "2026-11-08T01:00:00Z", &max));
+        assert_eq!(causes(&replies), [None, None, None]);
     }
 
     #[test]
