@@ -1487,9 +1487,10 @@ fn a_codex_result_is_priced_once_and_one_left_at_the_end_stays_unpriced() {
         codex_turn("gpt-6.1-sol"),
     ];
     codex_git_status(&mut lines, "c0", 4, Some(20_000));
-    // Read at a 20,000-token prompt; the later, larger calls and the next turn's call
-    // read it again but price it no more.
-    codex_git_status(&mut lines, "c1", 80_000, Some(20_000));
+    // Both read at one 20,000-token prompt; the later, larger calls and the next turn's
+    // call read them again but price them no more.
+    codex_git_status(&mut lines, "c1", 80_000, None);
+    codex_git_status(&mut lines, "c1b", 80_000, Some(20_000));
     lines.push(usage(272_001));
     lines.push(usage(272_001));
     lines.push(codex_turn("gpt-6.1-sol"));
@@ -1512,9 +1513,9 @@ fn a_codex_result_is_priced_once_and_one_left_at_the_end_stays_unpriced() {
     assert_eq!(code, 0, "{stderr}");
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
     let row = find(rows(&doc, "polls", 0), &[("agent", json!("codex"))]);
-    assert_eq!(row["polls"], json!(2), "{row}");
-    // 20,000 tokens est at US$2, once, and 20,000 unpriced.
-    assert_eq!(row["poll_usd_est"], json!(0.04), "{row}");
+    assert_eq!(row["polls"], json!(3), "{row}");
+    // 40,000 tokens est at US$2, once, and 20,000 unpriced.
+    assert_eq!(row["poll_usd_est"], json!(0.08), "{row}");
     assert_eq!(row["unpriced_tokens_est"], json!(20000), "{row}");
 }
 
