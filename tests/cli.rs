@@ -899,7 +899,13 @@ fn codex_skips_a_decoded_line_over_the_cap_and_reads_the_rest() {
 /// Runs `all` over two roots with each output flag and checks that no sentinel
 /// appears in any case: verb classes and paths are lower-cased.
 fn assert_no_sentinel(claude: &str, codex: &str) {
-    for extra in [&[][..], &["--json"], &["--paths"], &["--json", "--paths"]] {
+    for extra in [
+        &[][..],
+        &["--json"],
+        &["--paths"],
+        &["--json", "--paths"],
+        &["--csv", "--paths"],
+    ] {
         let mut args = vec![
             "all",
             "--claude-root",
@@ -1419,4 +1425,128 @@ fn idle_schemas_of_a_session_with_models_of_different_prices_stay_unpriced() {
 #[test]
 fn model_ids_never_reach_the_output() {
     assert_no_sentinel(PRICED_CLAUDE, PRICED_CODEX);
+}
+
+const CSV_CLAUDE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/csv/claude");
+
+/// The output of `args` with `flag` added, after a successful run.
+fn output(args: &[&str], flag: &str) -> String {
+    let mut args = args.to_vec();
+    args.push(flag);
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    stdout
+}
+
+/// The records of a `--csv` output, after checking its header.
+fn csv_records(text: &str) -> Vec<csv::StringRecord> {
+    let mut reader = csv::Reader::from_reader(text.as_bytes());
+    let header = reader.headers().expect("a header").clone();
+    assert_eq!(
+        header.iter().collect::<Vec<_>>(),
+        ["section", "kind", "table", "row", "column", "value"]
+    );
+    reader
+        .records()
+        .map(|r| r.expect("an RFC 4180 record"))
+        .collect()
+}
+
+/// A `--csv` output rebuilt into the `detectors` object `--json` prints.
+fn detectors_from_csv(text: &str) -> Value {
+    let mut detectors = serde_json::Map::new();
+    for r in csv_records(text) {
+        let value: Value = serde_json::from_str(&r[5]).expect("a JSON value");
+        let section = detectors
+            .entry(r[0].to_owned())
+            .or_insert_with(|| json!({"summary": {}, "tables": [], "notes": []}));
+        let ordinal = |field: &str| field.parse::<usize>().expect("an ordinal");
+        match &r[1] {
+            "section_title" => section["title"] = value,
+            "summary" => section["summary"][&r[4]] = value,
+            "note" => section["notes"].as_array_mut().expect("notes").push(value),
+            kind => {
+                let tables = section["tables"].as_array_mut().expect("tables");
+                let t = ordinal(&r[2]);
+                if tables.len() == t {
+                    tables.push(json!({"rows": []}));
+                }
+                match kind {
+                    "table_title" => tables[t]["title"] = value,
+                    "omitted" => tables[t]["omitted"] = value,
+                    "cell" => {
+                        let rows = tables[t]["rows"].as_array_mut().expect("rows");
+                        let i = ordinal(&r[3]);
+                        if rows.len() == i {
+                            rows.push(json!({}));
+                        }
+                        rows[i][&r[4]] = value;
+                    }
+                    other => panic!("unknown kind {other}"),
+                }
+            }
+        }
+    }
+    Value::Object(detectors)
+}
+
+#[test]
+fn csv_holds_every_value_json_holds() {
+    let args = fixture_args("all", &["--paths"]);
+    let json: Value = serde_json::from_str(&output(&args, "--json")).expect("valid JSON");
+    let csv = output(&args, "--csv");
+    assert!(csv.lines().count() > 50, "{csv}");
+    assert_eq!(detectors_from_csv(&csv), json["detectors"]);
+}
+
+#[test]
+fn csv_quotes_every_field_and_starts_no_text_like_a_formula() {
+    let args = [
+        "schemas",
+        "--agent",
+        "claude",
+        "--claude-root",
+        CSV_CLAUDE,
+        "--since",
+        SINCE,
+    ];
+    let json: Value = serde_json::from_str(&output(&args, "--json")).expect("valid JSON");
+    let csv = output(&args, "--csv");
+    assert_eq!(detectors_from_csv(&csv), json["detectors"]);
+    let tools: Vec<Value> = csv_records(&csv)
+        .iter()
+        .filter(|r| &r[1] == "cell" && &r[4] == "tool")
+        .map(|r| serde_json::from_str(&r[5]).expect("a JSON value"))
+        .collect();
+    for name in [
+        "=SUM(1,2)",
+        "+1",
+        "-2",
+        "@x",
+        "say \"hi\", there",
+        "line\nbreak",
+        "\tlead",
+    ] {
+        assert!(
+            tools.contains(&json!(name)),
+            "{name:?} missing from {tools:?}"
+        );
+    }
+    // A spreadsheet reads a field starting with one of these as a formula; only a
+    // number, such as -2.5, may start with '-'.
+    for r in csv_records(&csv) {
+        for field in r.iter() {
+            let risky = field.starts_with(['=', '+', '@', '\t', '\r'])
+                || (field.starts_with('-') && field.parse::<f64>().is_err());
+            assert!(!risky, "field {field:?} in {r:?}");
+        }
+    }
+}
+
+#[test]
+fn csv_and_json_cannot_be_combined() {
+    let mut args = fixture_args("polls", &["--csv"]);
+    args.push("--json");
+    let (code, _, stderr) = run(&args);
+    assert_eq!(code, 2, "{stderr}");
 }
