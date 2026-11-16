@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Value, json};
 
-use super::cache::{count, usage};
+use super::cache::{count, input_price, usage};
 use super::tools::printed;
 use crate::report::{Opts, Section, Table};
 use crate::scan::{Agent, Detector, Record, Session};
@@ -236,14 +236,11 @@ fn cents(usd: f64) -> f64 {
 
 /// The section's notes.
 fn notes(opts: &Opts) -> Vec<String> {
-    let price = opts.usd_per_mtok.map_or_else(
-        || format!("the uncached input price of the reply's model, from prices bundled with this release and read on {}", crate::prices::READ),
-        |rate| format!("US${rate} per million tokens, the rate given with --usd-per-mtok"),
-    );
+    let price = input_price(opts);
     vec![
         format!("Each reply counts once (the first record of its message.id); synthetic replies are skipped, and unreadable replies are those whose token counts are not non-negative integers or do not sum within 64 bits. Effort is the reasoning effort the reply records and agent type the subagent type Claude Code records (attributionAgent); {NONE} marks a reply that records neither."),
-        format!("Input usd est is an input-side estimate, not spend: uncached input at the input price, cache writes at 1.25 times it (5-minute) or 2 times (1-hour), as the reply records, and cache reads at the model's cache read price, 0.025, 0.05 or 0.1 times the input price as Anthropic's pricing page gave on 16 November 2026, where the input price is {price}. Output tokens are counted but not priced, as no output price is bundled; output costs several times as much as input per token. Input usd share is each row's part of all rows' input usd est. Unpriced replies are those of a model without a price. An illustration, not a bill."),
-        "A subagent session is on its parent's top model when every reply of it in the window is on a model whose bundled input price is at least the highest of its parent session's replies in the window; below when one is cheaper; indeterminate when the parent session (the main session whose id its records carry) was not read or had no priced reply in the window, or the subagent had an unpriced reply. Prices compared are always the bundled ones; on top input usd est sums those sessions' input usd est.".to_owned(),
+        format!("Input usd est is an input-side estimate, not spend: uncached input at the input price, cache writes at 1.25 times it (5-minute) or 2 times (1-hour), as the reply records, and cache reads at the model's cache read price, 0.025, 0.05 or 0.1 times the input price as Anthropic's pricing page gave on 16 November 2026, where the input price is {price}. Output tokens are counted but not priced, as shaphan reads input prices only; output costs several times as much as input per token. Input usd share is each row's part of all rows' input usd est. Unpriced replies are those of a model without a price. An illustration, not a bill."),
+        "A subagent session is on its parent's top model when every reply of it in the window is on a model whose input price is at least the highest of its parent session's replies in the window; below when one is cheaper; indeterminate when the parent session (the main session whose id its records carry) was not read or had no priced reply in the window, or the subagent had an unpriced reply. Prices compared are the bundled ones, or the price file's with --prices, whatever --usd-per-mtok gives; on top input usd est sums those sessions' input usd est.".to_owned(),
     ]
 }
 
