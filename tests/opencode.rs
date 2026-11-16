@@ -484,7 +484,8 @@ fn a_database_that_cannot_be_checked_counts_as_unreadable() {
     let (dir, writer) = database("opencode-denied");
     drop(writer);
     let set = |mode| std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode));
-    set(0o000).expect("deny");
+    // Listable but not searchable: the folder opens, its files cannot be looked up.
+    set(0o600).expect("deny");
     let denied = std::fs::metadata(dir.join("opencode.db")).is_err();
     let root = dir.to_str().expect("UTF-8 path");
     let out = run(&[
@@ -502,7 +503,7 @@ fn a_database_that_cannot_be_checked_counts_as_unreadable() {
         // Running as root, which no permission denies.
         return;
     }
-    let doc: Value = serde_json::from_str(&out.1).expect("valid JSON");
+    let doc: Value = serde_json::from_str(&out.1).unwrap_or_else(|e| panic!("{e}: {out:?}"));
     assert_eq!(
         [&doc["roots"][0]["files"], &doc["roots"][0]["unreadable"]],
         [&json!(1), &json!(1)],
