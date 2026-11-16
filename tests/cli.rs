@@ -234,6 +234,63 @@ fn schemas_report_idle_groups_first_and_skip_deferred_tools() {
     );
 }
 
+const SKILLS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/skills");
+
+#[test]
+fn schemas_list_skills_against_skill_calls_and_slash_commands() {
+    let (code, stdout, stderr) = run(&[
+        "schemas",
+        "--claude-root",
+        SKILLS,
+        "--agent",
+        "claude",
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let r = rows(&doc, "schemas", 1);
+    let skill = |name: &str| find(r, &[("scope", json!("main")), ("skill", json!(name))]);
+    // Called with Skill in one session, listed and idle in the other, where a second,
+    // shorter listing of it leaves its largest entry.
+    let used = skill("used-skill");
+    assert_eq!(
+        [
+            &used["sessions_listed"],
+            &used["sessions_used"],
+            &used["uses"],
+            &used["idle_chars"]
+        ],
+        [&json!(2), &json!(1), &json!(1), &json!(29)]
+    );
+    // A slash command uses a skill; its name quoted in a tool result does not.
+    assert_eq!(skill("slash-skill")["sessions_used"], 1);
+    let idle = skill("plug:idle-skill");
+    assert_eq!(
+        [
+            &idle["sessions_used"],
+            &idle["idle_chars"],
+            &idle["idle_tokens_est"]
+        ],
+        [&json!(0), &json!(60), &json!(15)]
+    );
+    // A name listed alone, a name listed in a later listing, and a name that is not
+    // printable.
+    assert_eq!(skill("bare-skill")["idle_chars"], 13);
+    assert_eq!(skill("late-skill")["idle_chars"], 28);
+    assert_eq!(skill("(other)")["idle_chars"], 26);
+    // A line goes to the longest name it starts: `- pre:fix:` is not `pre`'s.
+    assert_eq!(skill("pre")["idle_chars"], 18);
+    assert_eq!(skill("pre:fix")["idle_chars"], 22);
+    assert_eq!(
+        r[0]["skill"], "plug:idle-skill",
+        "most idle characters first"
+    );
+    assert_eq!(r.len(), 8);
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+}
+
 #[test]
 fn pipes_count_unguarded_test_runs_and_masked_failures() {
     let doc = report("pipes", &[]);
@@ -939,6 +996,7 @@ fn output_never_contains_transcript_content() {
     assert_no_sentinel(RESULTS, CODEX_RESULTS);
     assert_no_sentinel(RESULTS, CODEX_WRAPPED);
     assert_no_sentinel(KINDS, CODEX);
+    assert_no_sentinel(SKILLS, CODEX);
 }
 
 /// One main session with the attachment kinds, hook errors and pipe result the main
