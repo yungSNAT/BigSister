@@ -6,8 +6,8 @@
 //! role, and `compaction` entries. An assistant message becomes a Claude `assistant`
 //! record, a tool result a Claude `user` record holding one `tool_result` block and a
 //! compaction a Claude `compact_boundary`, so that the Claude code paths count pi's
-//! tool calls by the same rules. Every other entry is passed on unchanged, which the
-//! detectors ignore.
+//! tool calls by the same rules. Every other entry becomes a record holding only its
+//! time, which the detectors ignore, whatever its fields.
 
 use std::collections::HashMap;
 
@@ -21,17 +21,21 @@ use serde_json::{Map, Value, json};
 /// path from the root to the branch point again, as copies that build their state and
 /// count nowhere.
 ///
+/// An id written twice in one file leaves unknown which entry a later entry continues
+/// from, so the second entry, and every entry that continues from that id, is skipped.
+///
 /// shortcut: every entry's line is held until the file ends, as much memory as the file;
 /// holding each entry's offset and reading a path again from the file would be the
 /// upgrade.
 #[derive(Default)]
 pub struct Tree {
-    /// Each entry's parent and the line the detectors were given, by id.
-    nodes: HashMap<String, (Option<String>, String)>,
+    /// Each entry's parent and the line the detectors were given, by id; `None` for an
+    /// id written twice or an entry continuing from one.
+    nodes: HashMap<String, Option<(Option<String>, String)>>,
     last: Option<String>,
-    /// Whether the header names a session this one was forked or branched from, so that
-    /// its entries can be copies of an earlier file's.
-    pub forked: bool,
+    /// The file name of the session the header says this one was forked or branched
+    /// from: its entries can be copies of that file's.
+    pub parent: Option<String>,
 }
 
 /// One pi line as the scan feeds it on.
@@ -39,57 +43,62 @@ pub struct Read {
     /// When the entry branches: the lines of the path from the root to the entry it
     /// continues from, oldest first.
     pub branch: Option<Vec<String>>,
-    /// The Claude Code record the entry becomes, or `None` to pass the line on unchanged.
-    pub line: Option<String>,
+    /// The Claude Code record the entry becomes.
+    pub line: String,
 }
 
 impl Tree {
-    /// Reads pi entry `line`. A line that is not JSON is passed on, to be counted as a
-    /// skipped line.
-    pub fn read(&mut self, line: &str) -> Read {
-        let Ok(v) = serde_json::from_str::<Value>(line) else {
-            return Read {
-                branch: None,
-                line: None,
-            };
-        };
+    /// Reads pi entry `line`, or `None` for a line to count as skipped: one that is not
+    /// JSON, or an entry with an id read before or continuing from such an id.
+    pub fn read(&mut self, line: &str) -> Option<Read> {
+        let v = serde_json::from_str::<Value>(line).ok()?;
         if v.get("type").and_then(Value::as_str) == Some("session") {
-            self.forked = v
+            self.parent = v
                 .get("parentSession")
                 .and_then(Value::as_str)
-                .is_some_and(|p| !p.is_empty());
+                .and_then(|p| p.rsplit(['/', '\\']).next())
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned);
         }
         let claude = as_claude(&v);
         let (Some(id), Some(parent)) = (v.get("id").and_then(Value::as_str), v.get("parentId"))
         else {
-            return Read {
+            return Some(Read {
                 branch: None,
                 line: claude,
-            };
+            });
         };
         let parent = parent.as_str().map(str::to_owned);
+        if self.nodes.contains_key(id)
+            || parent
+                .as_ref()
+                .is_some_and(|p| matches!(self.nodes.get(p), Some(None)))
+        {
+            self.nodes.insert(id.to_owned(), None);
+            return None;
+        }
         let branch = self
             .last
             .as_ref()
             .is_some_and(|last| parent.as_ref() != Some(last))
             .then(|| self.path(parent.as_deref()));
-        let held = claude.clone().unwrap_or_else(|| line.to_owned());
-        self.nodes.insert(id.to_owned(), (parent, held));
+        self.nodes
+            .insert(id.to_owned(), Some((parent, claude.clone())));
         self.last = Some(id.to_owned());
-        Read {
+        Some(Read {
             branch,
             line: claude,
-        }
+        })
     }
 
     /// The lines from the root to entry `to`, oldest first. A parent never read ends the
-    /// path, and a path is no longer than the entries read, so a file whose ids repeat
-    /// cannot loop.
+    /// path, and a path is no longer than the entries read, so parents that name each
+    /// other cannot loop.
     fn path<'a>(&'a self, mut to: Option<&'a str>) -> Vec<String> {
         let mut out = Vec::new();
         while let Some(id) = to
             && out.len() < self.nodes.len()
-            && let Some((parent, line)) = self.nodes.get(id)
+            && let Some(Some((parent, line))) = self.nodes.get(id)
         {
             out.push(line.clone());
             to = parent.as_deref();
@@ -99,8 +108,8 @@ impl Tree {
     }
 }
 
-/// The Claude Code record for pi entry `v`, or `None` to pass it on unchanged.
-fn as_claude(v: &Value) -> Option<String> {
+/// The Claude Code record for pi entry `v`.
+fn as_claude(v: &Value) -> String {
     let ts = v.get("timestamp").cloned().unwrap_or(Value::Null);
     // pi copies an entry with its id and timestamp into a fork, so the 2 together find a
     // copy. An id alone is 8 hexadecimal characters, which other sessions may repeat.
@@ -108,14 +117,15 @@ fn as_claude(v: &Value) -> Option<String> {
         (Some(id), Some(t)) => Value::from(format!("{id}@{t}")),
         _ => Value::Null,
     };
-    match v.get("type").and_then(Value::as_str)? {
-        "compaction" => Some(
+    let claude = match v.get("type").and_then(Value::as_str) {
+        Some("compaction") => Some(
             json!({"type": "system", "subtype": "compact_boundary", "uuid": uuid, "timestamp": ts})
                 .to_string(),
         ),
-        "message" => message(v.get("message")?, &uuid, &ts),
+        Some("message") => v.get("message").and_then(|m| message(m, &uuid, &ts)),
         _ => None,
-    }
+    };
+    claude.unwrap_or_else(|| json!({"type": "pi", "timestamp": ts}).to_string())
 }
 
 fn message(m: &Value, uuid: &Value, ts: &Value) -> Option<String> {
@@ -200,7 +210,7 @@ mod tests {
     use super::*;
 
     fn rewrite(line: &str) -> Option<String> {
-        as_claude(&serde_json::from_str(line).ok()?)
+        Some(as_claude(&serde_json::from_str(line).ok()?))
     }
 
     fn parsed(line: &str) -> Value {
@@ -248,14 +258,61 @@ mod tests {
     }
 
     #[test]
-    fn other_entries_and_bad_lines_pass_unchanged() {
+    fn other_entries_keep_only_their_time() {
         for line in [
             r#"{"type":"session","version":3,"id":"u","timestamp":"t","cwd":"/w"}"#,
             r#"{"type":"message","id":"d4","timestamp":"t","message":{"role":"user","content":"hi"}}"#,
             r#"{"type":"model_change","id":"e5","timestamp":"t","provider":"p","modelId":"m"}"#,
-            "{not json}",
+            r#"{"type":"assistant","id":"f6","timestamp":"t","message":{"model":"m","content":[{"type":"tool_use","name":"Bash"}]}}"#,
         ] {
-            assert_eq!(rewrite(line), None, "{line}");
+            assert_eq!(
+                parsed(line),
+                json!({"type": "pi", "timestamp": "t"}),
+                "{line}"
+            );
         }
+    }
+
+    fn entry(id: &str, parent: Option<&str>) -> String {
+        json!({"type": "message", "id": id, "parentId": parent, "timestamp": "t",
+               "message": {"role": "user", "content": "hi"}})
+        .to_string()
+    }
+
+    #[test]
+    fn a_header_names_its_parent_by_file_name() {
+        for (path, name) in [
+            (r"C:\u\.pi\a.jsonl", Some("a.jsonl")),
+            ("/home/u/.pi/b.jsonl", Some("b.jsonl")),
+            ("", None),
+        ] {
+            let mut tree = Tree::default();
+            let header = json!({"type": "session", "id": "s", "parentSession": path});
+            assert!(tree.read(&header.to_string()).is_some());
+            assert_eq!(tree.parent.as_deref(), name, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_repeated_id_and_what_continues_from_it_are_skipped() {
+        let mut tree = Tree::default();
+        assert!(tree.read("{not json}").is_none());
+        for (line, kept) in [
+            (entry("a", None), true),
+            (entry("b", Some("a")), true),
+            (entry("b", Some("a")), false),
+            (entry("c", Some("b")), false),
+            (entry("d", Some("c")), false),
+            (entry("e", Some("a")), true),
+        ] {
+            assert_eq!(tree.read(&line).is_some(), kept, "{line}");
+        }
+        // e continues from a, not from the last entry kept: the path to a is given again.
+        let mut tree = Tree::default();
+        for line in [entry("a", None), entry("b", Some("a"))] {
+            tree.read(&line);
+        }
+        let read = tree.read(&entry("e", Some("a"))).expect("kept");
+        assert_eq!(read.branch.map(|p| p.len()), Some(1));
     }
 }

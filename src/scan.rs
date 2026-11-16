@@ -1,7 +1,7 @@
 //! One pass over transcript files, feeding each wanted record to the detectors.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -125,12 +125,7 @@ pub fn scan(
         .and_then(|s| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(s)))
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut out = Vec::new();
-    // The `uuid` of each Claude record parsed in an earlier file.
-    //
-    // shortcut: every uuid of the scan is held as a string, about 100 bytes each (a
-    // million uuids added 96 MB of peak memory, 14 November 2026). Holding a uuid as
-    // the 128-bit number it spells would cut that to about a quarter.
-    let mut earlier = HashSet::new();
+    let mut earlier = Earlier::default();
     for (agent, root) in roots {
         let active: Vec<usize> = (0..dets.len())
             .filter(|&i| dets[i].agents().contains(agent))
@@ -343,6 +338,32 @@ impl Lines {
     }
 }
 
+/// The `uuid` of each Claude-shaped record parsed in an earlier file.
+///
+/// shortcut: every uuid of the scan is held as a string, about 100 bytes each (a million
+/// uuids added 96 MB of peak memory, 14 November 2026). Holding a uuid as the 128-bit
+/// number it spells would cut that to about a quarter.
+#[derive(Default)]
+struct Earlier {
+    /// Claude Code's, all together: a resumed session does not name the file it copies.
+    claude: HashSet<String>,
+    /// pi's, by session file name: a fork's header names the file it copies, whose own
+    /// uuids include those it copied in turn.
+    pi: HashMap<String, HashSet<String>>,
+}
+
+impl Earlier {
+    /// Holds the `uuids` of `agent`'s file `path`, once it is read.
+    fn add(&mut self, agent: Agent, path: &Path, uuids: HashSet<String>) {
+        if agent == Agent::Pi {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            self.pi.insert(name.into_owned(), uuids);
+        } else {
+            self.claude.extend(uuids);
+        }
+    }
+}
+
 fn scan_file(
     reader: Box<dyn BufRead>,
     path: &Path,
@@ -350,7 +371,7 @@ fn scan_file(
     dets: &mut [Box<dyn Detector>],
     active: &[usize],
     st: &mut RootStats,
-    earlier: &mut HashSet<String>,
+    earlier: &mut Earlier,
 ) -> io::Result<()> {
     let mut lines = Lines::new(reader);
     let Some(first) = lines.next_line()? else {
@@ -401,7 +422,7 @@ fn scan_file(
         feed.dets[i].end(&session);
     }
     let uuids = feed.uuids;
-    earlier.extend(uuids);
+    earlier.add(agent, path, uuids);
     result
 }
 
@@ -429,8 +450,7 @@ struct Feed<'a> {
     codex_model: Option<Option<f64>>,
     /// The `uuid` of each Claude record parsed so far in the file.
     uuids: HashSet<String>,
-    /// The `uuid` of each Claude record parsed in an earlier file.
-    earlier: &'a HashSet<String>,
+    earlier: &'a Earlier,
     /// A pi session's tree; `None` for other agents.
     pi: Option<crate::pi::Tree>,
     /// Whether the lines fed are a pi path given again, which count nowhere.
@@ -447,7 +467,13 @@ impl Feed<'_> {
         let Some(tree) = self.pi.as_mut() else {
             return self.line(line);
         };
-        let read = tree.read(line);
+        if line.is_empty() {
+            return;
+        }
+        let Some(read) = tree.read(line) else {
+            self.st.bad_lines += 1;
+            return;
+        };
         if let Some(path) = read.branch {
             for &i in self.active {
                 self.dets[i].branch(&self.session);
@@ -458,7 +484,7 @@ impl Feed<'_> {
             }
             self.replaying = false;
         }
-        self.line(read.line.as_deref().unwrap_or(line));
+        self.line(&read.line);
     }
 
     fn line(&mut self, line: &str) {
@@ -519,8 +545,8 @@ impl Feed<'_> {
     /// repeats one of this file's. Claude Code can write a record again later in its
     /// file, with the same uuid; such a record counts nowhere. A resumed session's file
     /// starts with copies of the earlier file's records; such a copy still builds the
-    /// session's state but counts nowhere, as does a pi path given again at a branch. Only
-    /// a pi session forked or branched from another file holds copies.
+    /// session's state but counts nowhere, as does a pi path given again at a branch. A
+    /// pi session holds copies only of the file its header names.
     fn copied(&mut self, value: &Value) -> Option<bool> {
         if self.replaying {
             return Some(true);
@@ -534,7 +560,14 @@ impl Feed<'_> {
         if !self.uuids.insert(uuid.to_owned()) {
             return None;
         }
-        Some(self.earlier.contains(uuid) && self.pi.as_ref().is_none_or(|t| t.forked))
+        Some(match &self.pi {
+            None => self.earlier.claude.contains(uuid),
+            Some(tree) => tree
+                .parent
+                .as_ref()
+                .and_then(|name| self.earlier.pi.get(name))
+                .is_some_and(|uuids| uuids.contains(uuid)),
+        })
     }
 
     fn read_by(&mut self, usd_per_mtok: Option<f64>) {
@@ -661,7 +694,7 @@ mod tests {
                 &mut dets,
                 &[0],
                 &mut st,
-                &mut HashSet::new(),
+                &mut Earlier::default(),
             )
             .expect("read");
             assert_eq!(n.get(), want, "{agent:?}");
