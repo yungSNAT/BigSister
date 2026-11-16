@@ -1,0 +1,2 @@
+{"type":"attachment","uuid":"m1","timestamp":"2026-11-08T04:00:00.000Z","attachment":{"type":"skill_listing","content":"- used-skill: sentinel again","skillCount":1,"isInitial":true,"names":["used-skill"]}}
+{"type":"assistant","uuid":"m2","timestamp":"2026-11-08T04:00:00.000Z","message":{"model":"claude-opus-5-5","id":"msg_m2","role":"assistant","content":[{"type":"text","text":"sentinel reply"}],"usage":{"input_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":1}}}

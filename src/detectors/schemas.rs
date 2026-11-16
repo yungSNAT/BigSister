@@ -1,11 +1,13 @@
-//! Tool schemas loaded into Claude requests against the tools called.
+//! Tool schemas loaded into Claude requests against the tools called, and skills
+//! listed against the skills used.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
 use super::startup::loaded_tools;
-use super::{EST_NOTE, est_tokens, name_of, tool_uses};
+use super::tools::printed;
+use super::{EST_NOTE, chars, est_tokens, input_str, name_of, tool_uses};
 use crate::prices::{self, Priced};
 use crate::report::{Opts, Section, Table, median};
 use crate::scan::{Agent, Detector, Record, Session};
@@ -24,11 +26,28 @@ const COLUMNS: [&str; 11] = [
     "unpriced_tokens_est",
 ];
 
+const SKILL_COLUMNS: [&str; 10] = [
+    "scope",
+    "skill",
+    "sessions_listed",
+    "sessions_used",
+    "uses",
+    "median_chars",
+    "idle_chars",
+    "idle_tokens_est",
+    "idle_usd_est",
+    "unpriced_tokens_est",
+];
+
 #[derive(Default)]
 struct Current {
     loaded: BTreeMap<String, u64>,
     called: BTreeMap<String, u64>,
     in_window: bool,
+    /// Each skill a listing in the window named, with its listing characters.
+    listed: BTreeMap<String, u64>,
+    /// Each skill a `Skill` call or slash command in the window used, with its uses.
+    used: BTreeMap<String, u64>,
     /// The price of the models of the session's replies, once one is seen: `None`
     /// inside when a model has no bundled price or 2 models' prices differ.
     model: Option<Option<f64>>,
@@ -46,11 +65,15 @@ struct Group {
     idle_priced: Priced,
 }
 
-/// Loaded-against-called counts, by tool or MCP server.
+/// Loaded-against-called counts, by tool or MCP server, and listed-against-used counts,
+/// by skill.
 #[derive(Default)]
 pub struct Schemas {
     cur: Current,
     groups: BTreeMap<(&'static str, String), Group>,
+    /// By scope and skill as printed; `sessions_loaded` counts sessions that listed it,
+    /// `sessions_called` those that used it, `calls` its uses.
+    skills: BTreeMap<(&'static str, String), Group>,
     sessions: BTreeMap<&'static str, u64>,
 }
 
@@ -72,7 +95,10 @@ impl Detector for Schemas {
     }
 
     fn wants(&self, _s: &Session, line: &str) -> bool {
-        line.contains("\"type\":\"api-request-shape\"") || line.contains("\"tool_use\"")
+        line.contains("\"type\":\"api-request-shape\"")
+            || line.contains("\"tool_use\"")
+            || line.contains("\"type\":\"skill_listing\"")
+            || line.contains(SLASH)
     }
 
     fn begin(&mut self, _s: &Session) {
@@ -88,20 +114,45 @@ impl Detector for Schemas {
         if !r.in_window {
             return;
         }
-        if r.kind() == "api-request-shape" {
-            self.cur.in_window = true;
-            for (name, n) in loaded_tools(r.value) {
-                let e = self.cur.loaded.entry(name.to_owned()).or_default();
-                *e = (*e).max(n);
+        let cur = &mut self.cur;
+        match r.kind() {
+            "api-request-shape" => {
+                cur.in_window = true;
+                for (name, n) in loaded_tools(r.value) {
+                    let e = cur.loaded.entry(name.to_owned()).or_default();
+                    *e = (*e).max(n);
+                }
             }
+            "attachment" => {
+                let listing = r
+                    .value
+                    .get("attachment")
+                    .filter(|a| a.get("type").and_then(Value::as_str) == Some("skill_listing"));
+                for (name, n) in listing.map(listed_skills).unwrap_or_default() {
+                    let e = cur.listed.entry(name.to_owned()).or_default();
+                    *e = (*e).max(n);
+                }
+            }
+            "user" => {
+                if let Some(name) = slash_command(r.value) {
+                    *cur.used.entry(name.to_owned()).or_default() += 1;
+                }
+            }
+            _ => {}
         }
         for b in tool_uses(r) {
-            *self.cur.called.entry(name_of(b).to_owned()).or_default() += 1;
+            *cur.called.entry(name_of(b).to_owned()).or_default() += 1;
+            if name_of(b) == "Skill"
+                && let Some(skill) = input_str(b, "skill")
+            {
+                *cur.used.entry(skill.to_owned()).or_default() += 1;
+            }
         }
     }
 
     fn end(&mut self, s: &Session) {
         let cur = std::mem::take(&mut self.cur);
+        self.end_skills(s, &cur);
         if !cur.in_window {
             return;
         }
@@ -162,6 +213,34 @@ impl Detector for Schemas {
         );
         table.rows = rows.into_iter().map(|(_, r)| r).collect();
         table.truncate(opts.limit);
+        let mut skills: Vec<(u64, Vec<Value>)> = self
+            .skills
+            .iter()
+            .map(|((scope, name), g)| {
+                (
+                    g.idle_chars,
+                    vec![
+                        json!(scope),
+                        json!(name),
+                        json!(g.sessions_loaded),
+                        json!(g.sessions_called),
+                        json!(g.calls),
+                        json!(median(&g.chars)),
+                        json!(g.idle_chars),
+                        json!(est_tokens(g.idle_chars)),
+                        json!(g.idle_priced.usd()),
+                        json!(g.idle_priced.unpriced_tokens(g.idle_chars)),
+                    ],
+                )
+            })
+            .collect();
+        skills.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
+        let mut skill_table = Table::new(
+            "By skill, most idle characters first",
+            SKILL_COLUMNS.to_vec(),
+        );
+        skill_table.rows = skills.into_iter().map(|(_, r)| r).collect();
+        skill_table.truncate(opts.limit);
         Section {
             name: "schemas",
             title: "tool schemas loaded against tools called (Claude)",
@@ -169,14 +248,85 @@ impl Detector for Schemas {
                 ("main_sessions".to_owned(), json!(self.sessions.get("main").copied().unwrap_or(0))),
                 ("subagent_sessions".to_owned(), json!(self.sessions.get("subagent").copied().unwrap_or(0))),
             ],
-            tables: vec![table],
+            tables: vec![table, skill_table],
             notes: vec![
                 "Idle characters are schema characters loaded in sessions that never called the tool.".to_owned(),
+                "A skill is listed when a skill listing in the window names it, which costs its listing characters: its line and the lines after it up to the next skill's, each with a newline. It is used when a Skill call names it or a slash command runs it. Its idle characters are those listed in sessions that never used it.".to_owned(),
                 EST_NOTE.to_owned(),
-                "Idle characters are priced at the model of the session's replies, and stay unpriced when its replies' models differ in price.".to_owned(),
+                "Idle characters, of schemas and skills alike, are priced at the model of the session's replies, and stay unpriced when its replies' models differ in price.".to_owned(),
                 prices::NOTE.to_owned(),
                 "Tools sent with defer_loading are not counted as loaded, and a tool only ever sent that way gets no row.".to_owned(),
             ],
         }
     }
+}
+
+impl Schemas {
+    /// Adds a session's skills, listed in the window, against its uses.
+    fn end_skills(&mut self, s: &Session, cur: &Current) {
+        // Names that print alike, as `(other)` does, count as one skill of the session.
+        let mut per_skill: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+        for (name, n) in &cur.listed {
+            let e = per_skill.entry(printed(name)).or_default();
+            e.0 += n;
+            e.1 += cur.used.get(name).copied().unwrap_or(0);
+        }
+        for (name, (chars, uses)) in per_skill {
+            let g = self.skills.entry((s.scope(), name)).or_default();
+            g.sessions_loaded += 1;
+            g.calls += uses;
+            g.chars.push(chars);
+            if uses > 0 {
+                g.sessions_called += 1;
+            } else {
+                g.idle_chars += chars;
+                g.idle_priced.add(chars, cur.model.flatten());
+            }
+        }
+    }
+}
+
+/// What starts a slash command's name in the user message Claude Code writes for it.
+const SLASH: &str = "<command-name>/";
+
+/// The command a user's slash command ran, from a user message that is text, as
+/// Claude Code writes `<command-name>/name</command-name>` there; a tool result, which
+/// can quote such text, is not read.
+fn slash_command(user: &Value) -> Option<&str> {
+    let text = user.pointer("/message/content")?.as_str()?;
+    let rest = &text[text.find(SLASH)? + SLASH.len()..];
+    rest.get(..rest.find("</command-name>")?)
+}
+
+/// Each skill a `skill_listing` attachment names, with its characters in the listing:
+/// the line `- name`, or a line starting `- name:`, and the lines after it up to the next
+/// such line, each with a newline. A name without such a line has 0; a listing without
+/// `names` lists none.
+fn listed_skills(listing: &Value) -> Vec<(&str, u64)> {
+    let names: Vec<&str> = listing
+        .get("names")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut sizes: Vec<(&str, u64)> = names.iter().map(|n| (*n, 0)).collect();
+    let content = listing.get("content").and_then(Value::as_str).unwrap_or("");
+    let mut at = None;
+    for line in content.split('\n') {
+        if let Some(rest) = line.strip_prefix("- ") {
+            // The longest name the line starts, as one name can start another (`a`, `a:b`).
+            let starts = (0..names.len())
+                .filter(|&i| {
+                    rest.strip_prefix(names[i])
+                        .is_some_and(|after| after.is_empty() || after.starts_with(':'))
+                })
+                .max_by_key(|&i| names[i].len());
+            at = starts.or(at);
+        }
+        if let Some(i) = at {
+            sizes[i].1 += chars(line) + 1;
+        }
+    }
+    sizes
 }
