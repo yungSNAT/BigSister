@@ -1294,20 +1294,26 @@ fn roots_no_detector_reads_are_left_out_and_cut_lines_still_count() {
 fn a_rate_prices_each_token_estimate_and_nothing_else() {
     let plain = report("all", &[]);
     let priced = report("all", &["--usd-per-mtok", "1000"]);
-    for (detector, tokens, usd) in [
-        ("polls", "poll_tokens_est", "poll_usd_est"),
-        ("rereads", "reread_tokens_est", "reread_usd_est"),
-        ("schemas", "idle_tokens_est", "idle_usd_est"),
+    for (detector, table, tokens, usd) in [
+        ("polls", 0, "poll_tokens_est", "poll_usd_est"),
+        ("polls", 2, "result_tokens_est", "result_usd_est"),
+        ("rereads", 0, "reread_tokens_est", "reread_usd_est"),
+        ("schemas", 0, "idle_tokens_est", "idle_usd_est"),
     ] {
-        let rows = rows(&priced, detector, 0);
+        let rows = rows(&priced, detector, table);
         assert!(!rows.is_empty(), "{detector}");
         for row in rows {
             let want = (row[tokens].as_f64().unwrap() * 1000.0 / 1e6 * 100.0).round() / 100.0;
             assert_eq!(row[usd].as_f64(), Some(want), "{detector} {row}");
         }
         // Without a rate, the fixtures name no model, so nothing is priced.
+        let plain_rows: Vec<Value> = rows_of(&plain, detector)
+            .into_iter()
+            .filter(|r| r.get(usd).is_some())
+            .collect();
+        assert!(!plain_rows.is_empty(), "{detector} {usd}");
         assert!(
-            rows_of(&plain, detector)
+            plain_rows
                 .iter()
                 .all(|r| r[usd] == json!(0.0) && r["unpriced_tokens_est"] == r[tokens])
         );
