@@ -97,7 +97,12 @@ pub struct Models {
     /// had one.
     parents: HashMap<String, Option<f64>>,
     subs: Vec<Sub>,
-    unreadable: u64,
+    /// A reply whose usage could not be read since the previous reply, by its message id
+    /// if it has one, and whether it is in the window: unless a later block of the same
+    /// reply is readable, it counts as skipped.
+    unreadable: Option<(Option<String>, bool)>,
+    /// Replies in the window none of whose records has readable usage.
+    skipped: u64,
 }
 
 /// A reply's uncached input and output tokens.
@@ -129,6 +134,7 @@ impl Detector for Models {
     }
 
     fn end(&mut self, _s: &Session) {
+        self.skip();
         self.subs.extend(self.sub.take());
     }
 
@@ -157,14 +163,10 @@ impl Detector for Models {
                 .is_some()
         });
         let Some((u, (input, output))) = readable else {
-            if r.in_window {
-                self.unreadable += 1;
-            }
+            self.unreadable(id, r.in_window);
             return;
         };
-        if let Some(id) = id {
-            self.ids.insert(id.to_owned());
-        }
+        self.readable(id);
         if !r.in_window {
             return;
         }
@@ -209,7 +211,7 @@ impl Detector for Models {
                 "replies",
                 json!(self.groups.values().map(|g| g.replies).sum::<u64>()),
             ),
-            ("unreadable_replies", json!(self.unreadable)),
+            ("replies_skipped", json!(self.skipped)),
             ("subagent_sessions", json!(self.subs.len())),
             ("subagent_sessions_on_top_model", json!(on_top)),
             ("subagent_sessions_below_top_model", json!(below)),
@@ -238,13 +240,48 @@ fn cents(usd: f64) -> f64 {
 fn notes(opts: &Opts) -> Vec<String> {
     let price = input_price(opts);
     vec![
-        format!("Each reply counts once (the first record of its message.id); synthetic replies are skipped, and unreadable replies are those whose token counts are not non-negative integers or do not sum within 64 bits. Effort is the reasoning effort the reply records and agent type the subagent type Claude Code records (attributionAgent); {NONE} marks a reply that records neither."),
+        format!("Each reply counts once (the first record of its message.id); synthetic replies are left out, and a reply none of whose records has token counts that are non-negative integers summing within 64 bits counts as skipped (replies skipped) and adds to no total, so with any skipped the totals are a floor. Effort is the reasoning effort the reply records and agent type the subagent type Claude Code records (attributionAgent); {NONE} marks a reply that records neither."),
         format!("Input usd est is an input-side estimate, not spend: uncached input at the input price, cache writes at 1.25 times it (5-minute) or 2 times (1-hour), as the reply records, and cache reads at the model's cache read price, 0.025, 0.05 or 0.1 times the input price as Anthropic's pricing page gave on 16 November 2026, where the input price is {price}. Output tokens are counted but not priced, as shaphan reads input prices only; output costs several times as much as input per token. Input usd share is each row's part of all rows' input usd est. Unpriced replies are those of a model without a price. An illustration, not a bill."),
         "A subagent session is on its parent's top model when every reply of it in the window is on a model whose input price is at least the highest of its parent session's replies in the window; below when one is cheaper; indeterminate when the parent session (the main session whose id its records carry) was not read or had no priced reply in the window, or the subagent had an unpriced reply. Prices compared are the bundled ones, or the price file's with --prices, whatever --usd-per-mtok gives; on top input usd est sums those sessions' input usd est.".to_owned(),
     ]
 }
 
 impl Models {
+    /// Whether the pending unreadable reply has message id `id`: a later block of it.
+    fn pending(&self, id: Option<&str>) -> bool {
+        self.unreadable
+            .as_ref()
+            .is_some_and(|(bad, _)| bad.is_some() && bad.as_deref() == id)
+    }
+
+    /// Counts the pending unreadable reply, if any, as skipped when it is in the window.
+    fn skip(&mut self) {
+        if let Some((_, in_window)) = self.unreadable.take() {
+            self.skipped += u64::from(in_window);
+        }
+    }
+
+    /// Notes a reply with message id `id` whose usage cannot be read, in the window or not.
+    fn unreadable(&mut self, id: Option<&str>, in_window: bool) {
+        if !self.pending(id) {
+            self.skip();
+            self.unreadable = Some((id.map(str::to_owned), in_window));
+        }
+    }
+
+    /// Notes a readable reply with message id `id`: a pending unreadable block of it is
+    /// not skipped, and a pending other reply is.
+    fn readable(&mut self, id: Option<&str>) {
+        if self.pending(id) {
+            self.unreadable = None;
+        } else {
+            self.skip();
+        }
+        if let Some(id) = id {
+            self.ids.insert(id.to_owned());
+        }
+    }
+
     /// Notes a reply's model price for its session: the lowest of a subagent session,
     /// or the highest of a main session.
     fn session(&mut self, s: &Session, v: &Value, weighted: f64, price: Option<f64>) {
@@ -334,5 +371,59 @@ impl Models {
         table.rows = rows.into_iter().map(|(_, r)| r).collect();
         table.truncate(opts.limit);
         table
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn reply(id: &str, input: &Value) -> Value {
+        json!({"type": "assistant", "timestamp": "2026-11-08T01:00:00Z",
+               "message": {"model": "m", "id": id,
+                           "usage": {"input_tokens": input, "output_tokens": 1}}})
+    }
+
+    /// The detector after `records` of one main session, each in the window or not.
+    fn run(records: &[(Value, bool)]) -> Models {
+        let s = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let mut m = Models::default();
+        m.begin(&s);
+        for (v, in_window) in records {
+            m.record(
+                &s,
+                &Record {
+                    value: v,
+                    in_window: *in_window,
+                },
+            );
+        }
+        m.end(&s);
+        m
+    }
+
+    #[test]
+    fn a_reply_is_skipped_once_when_no_record_of_it_has_readable_usage() {
+        let (good, bad) = (json!(10), json!("x"));
+        let skipped = |records: &[(&str, &Value, bool)]| {
+            let records: Vec<_> = records
+                .iter()
+                .map(|(id, input, in_window)| (reply(id, input), *in_window))
+                .collect();
+            let m = run(&records);
+            (m.skipped, m.groups.values().map(|g| g.replies).sum::<u64>())
+        };
+        // 2 unreadable blocks of one reply skip it once.
+        assert_eq!(skipped(&[("a", &bad, true), ("a", &bad, true)]), (1, 0));
+        // A later readable block of the reply counts it, not skipped.
+        assert_eq!(skipped(&[("a", &bad, true), ("a", &good, true)]), (0, 1));
+        // An unreadable reply superseded by another reply, and one outside the window.
+        assert_eq!(
+            skipped(&[("a", &bad, true), ("b", &good, true), ("c", &bad, false)]),
+            (1, 1)
+        );
     }
 }

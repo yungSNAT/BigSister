@@ -375,7 +375,7 @@ fn models_price_input_by_model_effort_and_agent_type() {
 fn models_rank_subagents_against_the_parent_s_top_priced_model() {
     let keys = [
         "replies",
-        "unreadable_replies",
+        "replies_skipped",
         "subagent_sessions",
         "subagent_sessions_on_top_model",
         "subagent_sessions_below_top_model",
@@ -387,11 +387,11 @@ fn models_rank_subagents_against_the_parent_s_top_priced_model() {
     // parent was not read are indeterminate.
     let doc = models_report(&[]);
     let s = &doc["detectors"]["models"]["summary"];
-    assert_eq!(cells(s, &keys), json!([7, 0, 4, 1, 1, 2, 0.48]));
+    assert_eq!(cells(s, &keys), json!([7, 1, 4, 1, 1, 2, 0.48]));
     // A rate prices every reply's weighted tokens, unpriced ones too, and ranks the same.
     let doc = models_report(&["--usd-per-mtok", "10"]);
     let s = &doc["detectors"]["models"]["summary"];
-    assert_eq!(cells(s, &keys), json!([7, 0, 4, 1, 1, 2, 0.6]));
+    assert_eq!(cells(s, &keys), json!([7, 1, 4, 1, 1, 2, 0.6]));
     let unpriced = find(
         rows(&doc, "models", 0),
         &[("model", json!("claude-unpriced-x"))],
