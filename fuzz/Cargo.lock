@@ -440,6 +440,7 @@ dependencies = [
  "clap",
  "regex",
  "ruzstd",
+ "serde",
  "serde_json",
 ]
 

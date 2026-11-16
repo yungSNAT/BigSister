@@ -9,8 +9,10 @@
 //! `input_cost_per_token` is unpriced. These are the names LiteLLM's
 //! `model_prices_and_context_window.json` uses, so that file can be given as it is.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
 
+use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::Value;
 
 /// When the bundled prices were read from Anthropic's and OpenAI's pricing pages.
@@ -105,12 +107,14 @@ const BASE: &str = "input_cost_per_token";
 /// The models a price file prices.
 ///
 /// # Errors
-/// Fails on text that is not a JSON object, an entry that is not an object, a price that
+/// Fails on text that is not a JSON object or has an object with a key twice (which JSON
+/// readers settle in different ways), an entry that is not an object, a price that
 /// is not a number of at least 0 or that is too large to multiply by a million, a tier
 /// field not written as `input_cost_per_token_above_<N>k_tokens` with N a whole number
 /// and a tier without `input_cost_per_token`, and when no model has a price at all.
 fn parse(text: &str) -> Result<HashMap<String, Price>, String> {
     let doc: Value = serde_json::from_str(text).map_err(|e| format!("not valid JSON: {e}"))?;
+    serde_json::from_str::<UniqueKeys>(text).map_err(|e| e.to_string())?;
     let entries = doc
         .as_object()
         .ok_or("not a JSON object of model ids and their prices")?;
@@ -166,6 +170,65 @@ fn price(model: &str, entry: &Value) -> Result<Option<Price>, String> {
         }
         None if above.is_empty() => Ok(None),
         None => Err(format!("{model}: a tier but no {BASE}")),
+    }
+}
+
+/// A JSON value none of whose objects repeats a key.
+struct UniqueKeys;
+
+impl<'de> Deserialize<'de> for UniqueKeys {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(UniqueKeys)
+    }
+}
+
+impl<'de> Visitor<'de> for UniqueKeys {
+    type Value = UniqueKeys;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self, A::Error> {
+        let mut keys = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key.clone()) {
+                return Err(de::Error::custom(format!(
+                    "{key} appears twice in one object"
+                )));
+            }
+            map.next_value::<UniqueKeys>()?;
+        }
+        Ok(self)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self, A::Error> {
+        while seq.next_element::<UniqueKeys>()?.is_some() {}
+        Ok(self)
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Self, E> {
+        Ok(self)
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<Self, E> {
+        Ok(self)
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<Self, E> {
+        Ok(self)
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<Self, E> {
+        Ok(self)
+    }
+
+    fn visit_str<E>(self, _: &str) -> Result<Self, E> {
+        Ok(self)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self, E> {
+        Ok(self)
     }
 }
 
@@ -304,7 +367,7 @@ mod tests {
     }
 
     /// Malformed price files and the error each must give.
-    const MALFORMED: [(&str, &str); 16] = [
+    const MALFORMED: [(&str, &str); 18] = [
         ("", "not valid JSON"),
         ("{\"m\": {\"input_cost_per_token\": 1e-6}", "not valid JSON"),
         ("[]", "not a JSON object of model ids"),
@@ -350,6 +413,14 @@ mod tests {
             "m: a tier but no input_cost_per_token",
         ),
         ("{}", "no model has an input_cost_per_token"),
+        (
+            "{\"m\": {\"input_cost_per_token\": 1e-6}, \"m\": {\"input_cost_per_token\": 2e-6}}",
+            "m appears twice in one object at line 1",
+        ),
+        (
+            "{\"m\": {\"input_cost_per_token\": 1e-6, \"input_cost_per_token\": 2e-6}}",
+            "input_cost_per_token appears twice in one object",
+        ),
         (
             "{\"m\": {\"output_cost_per_token\": 1e-6}}",
             "no model has an input_cost_per_token",
