@@ -12,6 +12,7 @@ use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
 use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
 use serde_json::Value;
 
+use crate::prices::Prices;
 use crate::report::{Opts, Section};
 use crate::time::parse_ts;
 
@@ -94,7 +95,7 @@ pub trait Detector {
     }
     fn end(&mut self, _s: &Session) {}
     /// A model has read the session's context so far: its uncached input price per
-    /// million tokens, or `None` when it has no bundled price or no model did.
+    /// million tokens, or `None` when it has no price or no model did.
     fn read_by(&mut self, _s: &Session, _usd_per_mtok: Option<f64>) {}
     fn section(&self, opts: &Opts) -> Section;
 }
@@ -116,12 +117,14 @@ pub struct RootStats {
 const CLAUDE_SKIP_PREFIX: &str = "{\"type\":\"api-request-blob\"";
 
 /// Scans every transcript under each root that a chosen detector reads and that
-/// was modified at or after `since`.
+/// was modified at or after `since`, pricing what each model reads at `prices`.
 pub fn scan(
     roots: &[(Agent, PathBuf)],
     since: DateTime<Utc>,
+    prices: &Prices,
     dets: &mut [Box<dyn Detector>],
 ) -> Vec<RootStats> {
+    let window = Window { since, prices };
     let cutoff = u64::try_from(since.timestamp())
         .ok()
         .and_then(|s| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(s)))
@@ -144,7 +147,7 @@ pub fn scan(
             compressed: 0,
         };
         if *agent == Agent::OpenCode {
-            scan_opencode(root, since, dets, &active, &mut st, &mut earlier);
+            scan_opencode(root, &window, dets, &active, &mut st, &mut earlier);
             out.push(st);
             continue;
         }
@@ -155,7 +158,7 @@ pub fn scan(
             // fork's header is written when it is made, after the entries it copies.
             files.sort_by_cached_key(|p| first_time(p));
         }
-        scan_files(files, since, dets, &active, &mut st, &mut earlier);
+        scan_files(files, &window, dets, &active, &mut st, &mut earlier);
         out.push(st);
     }
     out
@@ -164,7 +167,7 @@ pub fn scan(
 /// Reads each of `files`, a root's transcripts.
 fn scan_files(
     files: Vec<PathBuf>,
-    since: DateTime<Utc>,
+    window: &Window<'_>,
     dets: &mut [Box<dyn Detector>],
     active: &[usize],
     st: &mut RootStats,
@@ -184,7 +187,7 @@ fn scan_files(
             }
         };
         st.files += 1;
-        if scan_file(reader, &path, since, dets, active, st, earlier).is_err() {
+        if scan_file(reader, &path, window, dets, active, st, earlier).is_err() {
             st.unreadable += 1;
         }
     }
@@ -196,7 +199,7 @@ fn scan_files(
 /// are read.
 fn scan_opencode(
     root: &Path,
-    since: DateTime<Utc>,
+    window: &Window<'_>,
     dets: &mut [Box<dyn Detector>],
     active: &[usize],
     st: &mut RootStats,
@@ -206,7 +209,7 @@ fn scan_opencode(
     if std::fs::metadata(&db).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) {
         return;
     }
-    let Ok(sessions) = crate::opencode::read(&db, since) else {
+    let Ok(sessions) = crate::opencode::read(&db, window.since) else {
         st.files += 1;
         st.unreadable += 1;
         return;
@@ -223,7 +226,7 @@ fn scan_opencode(
         }
         let reader = Box::new(io::Cursor::new(text.into_bytes()));
         // An in-memory transcript cannot fail to read.
-        let _ = scan_file(reader, &db, since, dets, active, st, earlier);
+        let _ = scan_file(reader, &db, window, dets, active, st, earlier);
     }
 }
 
@@ -394,6 +397,12 @@ impl Lines {
     }
 }
 
+/// What every transcript of a scan is read against.
+struct Window<'a> {
+    since: DateTime<Utc>,
+    prices: &'a Prices,
+}
+
 /// The `uuid` of each Claude-shaped record parsed in an earlier file.
 ///
 /// shortcut: every uuid of the scan is held as a string, about 100 bytes each (a million
@@ -423,7 +432,7 @@ impl Earlier {
 fn scan_file(
     reader: Box<dyn BufRead>,
     path: &Path,
-    since: DateTime<Utc>,
+    window: &Window<'_>,
     dets: &mut [Box<dyn Detector>],
     active: &[usize],
     st: &mut RootStats,
@@ -445,7 +454,8 @@ fn scan_file(
     }
     let mut feed = Feed {
         session,
-        since,
+        since: window.since,
+        prices: window.prices,
         last_time: None,
         codex_model: None,
         uuids: HashSet::new(),
@@ -503,6 +513,7 @@ fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
 struct Feed<'a> {
     session: Session,
     since: DateTime<Utc>,
+    prices: &'a Prices,
     last_time: Option<DateTime<Utc>>,
     /// The price of the model of the latest Codex `turn_context`, once one is seen.
     codex_model: Option<Option<f64>>,
@@ -636,7 +647,7 @@ impl Feed<'_> {
 
     /// Finds where a model reads what came before. A new Codex turn ends the last
     /// turn, whose model read that turn's results; the detectors are told here. A
-    /// Claude reply reads the results before it: its model's price, if bundled, is
+    /// Claude reply reads the results before it: its model's price, if it has one, is
     /// returned for `line` to pass on once the record is known to be no copy.
     ///
     /// shortcut: a Claude reply is found by `"message":{"model":"`, as Claude Code writes
@@ -653,7 +664,7 @@ impl Feed<'_> {
                 let model = rest.split('"').next().unwrap_or("");
                 // Claude Code writes a synthetic reply itself; no model read anything.
                 (model != "<synthetic>")
-                    .then(|| crate::prices::usd_per_mtok(model, || prompt_tokens(line)))
+                    .then(|| self.prices.usd_per_mtok(model, || prompt_tokens(line)))
             }
             Agent::Codex => {
                 if !line.contains("\"type\":\"turn_context\"") {
@@ -666,7 +677,7 @@ impl Feed<'_> {
                 let price = v
                     .pointer("/payload/model")
                     .and_then(Value::as_str)
-                    .and_then(|model| crate::prices::usd_per_mtok(model, || None));
+                    .and_then(|model| self.prices.usd_per_mtok(model, || None));
                 let ended = self.codex_model.replace(price).flatten();
                 self.read_by(ended);
                 None
@@ -748,7 +759,10 @@ mod tests {
             scan_file(
                 reader,
                 path,
-                DateTime::<Utc>::MIN_UTC,
+                &Window {
+                    since: DateTime::<Utc>::MIN_UTC,
+                    prices: &Prices::bundled(),
+                },
                 &mut dets,
                 &[0],
                 &mut st,

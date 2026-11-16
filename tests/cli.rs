@@ -1868,6 +1868,89 @@ fn csv_and_json_cannot_be_combined() {
     assert!(stderr.contains("cannot be used with"), "{stderr}");
 }
 
+/// Writes `text` to a fresh price file named `name`.
+fn price_file(name: &str, text: &str) -> PathBuf {
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    std::fs::write(&path, text).expect("price file");
+    path
+}
+
+#[test]
+fn a_price_file_replaces_the_bundled_prices() {
+    // LiteLLM's names, with fields shaphan ignores. Claude Fable 5.2 repriced to US$20 per
+    // million, a model the bundle lacks priced at US$40 and another at US$10, and GPT-6.1
+    // Sol left out, so unpriced.
+    let file = price_file(
+        "prices-replace.json",
+        r#"{
+          "claude-fable-5-2": {"input_cost_per_token": 2e-05, "output_cost_per_token": 1e-04},
+          "claude-SENTINEL-MODEL": {"input_cost_per_token": 4e-05},
+          "gpt-SENTINEL-MODEL": {"input_cost_per_token": 1e-05, "mode": "chat"},
+          "claude-opus-5-5": {"input_cost_per_token": 4e-06},
+          "claude-sonnet-5-5": {"input_cost_per_token": 2e-06}
+        }"#,
+    );
+    let doc = priced(
+        PRICED_CLAUDE,
+        &["--prices", file.to_str().expect("UTF-8 path")],
+    );
+    let polls = rows(&doc, "polls", 0);
+    // Claude: 3 polls of 2,500 tokens est: US$0.05 at US$20, US$0.10 at US$40, and one
+    // no reply read.
+    let claude = find(polls, &[("agent", json!("claude"))]);
+    assert_eq!(claude["poll_usd_est"], json!(0.15));
+    assert_eq!(claude["unpriced_tokens_est"], json!(2500));
+    // Codex: 3 polls of 5,000 tokens est: before any turn, in the GPT-6.1 Sol turn (no
+    // longer priced) and in a turn at US$10.
+    let codex = find(polls, &[("agent", json!("codex"))]);
+    assert_eq!(codex["poll_usd_est"], json!(0.05));
+    assert_eq!(codex["unpriced_tokens_est"], json!(10000));
+    let notes = doc["detectors"]["polls"]["notes"].to_string();
+    assert!(
+        notes.contains("price file") && notes.contains("prices-replace.json"),
+        "{notes}"
+    );
+    assert!(!notes.contains("bundled"), "{notes}");
+}
+
+#[test]
+fn a_bad_price_file_fails_the_run() {
+    let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-such-prices.json");
+    let bad = price_file(
+        "prices-bad.json",
+        r#"{"claude-opus-5-5": {"input_cost_per_token": "4e-06"}}"#,
+    );
+    for (file, wanted) in [
+        (&missing, "cannot read price file"),
+        (
+            &bad,
+            "claude-opus-5-5: input_cost_per_token: not a number of at least 0",
+        ),
+    ] {
+        let (code, stdout, stderr) = run(&[
+            "polls",
+            "--claude-root",
+            CLAUDE,
+            "--codex-root",
+            CODEX,
+            "--prices",
+            file.to_str().expect("UTF-8 path"),
+        ]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stdout.is_empty(), "{stdout}");
+        assert!(stderr.contains(wanted), "{stderr}");
+    }
+    let (code, _, stderr) = run(&[
+        "polls",
+        "--prices",
+        bad.to_str().expect("UTF-8 path"),
+        "--usd-per-mtok",
+        "3",
+    ]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+}
+
 const PI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pi");
 
 /// `shaphan all --agent pi --json` over the pi fixtures: a session and a fork of it,
