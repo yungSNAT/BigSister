@@ -55,13 +55,11 @@ pub const NOTE: &str = "Dollars (usd est) price the characters of each estimate,
 /// which stays unpriced when the size is not known.
 #[must_use]
 pub fn usd_per_mtok(model: &str, prompt_tokens: impl FnOnce() -> Option<u64>) -> Option<f64> {
-    if let Some(&(_, most, up_to, over)) = BY_PROMPT.iter().find(|(id, ..)| *id == model) {
-        return prompt_tokens().map(|tokens| if tokens <= most { up_to } else { over });
+    if let Some(&(_, usd)) = PRICES.iter().find(|(id, _)| *id == model) {
+        return Some(usd);
     }
-    PRICES
-        .iter()
-        .find(|(id, _)| *id == model)
-        .map(|(_, usd)| *usd)
+    let &(_, most, up_to, over) = BY_PROMPT.iter().find(|(id, ..)| *id == model)?;
+    prompt_tokens().map(|tokens| if tokens <= most { up_to } else { over })
 }
 
 /// The priced part of a row's characters.

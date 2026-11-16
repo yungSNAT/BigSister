@@ -537,18 +537,11 @@ impl Feed<'_> {
     }
 }
 
-/// The prompt a Claude reply was sent with, in tokens: its uncached input, cache writes
-/// and cache reads, as its `usage` records them. Parses the line, so it is asked for only
-/// by a model priced by prompt size.
+/// The prompt a Claude reply was sent with, in tokens, as
+/// [`crate::detectors::startup::input_tokens`] counts it. Parses the line, so it is
+/// asked for only by a model priced by prompt size.
 fn prompt_tokens(line: &str) -> Option<u64> {
-    let v = serde_json::from_str::<Value>(line).ok()?;
-    let usage = v.pointer("/message/usage")?;
-    let count = |key| usage.get(key).and_then(Value::as_u64);
-    Some(
-        count("input_tokens")?
-            + count("cache_creation_input_tokens").unwrap_or(0)
-            + count("cache_read_input_tokens").unwrap_or(0),
-    )
+    crate::detectors::startup::input_tokens(&serde_json::from_str(line).ok()?)
 }
 
 /// A record's top-level `timestamp`, read without parsing the line: Codex writes

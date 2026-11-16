@@ -235,7 +235,7 @@ fn synthetic(reply: &Value) -> bool {
 /// A reply's recorded input tokens: new, cache writes and cache reads, or none when
 /// `input_tokens` is missing, a field is not a non-negative integer or their sum
 /// overflows. A missing or null cache field counts as 0.
-fn input_tokens(reply: &Value) -> Option<u64> {
+pub(crate) fn input_tokens(reply: &Value) -> Option<u64> {
     let usage = reply.pointer("/message/usage")?;
     let cache = |k: &str| match usage.get(k) {
         None | Some(Value::Null) => Some(0),
