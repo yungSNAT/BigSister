@@ -110,10 +110,7 @@ fn resolve_roots(cli: &Cli, read: &[Agent], home: Option<&str>) -> Result<Roots,
         if given || cli.agent != AgentChoice::All {
             return Err(message);
         }
-        // Most machines have no pi; a missing default pi folder needs no note.
-        if agent != Agent::Pi || problem != "not found" {
-            skipped.push(message);
-        }
+        skipped.push(message);
     }
     if wanted(Agent::Codex)
         && cli.codex_root.is_none()

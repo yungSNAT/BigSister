@@ -79,6 +79,12 @@ pub trait Detector {
     /// them; parsing each line first would be the upgrade, at several times the cost.
     fn wants(&self, s: &Session, line: &str) -> bool;
     fn begin(&mut self, _s: &Session) {}
+    /// A pi session continues from an earlier entry than the last: the state of the path
+    /// left behind is dropped, and the path to the branch point is replayed as copies.
+    /// Counts already made stand.
+    fn branch(&mut self, s: &Session) {
+        self.begin(s);
+    }
     fn record(&mut self, s: &Session, r: &Record<'_>);
     /// Whether the rest of this file can change nothing the detector reports.
     fn done(&self, _s: &Session) -> bool {
@@ -367,6 +373,8 @@ fn scan_file(
         codex_model: None,
         uuids: HashSet::new(),
         earlier,
+        pi: (agent == Agent::Pi).then(crate::pi::Tree::default),
+        replaying: false,
         dets,
         active,
         st,
@@ -423,18 +431,34 @@ struct Feed<'a> {
     uuids: HashSet<String>,
     /// The `uuid` of each Claude record parsed in an earlier file.
     earlier: &'a HashSet<String>,
+    /// A pi session's tree; `None` for other agents.
+    pi: Option<crate::pi::Tree>,
+    /// Whether the lines fed are a pi path given again, which count nowhere.
+    replaying: bool,
     dets: &'a mut [Box<dyn Detector>],
     active: &'a [usize],
     st: &'a mut RootStats,
 }
 
 impl Feed<'_> {
-    /// Feeds one line, a pi entry as the Claude Code record it is rewritten to.
+    /// Feeds one line, a pi entry as the Claude Code record it is rewritten to, after
+    /// the path it branches from.
     fn take(&mut self, line: &str) {
-        let rewritten = (self.session.agent == Agent::Pi)
-            .then(|| crate::pi::as_claude(line))
-            .flatten();
-        self.line(rewritten.as_deref().unwrap_or(line));
+        let Some(tree) = self.pi.as_mut() else {
+            return self.line(line);
+        };
+        let read = tree.read(line);
+        if let Some(path) = read.branch {
+            for &i in self.active {
+                self.dets[i].branch(&self.session);
+            }
+            self.replaying = true;
+            for old in &path {
+                self.line(old);
+            }
+            self.replaying = false;
+        }
+        self.line(read.line.as_deref().unwrap_or(line));
     }
 
     fn line(&mut self, line: &str) {
@@ -495,8 +519,12 @@ impl Feed<'_> {
     /// repeats one of this file's. Claude Code can write a record again later in its
     /// file, with the same uuid; such a record counts nowhere. A resumed session's file
     /// starts with copies of the earlier file's records; such a copy still builds the
-    /// session's state but counts nowhere.
+    /// session's state but counts nowhere, as does a pi path given again at a branch. Only
+    /// a pi session forked or branched from another file holds copies.
     fn copied(&mut self, value: &Value) -> Option<bool> {
+        if self.replaying {
+            return Some(true);
+        }
         if !self.session.agent.claude_shaped() {
             return Some(false);
         }
@@ -506,7 +534,7 @@ impl Feed<'_> {
         if !self.uuids.insert(uuid.to_owned()) {
             return None;
         }
-        Some(self.earlier.contains(uuid))
+        Some(self.earlier.contains(uuid) && self.pi.as_ref().is_none_or(|t| t.forked))
     }
 
     fn read_by(&mut self, usd_per_mtok: Option<f64>) {

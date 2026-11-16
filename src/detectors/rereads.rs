@@ -84,6 +84,14 @@ impl Detector for Rereads {
         self.unread.clear();
     }
 
+    fn branch(&mut self, _s: &Session) {
+        // The session stays compacted if its left path was.
+        self.before.clear();
+        self.current.clear();
+        self.claude.clear();
+        self.unread.clear();
+    }
+
     fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
         for (agent, scope, n) in self.unread.drain(..) {
             let c = self.totals.entry((agent, scope)).or_default();

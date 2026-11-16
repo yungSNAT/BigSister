@@ -9,13 +9,98 @@
 //! tool calls by the same rules. Every other entry is passed on unchanged, which the
 //! detectors ignore.
 
+use std::collections::HashMap;
+
 use serde_json::{Map, Value, json};
 
-/// The Claude Code record for pi entry `line`, or `None` to pass the line on unchanged.
-/// A line that is not JSON is passed on, to be counted as a skipped line.
-#[must_use]
-pub fn as_claude(line: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(line).ok()?;
+/// A pi session's tree, as read so far from its file.
+///
+/// pi keeps branches of a session in one file: an entry names its parent, and after
+/// `/tree` an entry can continue from an earlier entry than the last one written. The
+/// detectors follow one path at a time, so at such a branch they are reset and given the
+/// path from the root to the branch point again, as copies that build their state and
+/// count nowhere.
+///
+/// shortcut: every entry's line is held until the file ends, as much memory as the file;
+/// holding each entry's offset and reading a path again from the file would be the
+/// upgrade.
+#[derive(Default)]
+pub struct Tree {
+    /// Each entry's parent and the line the detectors were given, by id.
+    nodes: HashMap<String, (Option<String>, String)>,
+    last: Option<String>,
+    /// Whether the header names a session this one was forked or branched from, so that
+    /// its entries can be copies of an earlier file's.
+    pub forked: bool,
+}
+
+/// One pi line as the scan feeds it on.
+pub struct Read {
+    /// When the entry branches: the lines of the path from the root to the entry it
+    /// continues from, oldest first.
+    pub branch: Option<Vec<String>>,
+    /// The Claude Code record the entry becomes, or `None` to pass the line on unchanged.
+    pub line: Option<String>,
+}
+
+impl Tree {
+    /// Reads pi entry `line`. A line that is not JSON is passed on, to be counted as a
+    /// skipped line.
+    pub fn read(&mut self, line: &str) -> Read {
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return Read {
+                branch: None,
+                line: None,
+            };
+        };
+        if v.get("type").and_then(Value::as_str) == Some("session") {
+            self.forked = v
+                .get("parentSession")
+                .and_then(Value::as_str)
+                .is_some_and(|p| !p.is_empty());
+        }
+        let claude = as_claude(&v);
+        let (Some(id), Some(parent)) = (v.get("id").and_then(Value::as_str), v.get("parentId"))
+        else {
+            return Read {
+                branch: None,
+                line: claude,
+            };
+        };
+        let parent = parent.as_str().map(str::to_owned);
+        let branch = self
+            .last
+            .as_ref()
+            .is_some_and(|last| parent.as_ref() != Some(last))
+            .then(|| self.path(parent.as_deref()));
+        let held = claude.clone().unwrap_or_else(|| line.to_owned());
+        self.nodes.insert(id.to_owned(), (parent, held));
+        self.last = Some(id.to_owned());
+        Read {
+            branch,
+            line: claude,
+        }
+    }
+
+    /// The lines from the root to entry `to`, oldest first. A parent never read ends the
+    /// path, and a path is no longer than the entries read, so a file whose ids repeat
+    /// cannot loop.
+    fn path<'a>(&'a self, mut to: Option<&'a str>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Some(id) = to
+            && out.len() < self.nodes.len()
+            && let Some((parent, line)) = self.nodes.get(id)
+        {
+            out.push(line.clone());
+            to = parent.as_deref();
+        }
+        out.reverse();
+        out
+    }
+}
+
+/// The Claude Code record for pi entry `v`, or `None` to pass it on unchanged.
+fn as_claude(v: &Value) -> Option<String> {
     let ts = v.get("timestamp").cloned().unwrap_or(Value::Null);
     // pi copies an entry with its id and timestamp into a fork, so the 2 together find a
     // copy. An id alone is 8 hexadecimal characters, which other sessions may repeat.
@@ -114,14 +199,18 @@ fn usage(u: Option<&Value>) -> Value {
 mod tests {
     use super::*;
 
+    fn rewrite(line: &str) -> Option<String> {
+        as_claude(&serde_json::from_str(line).ok()?)
+    }
+
     fn parsed(line: &str) -> Value {
-        serde_json::from_str(&as_claude(line).expect("rewritten")).expect("JSON")
+        serde_json::from_str(&rewrite(line).expect("rewritten")).expect("JSON")
     }
 
     #[test]
     fn a_reply_keeps_its_model_first_and_its_tool_calls_under_claude_names() {
         let line = r#"{"type":"message","id":"a1","parentId":null,"timestamp":"2026-11-09T06:00:00.000Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"t"},{"type":"toolCall","id":"c1","name":"read","arguments":{"path":"/w/a.rs","offset":3}},{"type":"toolCall","id":"c2","name":"powershell","arguments":{"command":"ls"}}],"model":"claude-haiku-5-5","usage":{"input":5,"output":1,"cacheRead":7,"cacheWrite":2}}}"#;
-        let out = as_claude(line).expect("rewritten");
+        let out = rewrite(line).expect("rewritten");
         assert!(
             out.contains("\"message\":{\"model\":\"claude-haiku-5-5\""),
             "{out}"
@@ -166,7 +255,7 @@ mod tests {
             r#"{"type":"model_change","id":"e5","timestamp":"t","provider":"p","modelId":"m"}"#,
             "{not json}",
         ] {
-            assert_eq!(as_claude(line), None, "{line}");
+            assert_eq!(rewrite(line), None, "{line}");
         }
     }
 }
