@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod detectors;
+pub mod pi;
 pub mod prices;
 pub mod programs;
 pub mod report;
@@ -81,11 +82,13 @@ fn resolve_roots(cli: &Cli, read: &[Agent], home: Option<&str>) -> Result<Roots,
                 AgentChoice::All => true,
                 AgentChoice::Claude => a == Agent::Claude,
                 AgentChoice::Codex => a == Agent::Codex,
+                AgentChoice::Pi => a == Agent::Pi,
             }
     };
     let candidates = [
         (Agent::Claude, cli.claude_root.clone(), ".claude/projects"),
         (Agent::Codex, cli.codex_root.clone(), ".codex/sessions"),
+        (Agent::Pi, cli.pi_root.clone(), ".pi/agent/sessions"),
     ];
     let mut roots = Vec::new();
     let mut skipped = Vec::new();
@@ -98,11 +101,7 @@ fn resolve_roots(cli: &Cli, read: &[Agent], home: Option<&str>) -> Result<Roots,
             Some(p) => p,
             None => PathBuf::from(home.ok_or("cannot find the home folder")?).join(default),
         };
-        let problem = if !path.is_dir() {
-            "not found"
-        } else if std::fs::read_dir(&path).is_err() {
-            "unreadable"
-        } else {
+        let Some(problem) = folder_problem(&path) else {
             roots.push((agent, path));
             continue;
         };
@@ -111,7 +110,10 @@ fn resolve_roots(cli: &Cli, read: &[Agent], home: Option<&str>) -> Result<Roots,
         if given || cli.agent != AgentChoice::All {
             return Err(message);
         }
-        skipped.push(message);
+        // Most machines have no pi; a missing default pi folder needs no note.
+        if agent != Agent::Pi || problem != "not found" {
+            skipped.push(message);
+        }
     }
     if wanted(Agent::Codex)
         && cli.codex_root.is_none()
@@ -125,6 +127,17 @@ fn resolve_roots(cli: &Cli, read: &[Agent], home: Option<&str>) -> Result<Roots,
         return Err(skipped.join("; "));
     }
     Ok((roots, skipped))
+}
+
+/// Why a transcript folder cannot be scanned, if it cannot.
+fn folder_problem(path: &std::path::Path) -> Option<&'static str> {
+    if !path.is_dir() {
+        Some("not found")
+    } else if std::fs::read_dir(path).is_err() {
+        Some("unreadable")
+    } else {
+        None
+    }
 }
 
 /// Codex moves older sessions out of `sessions` into `archived_sessions`, so the

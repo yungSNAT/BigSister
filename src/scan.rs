@@ -20,6 +20,7 @@ use crate::time::parse_ts;
 pub enum Agent {
     Claude,
     Codex,
+    Pi,
 }
 
 impl Agent {
@@ -28,7 +29,15 @@ impl Agent {
         match self {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
+            Agent::Pi => "pi",
         }
+    }
+
+    /// Whether the agent's records reach the detectors as Claude Code records: pi's are
+    /// rewritten into them ([`crate::pi`]).
+    #[must_use]
+    pub fn claude_shaped(self) -> bool {
+        matches!(self, Agent::Claude | Agent::Pi)
     }
 }
 
@@ -132,9 +141,10 @@ pub fn scan(
             compressed: 0,
         };
         let mut files = list_files(root, cutoff, &mut st);
-        if *agent == Agent::Claude {
+        if agent.claude_shaped() {
             // A copied record keeps its time, so reading by each file's first time reads
-            // an original before a copy of part of it, whose first record is later.
+            // an original before a copy of part of it, whose first record is later. A pi
+            // fork's header is written when it is made, after the entries it copies.
             files.sort_by_cached_key(|p| first_time(p));
         }
         for path in files {
@@ -361,13 +371,13 @@ fn scan_file(
         active,
         st,
     };
-    feed.line(&first);
+    feed.take(&first);
     let result = loop {
         if feed.active.iter().all(|&i| feed.dets[i].done(&session)) {
             break Ok(());
         }
         match lines.next_line() {
-            Ok(Some(line)) => feed.line(line.trim_end()),
+            Ok(Some(line)) => feed.take(line.trim_end()),
             Ok(None) => break Ok(()),
             Err(e) => break Err(e),
         }
@@ -399,6 +409,7 @@ fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
                 .and_then(Value::as_str)
                 .is_some_and(|p| !p.is_empty())
         }),
+        Agent::Pi => false,
     }
 }
 
@@ -418,6 +429,14 @@ struct Feed<'a> {
 }
 
 impl Feed<'_> {
+    /// Feeds one line, a pi entry as the Claude Code record it is rewritten to.
+    fn take(&mut self, line: &str) {
+        let rewritten = (self.session.agent == Agent::Pi)
+            .then(|| crate::pi::as_claude(line))
+            .flatten();
+        self.line(rewritten.as_deref().unwrap_or(line));
+    }
+
     fn line(&mut self, line: &str) {
         if line.is_empty()
             || (self.session.agent == Agent::Claude && line.starts_with(CLAUDE_SKIP_PREFIX))
@@ -478,7 +497,7 @@ impl Feed<'_> {
     /// starts with copies of the earlier file's records; such a copy still builds the
     /// session's state but counts nowhere.
     fn copied(&mut self, value: &Value) -> Option<bool> {
-        if self.session.agent != Agent::Claude {
+        if !self.session.agent.claude_shaped() {
             return Some(false);
         }
         let Some(uuid) = value.get("uuid").and_then(Value::as_str) else {
@@ -508,7 +527,7 @@ impl Feed<'_> {
     /// replies no detector reads to the uuids held for the scan.
     fn model(&mut self, line: &str) -> Option<Option<f64>> {
         match self.session.agent {
-            Agent::Claude => {
+            Agent::Claude | Agent::Pi => {
                 const KEY: &str = "\"message\":{\"model\":\"";
                 let at = line.find(KEY)?;
                 let rest = &line[at + KEY.len()..];

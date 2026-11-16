@@ -48,9 +48,15 @@ fn run_env(args: &[&str], env: &[(&str, &Path)]) -> (i32, String, String) {
         std::iter::once(stubs().to_path_buf()).chain(std::env::split_paths(&system)),
     )
     .expect("PATH");
+    // An empty home folder, so that no default folder of the machine running the tests
+    // is read; a test can give its own.
+    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("home-empty");
+    std::fs::create_dir_all(&home).expect("home folder");
     let out = Command::new(env!("CARGO_BIN_EXE_shaphan"))
         .args(args)
         .env("PATH", path)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .envs(env.iter().copied())
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
@@ -1130,7 +1136,7 @@ fn help_says_pipes_reads_codex_commands_too() {
     assert_eq!(code, 0);
     let help = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        help.contains("a pipe into tail or head hides (Claude, Codex)"),
+        help.contains("a pipe into tail or head hides (Claude, Codex, pi)"),
         "{stdout}"
     );
 }
@@ -1672,4 +1678,102 @@ fn csv_and_json_cannot_be_combined() {
     let (code, _, stderr) = run(&args);
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("cannot be used with"), "{stderr}");
+}
+
+const PI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pi");
+
+/// `shaphan all --agent pi --json` over the pi fixtures: a session and a fork of it,
+/// which pi writes as a copy of every entry.
+fn pi_report(extra: &[&str]) -> Value {
+    let mut args = vec![
+        "all",
+        "--agent",
+        "pi",
+        "--pi-root",
+        PI,
+        "--since",
+        SINCE,
+        "--json",
+    ];
+    args.extend_from_slice(extra);
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+#[test]
+fn pi_sessions_feed_pipes_polls_and_rereads_once_despite_a_fork() {
+    let doc = pi_report(&[]);
+    let pipes = find(rows(&doc, "pipes", 0), &[("agent", json!("pi"))]);
+    assert_eq!(pipes["test_runs"], json!(1));
+    assert_eq!(pipes["unguarded"], json!(1));
+    assert_eq!(pipes["showed_a_failure_but_reported_success"], json!(1));
+    let polls = find(rows(&doc, "polls", 0), &[("agent", json!("pi"))]);
+    assert_eq!(polls["commands"], json!(4));
+    assert_eq!(polls["polls"], json!(1));
+    assert_eq!(polls["reruns_after_edit"], json!(1));
+    // The poll's 20,000 characters, read by Claude Opus 5.5 at US$4 per million.
+    assert_eq!(polls["poll_chars"], json!(20000));
+    assert_eq!(polls["poll_usd_est"], json!(0.02));
+    assert_eq!(polls["unpriced_tokens_est"], json!(0));
+    let rereads = find(rows(&doc, "rereads", 0), &[("agent", json!("pi"))]);
+    assert_eq!(rereads["compactions"], json!(1));
+    assert_eq!(rereads["reads"], json!(2));
+    assert_eq!(rereads["rereads"], json!(1));
+    // The re-read's 40,000 characters, read by Claude Sonnet 5.5 at US$2 per million.
+    assert_eq!(rereads["reread_chars"], json!(40000));
+    assert_eq!(rereads["reread_usd_est"], json!(0.02));
+    let roots = doc["roots"].as_array().expect("roots");
+    assert_eq!(roots.len(), 1, "{roots:?}");
+    assert_eq!(roots[0]["agent"], json!("pi"));
+    assert_eq!(roots[0]["files"], json!(2));
+    assert_eq!(roots[0]["lines_skipped"], json!(0));
+}
+
+#[test]
+fn pi_output_never_contains_transcript_content() {
+    for extra in [&[][..], &["--json"], &["--paths"], &["--csv", "--paths"]] {
+        let mut args = vec!["all", "--agent", "pi", "--pi-root", PI, "--since", SINCE];
+        args.extend_from_slice(extra);
+        let (code, stdout, stderr) = run(&args);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(
+            !stdout.to_lowercase().contains("sentinel"),
+            "content leaked with {extra:?}:\n{stdout}"
+        );
+        assert!(!stderr.to_lowercase().contains("sentinel"), "{stderr}");
+    }
+}
+
+#[test]
+fn a_missing_pi_folder_is_an_error_only_when_asked_for() {
+    let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-pi-here");
+    let missing = missing.to_str().expect("UTF-8 path");
+    let (code, _, stderr) = run(&["polls", "--pi-root", missing, "--agent", "pi"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("pi transcript folder not found"),
+        "{stderr}"
+    );
+    // Under --agent all, with no pi folder in the home folder, nothing is said of pi.
+    let (code, stdout, stderr) = run(&[
+        "polls",
+        "--claude-root",
+        CLAUDE,
+        "--codex-root",
+        CODEX,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert!(!doc["skipped_roots"].to_string().contains("pi"), "{doc}");
+    assert!(
+        doc["roots"]
+            .as_array()
+            .expect("roots")
+            .iter()
+            .all(|r| r["agent"] != "pi")
+    );
 }

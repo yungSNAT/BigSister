@@ -1,5 +1,5 @@
 #![no_main]
-//! Any bytes as a Claude and a Codex transcript, plain and compressed, through every
+//! Any bytes as a Claude, a Codex and a pi transcript, plain and compressed, through every
 //! detector and both report formats.
 
 use std::path::PathBuf;
@@ -29,7 +29,11 @@ fuzz_target!(|data: &[u8]| {
         std::fs::write(dir.join(name), data).expect("transcript");
     }
     let mut dets = PROGRAMS.with(|p| build(Command::All, p));
-    let roots = [(Agent::Claude, dir.clone()), (Agent::Codex, dir)];
+    let roots = [
+        (Agent::Claude, dir.clone()),
+        (Agent::Codex, dir.clone()),
+        (Agent::Pi, dir),
+    ];
     let since = DateTime::UNIX_EPOCH;
     let stats = scan(&roots, since, &mut dets);
     // Each root lists both files, the compressed one counted as read or skipped.
