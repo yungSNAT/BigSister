@@ -97,8 +97,9 @@ pub struct Cache {
     /// previous reply, or a reply's usage could not be read.
     fresh: bool,
     /// A reply whose usage could not be read since the previous reply, by its message id
-    /// if it has one: unless a later block of the same reply is readable, the chain breaks.
-    unreadable: Option<Option<String>>,
+    /// if it has one, and whether it is in the window: unless a later block of the same
+    /// reply is readable, the chain breaks and the reply counts as skipped.
+    unreadable: Option<(Option<String>, bool)>,
     /// The message ids of the session's replies so far.
     ids: HashSet<String>,
     /// The price the scan gave for the reply about to be recorded.
@@ -109,6 +110,8 @@ pub struct Cache {
     writes: BTreeMap<(&'static str, Cause), Writes>,
     sessions: BTreeMap<&'static str, u64>,
     sessions_idle: u64,
+    /// Replies in the window none of whose records has readable usage.
+    skipped: u64,
 }
 
 /// A reply's usage, as far as the cache goes.
@@ -121,7 +124,7 @@ struct Usage {
 }
 
 /// The largest token count read, 2^40: far more than any context holds, and small
-/// enough that sums of counts stay exact.
+/// enough that token sums stay exact.
 const MAX_COUNT: u64 = 1 << 40;
 
 /// A count in `usage`: a missing or null field is 0; any other value that is not an
@@ -139,7 +142,7 @@ fn usage(reply: &Value) -> Option<Usage> {
     let split = u.get("cache_creation").unwrap_or(&Value::Null);
     let five = count(split, "ephemeral_5m_input_tokens")?;
     let hour = count(split, "ephemeral_1h_input_tokens")?;
-    let both = five.checked_add(hour)?;
+    let both = five + hour;
     #[expect(
         clippy::cast_precision_loss,
         reason = "token counts stay far below 2^52"
@@ -178,6 +181,7 @@ impl Detector for Cache {
     }
 
     fn end(&mut self, s: &Session) {
+        self.skip();
         if self.counted {
             *self.sessions.entry(s.scope()).or_default() += 1;
         }
@@ -210,7 +214,7 @@ impl Detector for Cache {
             return;
         }
         let Some(u) = usage(v) else {
-            self.unreadable(id);
+            self.unreadable(id, r.in_window);
             return;
         };
         self.readable(id);
@@ -271,6 +275,7 @@ impl Detector for Cache {
                     json!(self.sessions_idle),
                 ),
                 ("idle_rebuild_share".to_owned(), ratio(idle_tokens, total)),
+                ("replies_skipped".to_owned(), json!(self.skipped)),
             ],
             tables: vec![self.table(opts)],
             notes: notes(opts),
@@ -299,7 +304,7 @@ pub(super) fn input_price(opts: &Opts) -> String {
 fn notes(opts: &Opts) -> Vec<String> {
     let price = input_price(opts);
     vec![
-        "Each reply's cache writes (cache_creation_input_tokens) are measured. Rebuilt tokens are an estimate of what was cached again: of the tokens the previous reply in the session left cached (its cache reads and writes), those this reply did not read, up to what it wrote. They assume each reply extends the previous one's prompt, as Claude Code's replies in one file do; the rest of a reply's writes are new context, and a reply after a compaction, or after a reply none of whose records has readable usage, writes new context only.".to_owned(),
+        "Each reply's cache writes (cache_creation_input_tokens) are measured. Rebuilt tokens are an estimate of what was cached again: of the tokens the previous reply in the session left cached (its cache reads and writes), those this reply did not read, up to what it wrote. They assume each reply extends the previous one's prompt, as Claude Code's replies in one file do; the rest of a reply's writes are new context, and a reply after a compaction, or after a reply none of whose records has readable usage, writes new context only. Such replies count as skipped (replies skipped) and add to no total, so with any skipped the totals are a floor.".to_owned(),
         "A rebuild follows an idle gap when the time between the 2 replies exceeds the cache's lifetime: 1 hour once a reply of the session has written 1-hour cache, otherwise 5 minutes. Otherwise it follows a model switch when the model changed, and is rebuilt otherwise when neither holds, as after a rewind or a changed prefix.".to_owned(),
         format!("Dollars (write usd est) estimate what the writes cost, not what could have been saved: the tokens at the cache write price, 1.25 times the input price for 5-minute writes and 2 times for 1-hour writes, split as the reply records (1.25 times when it does not), where the input price is {price}. A warm cache would have read rebuilt tokens at a fraction of the input price: a tenth or less, by model. Unpriced tokens are those of a model without a price. An illustration, not a bill."),
     ]
@@ -339,26 +344,42 @@ impl Cache {
         (cause, u.write.min(left))
     }
 
+    /// Whether the pending unreadable reply has message id `id`: a later block of it.
+    fn pending(&self, id: Option<&str>) -> bool {
+        self.unreadable
+            .as_ref()
+            .is_some_and(|(bad, _)| bad.is_some() && bad.as_deref() == id)
+    }
+
+    /// Counts the pending unreadable reply, if any, as skipped when it is in the window,
+    /// and says whether there was one.
+    fn skip(&mut self) -> bool {
+        let Some((_, in_window)) = self.unreadable.take() else {
+            return false;
+        };
+        self.skipped += u64::from(in_window);
+        true
+    }
+
     /// Notes a reply with message id `id` whose usage cannot be read. After an earlier
     /// unreadable reply other than this one, the chain is broken whatever follows.
-    fn unreadable(&mut self, id: Option<&str>) {
-        if self
-            .unreadable
-            .as_ref()
-            .is_some_and(|bad| bad.is_none() || bad.as_deref() != id)
-        {
+    fn unreadable(&mut self, id: Option<&str>, in_window: bool) {
+        if self.pending(id) {
+            return;
+        }
+        if self.skip() {
             self.fresh = true;
         }
-        self.unreadable = Some(id.map(str::to_owned));
+        self.unreadable = Some((id.map(str::to_owned), in_window));
     }
 
     /// Notes a readable reply with message id `id`. After an unreadable reply other than
     /// this one, what the previous reply left cached is unknown, so nothing counts as
     /// rebuilt.
     fn readable(&mut self, id: Option<&str>) {
-        if let Some(bad) = self.unreadable.take()
-            && (bad.is_none() || bad.as_deref() != id)
-        {
+        if self.pending(id) {
+            self.unreadable = None;
+        } else if self.skip() {
             self.fresh = true;
         }
         if let Some(id) = id {
@@ -468,14 +489,15 @@ mod tests {
     }
 
     /// The cache tokens by cause after `replies` of one main session.
-    fn causes(replies: &[Value]) -> [Option<u64>; 3] {
+    /// The detector after `records` of one main session, all in the window.
+    fn run(records: &[Value]) -> Cache {
         let s = Session {
             agent: Agent::Claude,
             subagent: false,
         };
         let mut c = Cache::default();
         c.begin(&s);
-        for v in replies {
+        for v in records {
             c.record(
                 &s,
                 &Record {
@@ -484,8 +506,43 @@ mod tests {
                 },
             );
         }
+        c.end(&s);
+        c
+    }
+
+    /// The cache tokens by cause after `records` of one main session.
+    fn causes(records: &[Value]) -> [Option<u64>; 3] {
+        let c = run(records);
         [Cause::First, Cause::New, Cause::Idle]
             .map(|cause| c.writes.get(&("main", cause)).map(|w| w.tokens))
+    }
+
+    #[test]
+    fn replies_with_no_readable_usage_are_counted_as_skipped() {
+        let write = json!({"cache_creation_input_tokens": 100});
+        let bad = json!({"cache_creation_input_tokens": "x"});
+        let a = reply("a", "2026-11-08T01:00:00Z", &write);
+        let b_bad = reply("b", "2026-11-08T03:00:00Z", &bad);
+        let b_good = reply("b", "2026-11-08T03:00:00Z", &write);
+        let c_bad = reply("c", "2026-11-08T05:00:00Z", &bad);
+        let c = reply("c", "2026-11-08T05:00:00Z", &write);
+        let skipped = |records: &[Value]| run(records).skipped;
+        assert_eq!(skipped(&[a.clone(), b_bad.clone(), c.clone()]), 1);
+        assert_eq!(skipped(&[a.clone(), b_bad.clone(), b_good, c.clone()]), 0);
+        assert_eq!(skipped(&[a.clone(), b_bad.clone(), c_bad, c]), 1);
+        // Still unreadable when the session ends.
+        assert_eq!(skipped(&[a, b_bad]), 1);
+    }
+
+    #[test]
+    fn a_first_reply_after_a_compaction_is_new_context() {
+        let compaction = json!({"type": "system", "subtype": "compact_boundary"});
+        let a = reply(
+            "a",
+            "2026-11-08T01:00:00Z",
+            &json!({"cache_creation_input_tokens": 100}),
+        );
+        assert_eq!(causes(&[compaction, a]), [None, Some(100), None]);
     }
 
     #[test]
@@ -504,10 +561,7 @@ mod tests {
         // hours, and c what b cached.
         let b_bad = reply("b", "2026-11-08T03:00:00Z", &bad);
         let b_good = reply("b", "2026-11-08T03:00:00Z", &write);
-        assert_eq!(
-            causes(&[a.clone(), b_bad.clone(), b_good.clone(), c.clone()]),
-            [Some(100), None, Some(200)]
-        );
+        assert_eq!(causes(&[a, b_bad, b_good, c]), [Some(100), None, Some(200)]);
     }
 
     #[test]

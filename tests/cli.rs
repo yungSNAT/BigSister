@@ -263,6 +263,7 @@ fn cache_splits_writes_into_new_context_and_rebuilds_by_cause() {
     assert_eq!(s["idle_rebuilds"], 4);
     assert_eq!(s["sessions_with_idle_rebuilds"], 3);
     assert_eq!(s["idle_rebuild_share"], 0.33);
+    assert_eq!(s["replies_skipped"], 1);
 }
 
 #[test]
