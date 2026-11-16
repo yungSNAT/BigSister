@@ -26,9 +26,10 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         cli.command,
         &std::rc::Rc::new(programs::Programs::from_env()),
     );
+    let prices = read_prices(cli, home.as_deref())?;
     let read: Vec<Agent> = dets.iter().flat_map(|d| d.agents()).copied().collect();
     let (roots, skipped) = resolve_roots(cli, &read, home.as_deref())?;
-    let stats = scan::scan(&roots, since, &mut dets);
+    let stats = scan::scan(&roots, since, &prices, &mut dets);
     let opts = Opts {
         limit: cli.limit,
         paths: cli.paths,
@@ -39,9 +40,7 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         .iter()
         .map(|d| {
             let mut s = d.section(&opts);
-            if let Some(usd) = cli.usd_per_mtok {
-                report::price(&mut s, usd);
-            }
+            price(cli, &prices, &mut s);
             if !d.agents().iter().any(|a| scanned.contains(a)) {
                 let names: Vec<&str> = d.agents().iter().map(|a| a.name()).collect();
                 s.notes.insert(
@@ -68,6 +67,28 @@ pub fn run(cli: &Cli) -> Result<String, String> {
     } else {
         report::text(&meta, &sections)
     })
+}
+
+/// The bundled prices, or those of the price file `--prices` names.
+fn read_prices(cli: &Cli, home: Option<&str>) -> Result<prices::Prices, String> {
+    let Some(path) = &cli.prices else {
+        return Ok(prices::Prices::bundled());
+    };
+    let shown = report::display_path(&path.display().to_string(), home);
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read price file {shown}: {e}"))?;
+    prices::Prices::from_file(&text, &shown)
+}
+
+/// Prices a section at `--usd-per-mtok`'s one rate, or names the price file in its note.
+fn price(cli: &Cli, prices: &prices::Prices, s: &mut report::Section) {
+    if let Some(usd) = cli.usd_per_mtok {
+        report::price(s, usd);
+    } else if cli.prices.is_some() {
+        for note in s.notes.iter_mut().filter(|n| *n == prices::NOTE) {
+            *note = prices.note();
+        }
+    }
 }
 
 type Roots = (Vec<(Agent, PathBuf)>, Vec<String>);
