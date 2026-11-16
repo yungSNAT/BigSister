@@ -48,9 +48,15 @@ fn run_env(args: &[&str], env: &[(&str, &Path)]) -> (i32, String, String) {
         std::iter::once(stubs().to_path_buf()).chain(std::env::split_paths(&system)),
     )
     .expect("PATH");
+    // An empty home folder, so that no default folder of the machine running the tests
+    // is read; a test can give its own.
+    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("home-empty");
+    std::fs::create_dir_all(&home).expect("home folder");
     let out = Command::new(env!("CARGO_BIN_EXE_shaphan"))
         .args(args)
         .env("PATH", path)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .envs(env.iter().copied())
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
@@ -1130,7 +1136,7 @@ fn help_says_pipes_reads_codex_commands_too() {
     assert_eq!(code, 0);
     let help = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        help.contains("a pipe into tail or head hides (Claude, Codex)"),
+        help.contains("a pipe into tail or head hides (Claude, Codex, pi)"),
         "{stdout}"
     );
 }
@@ -1755,4 +1761,312 @@ fn a_bad_price_file_fails_the_run() {
     ]);
     assert_eq!(code, 2, "{stderr}");
     assert!(stderr.contains("cannot be used with"), "{stderr}");
+}
+
+const PI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pi");
+
+/// `shaphan all --agent pi --json` over the pi fixtures: a session and a fork of it,
+/// which pi writes as a copy of every entry.
+fn pi_report(extra: &[&str]) -> Value {
+    let mut args = vec![
+        "all",
+        "--agent",
+        "pi",
+        "--pi-root",
+        PI,
+        "--since",
+        SINCE,
+        "--json",
+    ];
+    args.extend_from_slice(extra);
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+#[test]
+fn pi_sessions_feed_pipes_polls_and_rereads_once_despite_a_fork() {
+    let doc = pi_report(&[]);
+    let pipes = find(rows(&doc, "pipes", 0), &[("agent", json!("pi"))]);
+    assert_eq!(pipes["test_runs"], json!(1));
+    assert_eq!(pipes["unguarded"], json!(1));
+    assert_eq!(pipes["showed_a_failure_but_reported_success"], json!(1));
+    let polls = find(rows(&doc, "polls", 0), &[("agent", json!("pi"))]);
+    assert_eq!(polls["commands"], json!(4));
+    assert_eq!(polls["polls"], json!(1));
+    assert_eq!(polls["reruns_after_edit"], json!(1));
+    // The poll's 4,000 characters, read by Claude Fable 5.1 at US$10 per million.
+    assert_eq!(polls["poll_chars"], json!(4000));
+    assert_eq!(polls["poll_usd_est"], json!(0.01));
+    assert_eq!(polls["unpriced_tokens_est"], json!(0));
+    let rereads = find(rows(&doc, "rereads", 0), &[("agent", json!("pi"))]);
+    assert_eq!(rereads["compactions"], json!(1));
+    assert_eq!(rereads["reads"], json!(2));
+    assert_eq!(rereads["rereads"], json!(1));
+    // The re-read's 4,000 characters, read by Claude Fable 5.1 at US$10 per million.
+    assert_eq!(rereads["reread_chars"], json!(4000));
+    assert_eq!(rereads["reread_usd_est"], json!(0.01));
+    let roots = doc["roots"].as_array().expect("roots");
+    assert_eq!(roots.len(), 1, "{roots:?}");
+    assert_eq!(roots[0]["agent"], json!("pi"));
+    assert_eq!(roots[0]["files"], json!(2));
+    assert_eq!(roots[0]["lines_skipped"], json!(0));
+}
+
+#[test]
+fn pi_output_never_contains_transcript_content() {
+    for extra in [&[][..], &["--json"], &["--paths"], &["--csv", "--paths"]] {
+        let mut args = vec!["all", "--agent", "pi", "--pi-root", PI, "--since", SINCE];
+        args.extend_from_slice(extra);
+        let (code, stdout, stderr) = run(&args);
+        assert_eq!(code, 0, "{stderr}");
+        assert!(
+            !stdout.to_lowercase().contains("sentinel"),
+            "content leaked with {extra:?}:\n{stdout}"
+        );
+        assert!(!stderr.to_lowercase().contains("sentinel"), "{stderr}");
+    }
+}
+
+#[test]
+fn a_missing_pi_folder_is_an_error_when_asked_for_and_noted_otherwise() {
+    let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-pi-here");
+    let missing = missing.to_str().expect("UTF-8 path");
+    let (code, _, stderr) = run(&["polls", "--pi-root", missing, "--agent", "pi"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("pi transcript folder not found"),
+        "{stderr}"
+    );
+    // Under --agent all, a missing default pi folder is noted, as a missing default Claude
+    // or Codex folder is, and the others are read.
+    let (code, stdout, stderr) = run(&[
+        "polls",
+        "--claude-root",
+        CLAUDE,
+        "--codex-root",
+        CODEX,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(
+        doc["skipped_roots"],
+        json!(["pi transcript folder not found: ~/.pi/agent/sessions"])
+    );
+    assert_eq!(doc["roots"].as_array().expect("roots").len(), 2, "{doc}");
+}
+
+/// A pi entry: a message with `id`, `parent` and `message`, at minute `minute`.
+fn pi_message(id: &str, parent: Option<&str>, minute: u32, message: &Value) -> String {
+    json!({"type": "message", "id": id, "parentId": parent,
+           "timestamp": format!("2026-11-09T07:{minute:02}:00.000Z"), "message": message})
+    .to_string()
+}
+
+fn pi_call(name: &str, args: &Value) -> Value {
+    json!({"role": "assistant", "model": "claude-opus-5-5",
+           "content": [{"type": "toolCall", "id": format!("call-{name}-{args}"), "name": name,
+                        "arguments": args}]})
+}
+
+fn pi_result(call: &Value) -> Value {
+    json!({"role": "toolResult", "toolCallId": call["content"][0]["id"],
+           "toolName": call["content"][0]["name"],
+           "content": [{"type": "text", "text": "ok"}], "isError": false})
+}
+
+/// Writes pi sessions, each a header (with `parentSession` when given) and its entries,
+/// under a fresh folder `name`.
+fn pi_sessions(name: &str, sessions: &[(Option<&str>, Vec<String>)]) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("--w--")).expect("folder");
+    for (n, (parent, entries)) in sessions.iter().enumerate() {
+        let mut header = json!({"type": "session", "version": 3, "id": format!("s{n}"),
+                                "timestamp": format!("2026-11-09T0{}:00:00.000Z", 6 + n),
+                                "cwd": "/w"});
+        if let Some(p) = parent {
+            header["parentSession"] = json!(p);
+        }
+        let text = std::iter::once(header.to_string())
+            .chain(entries.iter().cloned())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.join("--w--").join(format!("{n}.jsonl")), text + "\n").expect("session");
+    }
+    dir
+}
+
+/// `shaphan <command> --agent pi --json` over the pi sessions in `dir`.
+fn pi_run(command: &str, dir: &Path) -> Value {
+    let (code, stdout, stderr) = run(&[
+        command,
+        "--agent",
+        "pi",
+        "--pi-root",
+        dir.to_str().expect("UTF-8 path"),
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+fn pi_polls(dir: &Path) -> Value {
+    let doc = pi_run("polls", dir);
+    find(rows(&doc, "polls", 0), &[("agent", json!("pi"))]).clone()
+}
+
+#[test]
+fn a_pi_branch_sees_only_its_own_path() {
+    let status = pi_call("bash", &json!({"command": "git status"}));
+    let again = pi_call("bash", &json!({"command": "git status", "timeout": 5}));
+    let edit = pi_call("edit", &json!({"path": "/w/a.rs", "edits": []}));
+    let entries = vec![
+        pi_message("e1", None, 1, &status),
+        pi_message("e2", Some("e1"), 2, &pi_result(&status)),
+        pi_message("e3", Some("e2"), 3, &edit),
+        pi_message("e4", Some("e3"), 4, &pi_result(&edit)),
+        // /tree: back to before the edit, where git status runs again with no edit.
+        pi_message("e5", Some("e2"), 5, &again),
+        pi_message("e6", Some("e5"), 6, &pi_result(&again)),
+    ];
+    let row = pi_polls(&pi_sessions("pi-branch", &[(None, entries)]));
+    assert_eq!(row["commands"], json!(2));
+    assert_eq!(row["reruns_after_edit"], json!(0));
+    assert_eq!(row["polls"], json!(1));
+}
+
+#[test]
+fn only_a_forked_pi_session_holds_copies() {
+    let status = pi_call("bash", &json!({"command": "git status"}));
+    let entries = vec![
+        pi_message("e1", None, 1, &status),
+        pi_message("e2", Some("e1"), 2, &pi_result(&status)),
+        pi_message("e3", Some("e2"), 3, &status),
+        pi_message("e4", Some("e3"), 4, &pi_result(&status)),
+    ];
+    // Ids and times repeated by a session that names no parent are its own: 2 polls.
+    let unrelated = pi_sessions(
+        "pi-unrelated",
+        &[(None, entries.clone()), (None, entries.clone())],
+    );
+    assert_eq!(pi_polls(&unrelated)["polls"], json!(2));
+    // A fork's copies count once.
+    let forked = pi_sessions(
+        "pi-forked",
+        &[(None, entries.clone()), (Some("/p/0.jsonl"), entries)],
+    );
+    assert_eq!(pi_polls(&forked)["polls"], json!(1));
+}
+
+#[test]
+fn a_pi_fork_holds_copies_only_of_the_session_it_names() {
+    let status = pi_call("bash", &json!({"command": "git status"}));
+    let diff = pi_call("bash", &json!({"command": "git diff"}));
+    let polled = |command: &Value, ids: [&str; 4], first: u32, parent: Option<&str>| {
+        vec![
+            pi_message(ids[0], parent, first, command),
+            pi_message(ids[1], Some(ids[0]), first + 1, &pi_result(command)),
+            pi_message(ids[2], Some(ids[1]), first + 2, command),
+            pi_message(ids[3], Some(ids[2]), first + 3, &pi_result(command)),
+        ]
+    };
+    let unrelated = polled(&status, ["e1", "e2", "e3", "e4"], 1, None);
+    let parent = polled(&diff, ["f1", "f2", "f3", "f4"], 11, None);
+    // A fork of the second session: its copies, then entries whose ids and times
+    // happen to match the first session's.
+    let mut fork = parent.clone();
+    fork.extend(polled(&status, ["e1", "e2", "e3", "e4"], 1, Some("f4")));
+    let dir = pi_sessions(
+        "pi-fork-names-parent",
+        &[
+            (None, unrelated),
+            (None, parent),
+            (Some("/p/1.jsonl"), fork),
+        ],
+    );
+    // 1 poll in each session, the fork's own one included; the fork's copies count once.
+    assert_eq!(pi_polls(&dir)["polls"], json!(3));
+}
+
+#[test]
+fn a_repeated_pi_id_is_skipped_with_what_descends_from_it() {
+    let status = pi_call("bash", &json!({"command": "git status"}));
+    let edit = pi_call("edit", &json!({"path": "/w/a.rs", "edits": []}));
+    let entries = vec![
+        pi_message("e1", None, 1, &status),
+        pi_message("e2", Some("e1"), 2, &pi_result(&status)),
+        pi_message("e3", Some("e2"), 3, &edit),
+        pi_message("e4", Some("e3"), 4, &pi_result(&edit)),
+        // e2 again, at another time: which e2 an entry continues from is unknown.
+        pi_message("e2", Some("e1"), 5, &pi_result(&status)),
+        pi_message("e5", Some("e2"), 6, &status),
+        pi_message("e6", Some("e5"), 7, &pi_result(&status)),
+    ];
+    let dir = pi_sessions("pi-repeated-id", &[(None, entries)]);
+    let doc = pi_run("polls", &dir);
+    let row = find(rows(&doc, "polls", 0), &[("agent", json!("pi"))]);
+    assert_eq!(row["commands"], json!(1), "{row}");
+    assert_eq!(row["reruns_after_edit"], json!(0), "{row}");
+    assert_eq!(doc["roots"][0]["lines_skipped"], json!(3), "{doc}");
+}
+
+#[test]
+fn a_pi_branch_back_before_a_compaction_reads_without_rereading() {
+    let read = pi_call("read", &json!({"path": "/w/a.rs"}));
+    let compaction = |id: &str, parent: &str, minute: u32| {
+        json!({"type": "compaction", "id": id, "parentId": parent,
+               "timestamp": format!("2026-11-09T07:{minute:02}:00.000Z"),
+               "summary": "s", "firstKeptEntryId": parent})
+        .to_string()
+    };
+    let entries = vec![
+        pi_message("e1", None, 1, &read),
+        pi_message("e2", Some("e1"), 2, &pi_result(&read)),
+        compaction("e3", "e2", 3),
+        pi_message("e4", Some("e3"), 4, &read),
+        pi_message("e5", Some("e4"), 5, &pi_result(&read)),
+        // /tree: back to before the compaction, where the file is still read.
+        pi_message("e6", Some("e2"), 6, &read),
+        pi_message("e7", Some("e6"), 7, &pi_result(&read)),
+        // /tree: back to after the compaction, where reading it again is a re-read.
+        pi_message("e8", Some("e3"), 8, &read),
+        pi_message("e9", Some("e8"), 9, &pi_result(&read)),
+    ];
+    let doc = pi_run(
+        "rereads",
+        &pi_sessions("pi-branch-compaction", &[(None, entries)]),
+    );
+    let row = find(rows(&doc, "rereads", 0), &[("agent", json!("pi"))]);
+    assert_eq!(row["sessions_compacted"], json!(1), "{row}");
+    assert_eq!(row["compactions"], json!(1), "{row}");
+    assert_eq!(row["reads"], json!(4), "{row}");
+    assert_eq!(row["rereads"], json!(2), "{row}");
+}
+
+#[test]
+fn a_pi_line_in_another_agent_s_shape_counts_nowhere() {
+    let status = pi_call("bash", &json!({"command": "git status"}));
+    let claude_call = |id: &str, parent: &str, minute: u32| {
+        json!({"type": "assistant", "id": id, "parentId": parent,
+               "timestamp": format!("2026-11-09T07:{minute:02}:00.000Z"),
+               "message": {"model": "claude-opus-5-5", "role": "assistant",
+                           "content": [{"type": "tool_use", "id": format!("t{id}"),
+                                        "name": "Bash", "input": {"command": "git status"}}]}})
+        .to_string()
+    };
+    let entries = vec![
+        pi_message("e1", None, 1, &status),
+        pi_message("e2", Some("e1"), 2, &pi_result(&status)),
+        claude_call("e3", "e2", 3),
+        claude_call("e4", "e3", 4),
+    ];
+    let row = pi_polls(&pi_sessions("pi-foreign-shape", &[(None, entries)]));
+    assert_eq!(row["commands"], json!(1), "{row}");
+    assert_eq!(row["polls"], json!(0), "{row}");
 }
