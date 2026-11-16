@@ -21,6 +21,7 @@ pub enum Agent {
     Claude,
     Codex,
     Pi,
+    OpenCode,
 }
 
 impl Agent {
@@ -30,14 +31,15 @@ impl Agent {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
             Agent::Pi => "pi",
+            Agent::OpenCode => "opencode",
         }
     }
 
-    /// Whether the agent's records reach the detectors as Claude Code records: pi's are
-    /// rewritten into them ([`crate::pi`]).
+    /// Whether the agent's records reach the detectors as Claude Code records: pi's and
+    /// OpenCode's are rewritten into them ([`crate::pi`], [`crate::opencode`]).
     #[must_use]
     pub fn claude_shaped(self) -> bool {
-        matches!(self, Agent::Claude | Agent::Pi)
+        matches!(self, Agent::Claude | Agent::Pi | Agent::OpenCode)
     }
 }
 
@@ -141,6 +143,11 @@ pub fn scan(
             bad_lines: 0,
             compressed: 0,
         };
+        if *agent == Agent::OpenCode {
+            scan_opencode(root, since, dets, &active, &mut st, &mut earlier);
+            out.push(st);
+            continue;
+        }
         let mut files = list_files(root, cutoff, &mut st);
         if agent.claude_shaped() {
             // A copied record keeps its time, so reading by each file's first time reads
@@ -148,27 +155,75 @@ pub fn scan(
             // fork's header is written when it is made, after the entries it copies.
             files.sort_by_cached_key(|p| first_time(p));
         }
-        for path in files {
-            let reader = match open(&path) {
-                Ok(r) => r,
-                Err(Open::NotZstd) => {
-                    st.compressed += 1;
-                    continue;
-                }
-                Err(Open::Io) => {
-                    st.files += 1;
-                    st.unreadable += 1;
-                    continue;
-                }
-            };
-            st.files += 1;
-            if scan_file(reader, &path, since, dets, &active, &mut st, &mut earlier).is_err() {
-                st.unreadable += 1;
-            }
-        }
+        scan_files(files, since, dets, &active, &mut st, &mut earlier);
         out.push(st);
     }
     out
+}
+
+/// Reads each of `files`, a root's transcripts.
+fn scan_files(
+    files: Vec<PathBuf>,
+    since: DateTime<Utc>,
+    dets: &mut [Box<dyn Detector>],
+    active: &[usize],
+    st: &mut RootStats,
+    earlier: &mut Earlier,
+) {
+    for path in files {
+        let reader = match open(&path) {
+            Ok(r) => r,
+            Err(Open::NotZstd) => {
+                st.compressed += 1;
+                continue;
+            }
+            Err(Open::Io) => {
+                st.files += 1;
+                st.unreadable += 1;
+                continue;
+            }
+        };
+        st.files += 1;
+        if scan_file(reader, &path, since, dets, active, st, earlier).is_err() {
+            st.unreadable += 1;
+        }
+    }
+}
+
+/// Reads the OpenCode sessions in `root`'s `opencode.db`, each as one transcript. A
+/// folder without the file holds none. A database that cannot be read counts as one
+/// unreadable file, and none of its sessions are read.
+fn scan_opencode(
+    root: &Path,
+    since: DateTime<Utc>,
+    dets: &mut [Box<dyn Detector>],
+    active: &[usize],
+    st: &mut RootStats,
+    earlier: &mut Earlier,
+) {
+    let db = root.join("opencode.db");
+    if !db.is_file() {
+        return;
+    }
+    let Ok(sessions) = crate::opencode::read(&db, since) else {
+        st.files += 1;
+        st.unreadable += 1;
+        return;
+    };
+    for s in sessions {
+        st.files += 1;
+        // The first line says whether a subagent's session it is, as a Codex
+        // transcript's first record does.
+        let mut text =
+            serde_json::json!({"type": "opencode_session", "subagent": s.subagent}).to_string();
+        for line in s.lines {
+            text.push('\n');
+            text.push_str(&line);
+        }
+        let reader = Box::new(io::Cursor::new(text.into_bytes()));
+        // An in-memory transcript cannot fail to read.
+        let _ = scan_file(reader, &db, since, dets, active, st, earlier);
+    }
 }
 
 fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBuf> {
@@ -439,6 +494,8 @@ fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
                 .is_some_and(|p| !p.is_empty())
         }),
         Agent::Pi => false,
+        Agent::OpenCode => serde_json::from_str::<Value>(first)
+            .is_ok_and(|v| v.get("subagent") == Some(&Value::Bool(true))),
     }
 }
 
@@ -588,7 +645,7 @@ impl Feed<'_> {
     /// replies no detector reads to the uuids held for the scan.
     fn model(&mut self, line: &str) -> Option<Option<f64>> {
         match self.session.agent {
-            Agent::Claude | Agent::Pi => {
+            Agent::Claude | Agent::Pi | Agent::OpenCode => {
                 const KEY: &str = "\"message\":{\"model\":\"";
                 let at = line.find(KEY)?;
                 let rest = &line[at + KEY.len()..];
