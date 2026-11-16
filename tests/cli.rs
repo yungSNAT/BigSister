@@ -1403,25 +1403,84 @@ fn tool_calls(name: &str, calls: &[(&str, Value, Value, bool)]) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("proj")).expect("folder");
-    let mut text = String::new();
-    for (i, (tool, input, content, error)) in calls.iter().enumerate() {
-        let time = format!("2026-11-09T05:{:02}:{:02}.000Z", i / 30, i % 30 * 2);
-        // Written as text: Claude Code puts `model` first in a reply's message, and
-        // shaphan finds a reply by that.
-        let use_block = json!({"type": "tool_use", "id": format!("t{i}"), "name": tool,
-                               "input": input});
-        text += &format!(
-            "{{\"type\":\"assistant\",\"uuid\":\"a{i}\",\"timestamp\":\"{time}\",\
-             \"message\":{{\"model\":\"claude-opus-5-5\",\"role\":\"assistant\",\
-             \"content\":[{use_block}]}}}}\n"
-        );
-        let result = json!({"type": "user", "uuid": format!("u{i}"), "timestamp": time,
-            "message": {"role": "user", "content": [{"type": "tool_result",
-            "tool_use_id": format!("t{i}"), "content": content, "is_error": error}]}});
-        text += &format!("{result}\n");
-    }
+    let text: String = tool_call_records("", 0, calls).concat();
     std::fs::write(dir.join("proj").join("s.jsonl"), text).expect("transcript");
     dir
+}
+
+/// The records of `calls`, as `tool_calls` writes them, 2 lines for each call: ids start
+/// with `tag` and times `minute` minutes after 05:00 on 9 November 2026.
+fn tool_call_records(
+    tag: &str,
+    minute: usize,
+    calls: &[(&str, Value, Value, bool)],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, (tool, input, content, error)) in calls.iter().enumerate() {
+        let time = format!(
+            "2026-11-09T05:{:02}:{:02}.000Z",
+            minute + i / 30,
+            i % 30 * 2
+        );
+        // Written as text: Claude Code puts `model` first in a reply's message, and
+        // shaphan finds a reply by that.
+        let use_block = json!({"type": "tool_use", "id": format!("{tag}t{i}"), "name": tool,
+                               "input": input});
+        let result = json!({"type": "user", "uuid": format!("{tag}u{i}"), "timestamp": time,
+            "message": {"role": "user", "content": [{"type": "tool_result",
+            "tool_use_id": format!("{tag}t{i}"), "content": content, "is_error": error}]}});
+        out.push(format!(
+            "{{\"type\":\"assistant\",\"uuid\":\"{tag}a{i}\",\"timestamp\":\"{time}\",\
+             \"message\":{{\"model\":\"claude-opus-5-5\",\"role\":\"assistant\",\
+             \"content\":[{use_block}]}}}}\n{result}\n"
+        ));
+    }
+    out
+}
+
+#[test]
+fn a_resumed_sessions_copied_errors_extend_no_cascade_or_churn() {
+    let fail = || ("Bash", json!({"command": "false"}), json!("boom"), true);
+    let first = tool_call_records(
+        "",
+        0,
+        &[
+            ("Bash", json!({"command": "true"}), json!(""), false),
+            fail(),
+            fail(),
+            fail(),
+        ],
+    );
+    let dir = tool_calls("tool-calls-resumed", &[]);
+    std::fs::write(dir.join("proj").join("s.jsonl"), first.concat()).expect("first");
+    // The resumed session starts with copies of the 3 errors, then errs once more: counted,
+    // the copies would make a second cascade of 4 and 2 more churn calls.
+    let resumed = first[1..].concat() + &tool_call_records("r", 5, &[fail()]).concat();
+    std::fs::write(dir.join("proj").join("r.jsonl"), resumed).expect("resumed");
+    let (code, stdout, stderr) = run(&[
+        "tools",
+        "--claude-root",
+        dir.to_str().expect("UTF-8 path"),
+        "--codex-root",
+        CODEX,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let summary = &doc["detectors"]["tools"]["summary"];
+    assert_eq!(
+        [
+            &summary["cascades"],
+            &summary["calls_in_cascades"],
+            &summary["retry_churn_calls"]
+        ],
+        [&json!(1), &json!(3), &json!(1)],
+        "{summary}"
+    );
+    let bash = find(rows(&doc, "tools", 0), &[("tool", json!("Bash"))]);
+    assert_eq!([&bash["calls"], &bash["errors"]], [&json!(5), &json!(4)]);
 }
 
 /// The tools section's JSON for a transcript of results of several tools: one large, one
@@ -1461,7 +1520,7 @@ fn mixed_tool_calls() -> Value {
             ("Grep", json!({"pattern": "p"}), boom(), true),
         ],
     );
-    let (code, stdout, stderr) = run(&[
+    let args = [
         "tools",
         "--claude-root",
         dir.to_str().expect("UTF-8 path"),
@@ -1469,10 +1528,10 @@ fn mixed_tool_calls() -> Value {
         CODEX,
         "--since",
         SINCE,
-        "--json",
-    ]);
-    assert_eq!(code, 0, "{stderr}");
-    serde_json::from_str(&stdout).expect("valid JSON")
+    ];
+    let doc: Value = serde_json::from_str(&output(&args, "--json")).expect("valid JSON");
+    assert_csv_holds(&output(&args, "--csv"), &doc["detectors"]);
+    doc
 }
 
 #[test]
