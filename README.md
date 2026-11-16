@@ -119,7 +119,7 @@ By hook name and command, most cancellations first
 | `startup` | Claude | Characters loaded before the first non-synthetic reply of each main session, by source: instruction files, hook output, listings, tool schemas and MCP instructions; also the input tokens recorded for that first reply |
 | `schemas` | Claude | Per tool or MCP server: sessions that loaded its schema, sessions that called it, and the characters loaded in sessions that never called it |
 | `pipes` | Claude, Codex, pi | Test runs piped into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many printed a failure whilst the call reported success, in total and by agent |
-| `polls` | Claude, Codex, pi | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit, the polls of a command whose previous run's result was an error and the characters polls returned |
+| `polls` | Claude, Codex, pi | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit, the polls of a command whose previous run's result was an error and the characters polls returned; also, by verb class, the characters every command's results returned |
 | `rereads` | Claude, Codex, pi | Files read again after a context compaction that had been read before it, and the characters those re-reads returned |
 | `tools` | Claude, pi | Per tool: calls, the characters their results returned, errors, and image and document blocks; also runs of 3 or more errors in a row (cascades) and calls repeated with the same input after erring twice (retry churn) |
 | `hooks` | Claude | Hook runs, cancellations, timeouts and durations, by event, matcher and hook |

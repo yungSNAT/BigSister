@@ -374,6 +374,21 @@ fn polls_read_codex_command_results() {
     let summary = &doc["detectors"]["polls"]["summary"];
     assert_eq!(summary["codex_outputs_not_paired"], 2);
     assert_eq!(summary["codex_commands_not_paired"], 4);
+    // Every command counts by verb class, polled or not; only paired results add
+    // characters: `git status` printed 20 and then 5, and 1 of 3 `cargo` runs printed 52.
+    let results = rows(&doc, "polls", 2);
+    let verb = |v: &str| {
+        let r = find(results, &[("agent", json!("codex")), ("verb", json!(v))]);
+        (
+            r["commands"].clone(),
+            r["results"].clone(),
+            r["result_chars"].clone(),
+            r["result_tokens_est"].clone(),
+        )
+    };
+    assert_eq!(verb("cargo"), (json!(3), json!(1), json!(52), json!(13)));
+    assert_eq!(verb("git"), (json!(4), json!(2), json!(25), json!(7)));
+    assert_eq!(results[0]["verb"], "cargo", "largest results first");
 }
 
 #[test]
