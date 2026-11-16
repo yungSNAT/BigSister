@@ -85,6 +85,7 @@ fn usd_column(tokens: &str) -> Option<&'static str> {
         "poll_tokens_est" => Some("poll_usd_est"),
         "reread_tokens_est" => Some("reread_usd_est"),
         "idle_tokens_est" => Some("idle_usd_est"),
+        "result_tokens_est" => Some("result_usd_est"),
         _ => None,
     }
 }
