@@ -1549,4 +1549,5 @@ fn csv_and_json_cannot_be_combined() {
     args.push("--json");
     let (code, _, stderr) = run(&args);
     assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
 }
