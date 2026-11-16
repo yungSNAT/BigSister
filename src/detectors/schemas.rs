@@ -243,7 +243,7 @@ impl Detector for Schemas {
         skill_table.truncate(opts.limit);
         Section {
             name: "schemas",
-            title: "tool schemas loaded against tools called (Claude)",
+            title: "tool schemas loaded against tools called, and skills listed against skills used (Claude)",
             summary: vec![
                 ("main_sessions".to_owned(), json!(self.sessions.get("main").copied().unwrap_or(0))),
                 ("subagent_sessions".to_owned(), json!(self.sessions.get("subagent").copied().unwrap_or(0))),
