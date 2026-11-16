@@ -15,7 +15,7 @@
 
 </div>
 
-`shaphan` reads the transcripts that Claude Code and Codex save on your machine and reports where tokens and checks are wasted: context loaded before the first non-synthetic reply, tool schemas loaded but never called, test output piped past its exit status, repeated polling, files re-read after a compaction and slow hooks.
+`shaphan` reads the transcripts that Claude Code, Codex and [pi](https://github.com/earendil-works/pi) save on your machine and reports where tokens and checks are wasted: context loaded before the first non-synthetic reply, tool schemas loaded but never called, test output piped past its exit status, repeated polling, files re-read after a compaction and slow hooks.
 
 It prints names, paths, counts, sizes and times, as listed under [Privacy](#privacy). It never prints message text, tool inputs or tool outputs, and it makes no network calls.
 
@@ -86,7 +86,7 @@ shaphan 0.1.0: records since 2026-11-01 00:00 +11:00
 claude: 3 files under tests/fixtures/claude (unreadable files or folders: 0, lines skipped: 1, compressed files skipped: 0)
 codex: 2 files under tests/fixtures/codex (unreadable files or folders: 0, lines skipped: 0, compressed files skipped: 0)
 
-== pipes: test runs piped into tail or head (Claude Bash, Codex commands) ==
+== pipes: test runs piped into tail or head (Claude Bash, Codex commands, pi bash and powershell) ==
 test runs: 5
 piped into tail or head: 5
 over ssh not judged: 1
@@ -118,17 +118,18 @@ By hook name and command, most cancellations first
 |---|---|---|
 | `startup` | Claude | Characters loaded before the first non-synthetic reply of each main session, by source: instruction files, hook output, listings, tool schemas and MCP instructions; also the input tokens recorded for that first reply |
 | `schemas` | Claude | Per tool or MCP server: sessions that loaded its schema, sessions that called it, and the characters loaded in sessions that never called it |
-| `pipes` | Claude, Codex | Test runs piped into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many printed a failure whilst the call reported success, in total and by agent |
-| `polls` | Claude, Codex | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit, the polls of a command whose previous run's result was an error and the characters polls returned |
-| `rereads` | Claude, Codex | Files read again after a context compaction that had been read before it, and the characters those re-reads returned |
+| `pipes` | Claude, Codex, pi | Test runs piped into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many printed a failure whilst the call reported success, in total and by agent |
+| `polls` | Claude, Codex, pi | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit, the polls of a command whose previous run's result was an error and the characters polls returned |
+| `rereads` | Claude, Codex, pi | Files read again after a context compaction that had been read before it, and the characters those re-reads returned |
 | `hooks` | Claude | Hook runs, cancellations, timeouts and durations, by event, matcher and hook |
 
 | Option | Default | Meaning |
 |---|---|---|
 | `--since` | `7d` | Start of the window: `Nd`, `Nh`, a date (local midnight) or an RFC 3339 time |
-| `--agent` | `all` | `claude`, `codex` or `all` |
+| `--agent` | `all` | `claude`, `codex`, `pi` or `all` |
 | `--claude-root DIR` | `~/.claude/projects` | Claude Code transcript folder |
 | `--codex-root DIR` | `~/.codex/sessions` and `~/.codex/archived_sessions` | Codex transcript folder; a given folder replaces both |
+| `--pi-root DIR` | `~/.pi/agent/sessions` | pi session folder |
 | `--json` | off | Print one JSON object with `schema_version` 2 |
 | `--csv` | off | Print the report's sections as one CSV table, one value a record; not with `--json` |
 | `--limit N` | 20 | Rows per table |
@@ -149,7 +150,7 @@ The tests run on synthetic fixtures. They plant sentinel strings in message text
 
 ## Limits
 
-Both transcript formats are undocumented and change between releases. `shaphan` skips a line it cannot parse and reports how many it skipped. A Claude record that carries a `uuid` and is copied into another transcript, as a resumed session's file starts with the earlier session's records, counts once. It reads compressed Codex transcripts (`*.jsonl.zst`) as it goes. One that does not start with the zstd magic number counts as a compressed file skipped; one whose frame header cannot be read, that fails part way, has a bad checksum or holds more than one zstd frame counts as unreadable, and the records read before the failure still count. It reads Codex transcripts for `pipes`, `polls` and `rereads` only. A Codex call runs code that can start several commands; each command takes the result Codex recorded as it ended, matched by its text, and otherwise the result the call printed in its place, only when the call printed one result per command and has one command, Codex recorded none whilst it ran, or it is the one command left untied and each tied command's result is printed whole in its own place. `polls` reports how many Codex commands it could not pair (`codex_commands_not_paired`), including every command of a `function_call`, whose output is not read; these still count as commands and polls, but their results add nothing to polls after failure or poll characters. [docs/DESIGN.md](docs/DESIGN.md) defines each measure.
+Claude Code's and Codex's transcript formats are undocumented and change between releases; pi documents its own (`docs/session-format.md` in its repository), and `shaphan` reads pi's `bash`, `powershell`, `read`, `edit` and `write` calls and compactions as it reads Claude Code's `Bash`, `Read`, `Edit` and `Write` calls and compactions. A pi entry copied into a forked session from the session its header names counts once when that session's file is read too, and each branch of a pi session is judged against its own path; an entry whose id repeats in its file is skipped, with the entries continuing from it. `shaphan` skips a line it cannot parse and reports how many it skipped. A Claude record that carries a `uuid` and is copied into another transcript, as a resumed session's file starts with the earlier session's records, counts once. It reads compressed Codex transcripts (`*.jsonl.zst`) as it goes. One that does not start with the zstd magic number counts as a compressed file skipped; one whose frame header cannot be read, that fails part way, has a bad checksum or holds more than one zstd frame counts as unreadable, and the records read before the failure still count. It reads Codex transcripts for `pipes`, `polls` and `rereads` only. A Codex call runs code that can start several commands; each command takes the result Codex recorded as it ended, matched by its text, and otherwise the result the call printed in its place, only when the call printed one result per command and has one command, Codex recorded none whilst it ran, or it is the one command left untied and each tied command's result is printed whole in its own place. `polls` reports how many Codex commands it could not pair (`codex_commands_not_paired`), including every command of a `function_call`, whose output is not read; these still count as commands and polls, but their results add nothing to polls after failure or poll characters. [docs/DESIGN.md](docs/DESIGN.md) defines each measure.
 
 For usage and cost totals, use [ccusage](https://github.com/ccusage/ccusage). [CodeBurn](https://github.com/getagentseal/codeburn) 0.9.28 `optimize`, [caveman](https://github.com/JuliusBrussee/caveman) 4.1.0 `learn` and [Claude Code](https://github.com/anthropics/claude-code) 2.1.323 `/usage` report priced setup waste. According to their documentation as read on 13 November 2026 ([optimize](https://github.com/getagentseal/codeburn/blob/main/docs/optimize.md), [learn](https://github.com/JuliusBrussee/caveman/blob/main/docs/technical/learn.md), [costs](https://code.claude.com/docs/en/costs)), none reports test failures hidden by a pipe, hook durations and cancellations, or polls split from reruns after an edit. Claude Code's `/usage` and Codex's `/status` are built in, where `shaphan` needs an install; it reads the past transcripts of both agents in one report. [claudeglass](https://github.com/PaulMorrisDev/claudeglass) 0.17.0, whose README was read on 16 November 2026, reads Claude Code only and checks each hook's failures and blocked calls, not its durations or cancellations. CodeBurn exports its usage records as CSV or JSON; `shaphan` prints its findings as JSON or CSV.
 
@@ -163,7 +164,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-The fuzz target in `fuzz/` feeds any bytes to the transcript reader and every detector as Claude and Codex transcripts, plain and compressed. CI runs it for 5 minutes every Monday. It needs a nightly toolchain and `cargo install cargo-fuzz`; run it with `cargo +nightly fuzz run transcript`. A crash leaves its input in `fuzz/artifacts/`; turn it into a test before fixing it.
+The fuzz target in `fuzz/` feeds any bytes to the transcript reader and every detector as Claude, Codex and pi transcripts, plain and compressed. CI runs it for 5 minutes every Monday. It needs a nightly toolchain and `cargo install cargo-fuzz`; run it with `cargo +nightly fuzz run transcript`. A crash leaves its input in `fuzz/artifacts/`; turn it into a test before fixing it.
 
 ## Credits
 

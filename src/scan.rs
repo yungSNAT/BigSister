@@ -1,7 +1,7 @@
 //! One pass over transcript files, feeding each wanted record to the detectors.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -20,6 +20,7 @@ use crate::time::parse_ts;
 pub enum Agent {
     Claude,
     Codex,
+    Pi,
 }
 
 impl Agent {
@@ -28,7 +29,15 @@ impl Agent {
         match self {
             Agent::Claude => "claude",
             Agent::Codex => "codex",
+            Agent::Pi => "pi",
         }
+    }
+
+    /// Whether the agent's records reach the detectors as Claude Code records: pi's are
+    /// rewritten into them ([`crate::pi`]).
+    #[must_use]
+    pub fn claude_shaped(self) -> bool {
+        matches!(self, Agent::Claude | Agent::Pi)
     }
 }
 
@@ -70,6 +79,12 @@ pub trait Detector {
     /// them; parsing each line first would be the upgrade, at several times the cost.
     fn wants(&self, s: &Session, line: &str) -> bool;
     fn begin(&mut self, _s: &Session) {}
+    /// A pi session continues from an earlier entry than the last: the state of the path
+    /// left behind is dropped, and the path to the branch point is replayed as copies.
+    /// Counts already made stand.
+    fn branch(&mut self, s: &Session) {
+        self.begin(s);
+    }
     fn record(&mut self, s: &Session, r: &Record<'_>);
     /// Whether the rest of this file can change nothing the detector reports.
     fn done(&self, _s: &Session) -> bool {
@@ -110,12 +125,7 @@ pub fn scan(
         .and_then(|s| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(s)))
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut out = Vec::new();
-    // The `uuid` of each Claude record parsed in an earlier file.
-    //
-    // shortcut: every uuid of the scan is held as a string, about 100 bytes each (a
-    // million uuids added 96 MB of peak memory, 14 November 2026). Holding a uuid as
-    // the 128-bit number it spells would cut that to about a quarter.
-    let mut earlier = HashSet::new();
+    let mut earlier = Earlier::default();
     for (agent, root) in roots {
         let active: Vec<usize> = (0..dets.len())
             .filter(|&i| dets[i].agents().contains(agent))
@@ -132,9 +142,10 @@ pub fn scan(
             compressed: 0,
         };
         let mut files = list_files(root, cutoff, &mut st);
-        if *agent == Agent::Claude {
+        if agent.claude_shaped() {
             // A copied record keeps its time, so reading by each file's first time reads
-            // an original before a copy of part of it, whose first record is later.
+            // an original before a copy of part of it, whose first record is later. A pi
+            // fork's header is written when it is made, after the entries it copies.
             files.sort_by_cached_key(|p| first_time(p));
         }
         for path in files {
@@ -327,6 +338,32 @@ impl Lines {
     }
 }
 
+/// The `uuid` of each Claude-shaped record parsed in an earlier file.
+///
+/// shortcut: every uuid of the scan is held as a string, about 100 bytes each (a million
+/// uuids added 96 MB of peak memory, 14 November 2026). Holding a uuid as the 128-bit
+/// number it spells would cut that to about a quarter.
+#[derive(Default)]
+struct Earlier {
+    /// Claude Code's, all together: a resumed session does not name the file it copies.
+    claude: HashSet<String>,
+    /// pi's, by session file name: a fork's header names the file it copies, whose own
+    /// uuids include those it copied in turn.
+    pi: HashMap<String, HashSet<String>>,
+}
+
+impl Earlier {
+    /// Holds the `uuids` of `agent`'s file `path`, once it is read.
+    fn add(&mut self, agent: Agent, path: &Path, uuids: HashSet<String>) {
+        if agent == Agent::Pi {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            self.pi.insert(name.into_owned(), uuids);
+        } else {
+            self.claude.extend(uuids);
+        }
+    }
+}
+
 fn scan_file(
     reader: Box<dyn BufRead>,
     path: &Path,
@@ -334,7 +371,7 @@ fn scan_file(
     dets: &mut [Box<dyn Detector>],
     active: &[usize],
     st: &mut RootStats,
-    earlier: &mut HashSet<String>,
+    earlier: &mut Earlier,
 ) -> io::Result<()> {
     let mut lines = Lines::new(reader);
     let Some(first) = lines.next_line()? else {
@@ -357,17 +394,19 @@ fn scan_file(
         codex_model: None,
         uuids: HashSet::new(),
         earlier,
+        pi: (agent == Agent::Pi).then(crate::pi::Tree::default),
+        replaying: false,
         dets,
         active,
         st,
     };
-    feed.line(&first);
+    feed.take(&first);
     let result = loop {
         if feed.active.iter().all(|&i| feed.dets[i].done(&session)) {
             break Ok(());
         }
         match lines.next_line() {
-            Ok(Some(line)) => feed.line(line.trim_end()),
+            Ok(Some(line)) => feed.take(line.trim_end()),
             Ok(None) => break Ok(()),
             Err(e) => break Err(e),
         }
@@ -383,7 +422,7 @@ fn scan_file(
         feed.dets[i].end(&session);
     }
     let uuids = feed.uuids;
-    earlier.extend(uuids);
+    earlier.add(agent, path, uuids);
     result
 }
 
@@ -399,6 +438,7 @@ fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
                 .and_then(Value::as_str)
                 .is_some_and(|p| !p.is_empty())
         }),
+        Agent::Pi => false,
     }
 }
 
@@ -410,14 +450,43 @@ struct Feed<'a> {
     codex_model: Option<Option<f64>>,
     /// The `uuid` of each Claude record parsed so far in the file.
     uuids: HashSet<String>,
-    /// The `uuid` of each Claude record parsed in an earlier file.
-    earlier: &'a HashSet<String>,
+    earlier: &'a Earlier,
+    /// A pi session's tree; `None` for other agents.
+    pi: Option<crate::pi::Tree>,
+    /// Whether the lines fed are a pi path given again, which count nowhere.
+    replaying: bool,
     dets: &'a mut [Box<dyn Detector>],
     active: &'a [usize],
     st: &'a mut RootStats,
 }
 
 impl Feed<'_> {
+    /// Feeds one line, a pi entry as the Claude Code record it is rewritten to, after
+    /// the path it branches from.
+    fn take(&mut self, line: &str) {
+        let Some(tree) = self.pi.as_mut() else {
+            return self.line(line);
+        };
+        if line.is_empty() {
+            return;
+        }
+        let Some(read) = tree.read(line) else {
+            self.st.bad_lines += 1;
+            return;
+        };
+        if let Some(path) = read.branch {
+            for &i in self.active {
+                self.dets[i].branch(&self.session);
+            }
+            self.replaying = true;
+            for old in &path {
+                self.line(old);
+            }
+            self.replaying = false;
+        }
+        self.line(&read.line);
+    }
+
     fn line(&mut self, line: &str) {
         if line.is_empty()
             || (self.session.agent == Agent::Claude && line.starts_with(CLAUDE_SKIP_PREFIX))
@@ -476,9 +545,13 @@ impl Feed<'_> {
     /// repeats one of this file's. Claude Code can write a record again later in its
     /// file, with the same uuid; such a record counts nowhere. A resumed session's file
     /// starts with copies of the earlier file's records; such a copy still builds the
-    /// session's state but counts nowhere.
+    /// session's state but counts nowhere, as does a pi path given again at a branch. A
+    /// pi session holds copies only of the file its header names.
     fn copied(&mut self, value: &Value) -> Option<bool> {
-        if self.session.agent != Agent::Claude {
+        if self.replaying {
+            return Some(true);
+        }
+        if !self.session.agent.claude_shaped() {
             return Some(false);
         }
         let Some(uuid) = value.get("uuid").and_then(Value::as_str) else {
@@ -487,7 +560,14 @@ impl Feed<'_> {
         if !self.uuids.insert(uuid.to_owned()) {
             return None;
         }
-        Some(self.earlier.contains(uuid))
+        Some(match &self.pi {
+            None => self.earlier.claude.contains(uuid),
+            Some(tree) => tree
+                .parent
+                .as_ref()
+                .and_then(|name| self.earlier.pi.get(name))
+                .is_some_and(|uuids| uuids.contains(uuid)),
+        })
     }
 
     fn read_by(&mut self, usd_per_mtok: Option<f64>) {
@@ -508,7 +588,7 @@ impl Feed<'_> {
     /// replies no detector reads to the uuids held for the scan.
     fn model(&mut self, line: &str) -> Option<Option<f64>> {
         match self.session.agent {
-            Agent::Claude => {
+            Agent::Claude | Agent::Pi => {
                 const KEY: &str = "\"message\":{\"model\":\"";
                 let at = line.find(KEY)?;
                 let rest = &line[at + KEY.len()..];
@@ -614,7 +694,7 @@ mod tests {
                 &mut dets,
                 &[0],
                 &mut st,
-                &mut HashSet::new(),
+                &mut Earlier::default(),
             )
             .expect("read");
             assert_eq!(n.get(), want, "{agent:?}");

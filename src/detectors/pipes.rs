@@ -1,5 +1,5 @@
-//! Test runs whose exit status a pipe into `tail` or `head` hides (Claude Bash and
-//! Codex commands).
+//! Test runs whose exit status a pipe into `tail` or `head` hides (Claude Bash,
+//! Codex commands and pi bash and powershell calls).
 
 use std::collections::BTreeMap;
 
@@ -59,12 +59,12 @@ pub struct Pipes {
 
 impl Detector for Pipes {
     fn agents(&self) -> &'static [Agent] {
-        &[Agent::Claude, Agent::Codex]
+        &[Agent::Claude, Agent::Codex, Agent::Pi]
     }
 
     fn wants(&self, s: &Session, line: &str) -> bool {
         match s.agent {
-            Agent::Claude => line.contains("\"tool_use\"") || self.claude.wants(line),
+            Agent::Claude | Agent::Pi => line.contains("\"tool_use\"") || self.claude.wants(line),
             Agent::Codex => codex_call_line(line) || self.codex.wants(line),
         }
     }
@@ -79,7 +79,7 @@ impl Detector for Pipes {
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
         match s.agent {
-            Agent::Claude => {
+            Agent::Claude | Agent::Pi => {
                 for b in tool_uses(r) {
                     let id = b.get("id").and_then(Value::as_str);
                     let fresh = self.claude.note(id);
@@ -121,7 +121,7 @@ impl Detector for Pipes {
         table.truncate(opts.limit);
         Section {
             name: "pipes",
-            title: "test runs piped into tail or head (Claude Bash, Codex commands)",
+            title: "test runs piped into tail or head (Claude Bash, Codex commands, pi bash and powershell)",
             summary: fields
                 .iter()
                 .map(|(k, v)| ((*k).to_owned(), json!(v)))

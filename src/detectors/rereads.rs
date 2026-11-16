@@ -58,12 +58,12 @@ pub struct Rereads {
 
 impl Detector for Rereads {
     fn agents(&self) -> &'static [Agent] {
-        &[Agent::Claude, Agent::Codex]
+        &[Agent::Claude, Agent::Codex, Agent::Pi]
     }
 
     fn wants(&self, s: &Session, line: &str) -> bool {
         match s.agent {
-            Agent::Claude => {
+            Agent::Claude | Agent::Pi => {
                 line.contains("\"compact_boundary\"")
                     || line.contains("\"tool_use\"")
                     || self.claude.wants(line)
@@ -84,6 +84,14 @@ impl Detector for Rereads {
         self.unread.clear();
     }
 
+    fn branch(&mut self, _s: &Session) {
+        // The session stays compacted if its left path was.
+        self.before.clear();
+        self.current.clear();
+        self.claude.clear();
+        self.unread.clear();
+    }
+
     fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
         for (agent, scope, n) in self.unread.drain(..) {
             let c = self.totals.entry((agent, scope)).or_default();
@@ -93,7 +101,7 @@ impl Detector for Rereads {
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
         let boundary = match s.agent {
-            Agent::Claude => {
+            Agent::Claude | Agent::Pi => {
                 r.kind() == "system"
                     && r.value.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
             }
@@ -104,7 +112,7 @@ impl Detector for Rereads {
             return;
         }
         match s.agent {
-            Agent::Claude => {
+            Agent::Claude | Agent::Pi => {
                 for b in tool_uses(r) {
                     let id = b.get("id").and_then(Value::as_str);
                     let fresh = self.claude.note(id);

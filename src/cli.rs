@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 /// Find where your coding agent's tokens go, from its own transcripts.
 ///
-/// Reads Claude Code and Codex transcripts on this machine and prints names,
+/// Reads Claude Code, Codex and pi transcripts on this machine and prints names,
 /// counts and sizes. Never prints message text, tool inputs or tool outputs.
 #[derive(Parser, Debug)]
 #[command(name = "shaphan", version)]
@@ -29,6 +29,10 @@ pub struct Cli {
     /// Codex transcript folder [default: ~/.codex/sessions and ~/.codex/archived_sessions]
     #[arg(long, global = true, value_name = "DIR")]
     pub codex_root: Option<PathBuf>,
+
+    /// pi session folder [default: ~/.pi/agent/sessions]
+    #[arg(long, global = true, value_name = "DIR")]
+    pub pi_root: Option<PathBuf>,
 
     /// Print one JSON object instead of tables
     #[arg(long, global = true)]
@@ -68,11 +72,11 @@ pub enum Command {
     Startup,
     /// Tool schemas loaded against tools called (Claude)
     Schemas,
-    /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex)
+    /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex, pi)
     Pipes,
-    /// Commands repeated with no edit in between (Claude, Codex)
+    /// Commands repeated with no edit in between (Claude, Codex, pi)
     Polls,
-    /// Files read again after a context compaction (Claude, Codex)
+    /// Files read again after a context compaction (Claude, Codex, pi)
     Rereads,
     /// Hook durations, cancellations and timeouts (Claude)
     Hooks,
@@ -83,5 +87,6 @@ pub enum Command {
 pub enum AgentChoice {
     Claude,
     Codex,
+    Pi,
     All,
 }
