@@ -5,7 +5,8 @@
 //! its data folder: a `session` table, a `message` table and a `part` table whose `data`
 //! columns hold JSON (`packages/schema/src/v1/session.ts`). The same database holds
 //! account tokens and credentials, so only those 3 tables are queried, with fixed SQL,
-//! SQLite refuses a read of any other, and the file is opened read-only.
+//! SQLite refuses a read of any other, and the file is opened read-only as an immutable
+//! file, so that no file beside it is written or created.
 //!
 //! An assistant message holds one or more steps, each a model call: a `step-start` part,
 //! its `tool` parts and a `step-finish` part with the call's token usage. Each step
@@ -40,13 +41,13 @@ const TABLES: [&str; 3] = ["session", "message", "part"];
 /// The sessions in database `db` updated at or after `since`, oldest first.
 ///
 /// # Errors
-/// When the database cannot be opened or read, lacks the tables or columns used, or
-/// changed whilst it was read as an immutable file.
+/// When the database cannot be opened or read, lacks the tables or columns used, has a
+/// write-ahead log holding records, or changed whilst it was read.
 pub fn read(db: &Path, since: DateTime<Utc>) -> Result<Vec<Session>, String> {
     let (mut conn, stamp) = open(db)?;
     let out = sessions(&mut conn, since).map_err(|e| e.to_string())?;
     drop(conn);
-    if stamp.is_some_and(|s| Stamp::of(db) != Some(s)) {
+    if Stamp::of(db) != Some(stamp) {
         return Err("the database changed whilst it was read".to_owned());
     }
     Ok(out)
@@ -107,7 +108,8 @@ fn sessions(conn: &mut Connection, since: DateTime<Utc>) -> rusqlite::Result<Vec
 struct Stamp {
     len: u64,
     modified: SystemTime,
-    wal: bool,
+    /// The write-ahead log's length, if there is one.
+    wal: Option<u64>,
     shm: bool,
 }
 
@@ -117,39 +119,36 @@ impl Stamp {
         let beside = |suffix: &str| {
             let mut name = db.as_os_str().to_owned();
             name.push(suffix);
-            Path::new(&name).exists()
+            std::fs::metadata(Path::new(&name))
         };
         Some(Self {
             len: m.len(),
             modified: m.modified().ok()?,
-            wal: beside("-wal"),
-            shm: beside("-shm"),
+            wal: beside("-wal").ok().map(|w| w.len()),
+            shm: beside("-shm").is_ok(),
         })
     }
 }
 
-/// Opens database `db` read-only, writing to and creating no file beside it, with
-/// reads of tables other than `TABLES` refused; and the stamp to compare after reading
-/// when it was opened as an immutable file.
+/// Opens database `db` read-only as an immutable file, with reads of tables other than
+/// `TABLES` refused, and the stamp to compare after reading.
 ///
-/// Whilst OpenCode runs, its write-ahead log (`-wal`) and the log's index (`-shm`) sit
-/// beside the database: the index is opened read-only (`readonly_shm`), and SQLite's
-/// locks keep the reads to one committed state. With no log beside it, the file is
-/// opened as immutable, so SQLite creates neither file; it is read again only if it is
-/// unchanged and still has no log afterwards. A log without its index fails, rather than
-/// creating the index or reading the database without the log's content.
-fn open(db: &Path) -> Result<(Connection, Option<Stamp>), String> {
+/// SQLite treats an immutable file as a temporary one: it never opens, creates or
+/// deletes the write-ahead log (`-wal`) or its index (`-shm`) beside it, and takes no
+/// lock. Whilst OpenCode runs, its newest records sit in that log, which SQLite cannot
+/// read without sharing the index, which it can create; so a log holding records fails,
+/// and the database is read only once OpenCode has stopped and the log is gone or empty.
+/// The read counts only if the file and the files beside it are unchanged afterwards.
+fn open(db: &Path) -> Result<(Connection, Stamp), String> {
     let stamp = Stamp::of(db).ok_or("the database's size and time cannot be read")?;
-    let (query, stamp) = match (stamp.wal, stamp.shm) {
-        (true, true) => ("mode=ro&readonly_shm=1", None),
-        (true, false) => return Err("a write-ahead log without its index".to_owned()),
-        (false, _) => ("immutable=1", Some(stamp)),
-    };
+    if stamp.wal.is_some_and(|len| len > 0) {
+        return Err("OpenCode's write-ahead log holds records, so OpenCode is running or did not stop cleanly".to_owned());
+    }
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
         | OpenFlags::SQLITE_OPEN_URI
         | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let mut conn =
-        Connection::open_with_flags(uri(db, query)?, flags).map_err(|e| e.to_string())?;
+        Connection::open_with_flags(uri(db, "immutable=1")?, flags).map_err(|e| e.to_string())?;
     conn.authorizer(Some(only_tables))
         .map_err(|e| e.to_string())?;
     Ok((conn, stamp))

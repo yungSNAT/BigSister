@@ -220,10 +220,11 @@ fn row<'a>(doc: &'a Value, section: &str, key: &[(&str, &str)]) -> &'a Value {
         .unwrap_or_else(|| panic!("no {section} row {key:?} in {doc}"))
 }
 
-/// The JSON report over a database built in folder `name`, read whilst the connection
-/// that wrote it is still open, as OpenCode's is whilst it runs.
+/// The JSON report over a database built in folder `name`, read once the connection
+/// that wrote it has closed, as OpenCode's has once it stops.
 fn counts(name: &str) -> Value {
-    let (dir, _writer) = database(name);
+    let (dir, writer) = database(name);
+    drop(writer);
     let (stdout, _) = report(&dir, &["--json"]);
     serde_json::from_str(&stdout).expect("valid JSON")
 }
@@ -346,17 +347,23 @@ fn an_unreadable_database_counts_as_one_unreadable_file() {
     );
 }
 
-/// A write-ahead log whose index is missing could hold sessions the database lacks, so
-/// the database is not read without it, and no index is created.
+/// Once OpenCode has stopped, an empty write-ahead log and its index can remain beside
+/// the database: the database is read and neither file is touched.
 #[test]
-fn a_log_without_its_index_counts_as_unreadable_and_is_left_alone() {
-    let (dir, writer) = database("opencode-no-shm");
+fn an_empty_log_and_its_index_are_left_alone() {
+    let (dir, writer) = database("opencode-empty-log");
     drop(writer);
     std::fs::write(dir.join("opencode.db-wal"), "").expect("log");
+    std::fs::write(dir.join("opencode.db-shm"), [7u8; 32]).expect("index");
     let before = files(&dir);
     let (stdout, _) = report(&dir, &["--json"]);
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
-    assert_eq!(doc["roots"][0]["unreadable"], json!(1), "{}", doc["roots"]);
+    assert_eq!(
+        [&doc["roots"][0]["files"], &doc["roots"][0]["unreadable"]],
+        [&json!(2), &json!(0)],
+        "{}",
+        doc["roots"]
+    );
     assert!(files(&dir) == before, "the database folder changed");
 }
 
@@ -386,6 +393,7 @@ fn malformed_rows_count_as_skipped_lines_and_print_nothing() {
             T1 = T0 + 1
         ))
         .expect("rows");
+    drop(writer);
     let (stdout, stderr) = report(&dir, &["--json"]);
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(
@@ -410,6 +418,7 @@ fn malformed_rows_count_as_skipped_lines_and_print_nothing() {
 fn a_database_missing_a_table_counts_as_unreadable_with_no_sessions() {
     let (dir, writer) = database("opencode-no-part");
     writer.execute_batch("DROP TABLE part").expect("drop");
+    drop(writer);
     let (stdout, _) = report(&dir, &["--json"]);
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(
@@ -426,21 +435,30 @@ fn a_database_missing_a_table_counts_as_unreadable_with_no_sessions() {
     );
 }
 
-/// Whilst OpenCode runs, the database, its log and the log's index are read and none of
-/// them is written, not even the index's time.
+/// Whilst OpenCode runs, its newest records sit in the write-ahead log, which SQLite
+/// cannot read without sharing the log's index: the database counts as one unreadable
+/// file, and the database, the log and the index are untouched, times included.
 #[test]
-fn a_live_database_is_read_without_changing_its_log_or_index() {
-    let (dir, _writer) = database("opencode-live");
+fn a_log_holding_records_counts_as_unreadable_and_is_left_alone() {
+    let (dir, writer) = database("opencode-live");
+    // The sessions reach the database file; a later write stays in the log.
+    writer
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); CREATE TABLE later (x INTEGER);")
+        .expect("checkpoint and write");
     let before = files(&dir);
-    assert_eq!(
-        before.len(),
-        3,
-        "{:?}",
-        before.iter().map(|f| &f.0).collect::<Vec<_>>()
-    );
+    let wal = before
+        .iter()
+        .find(|f| f.0.ends_with("-wal"))
+        .expect("a log");
+    assert!(!wal.1.is_empty(), "the log holds no record");
     let (stdout, _) = report(&dir, &["--json"]);
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
-    assert_eq!(doc["roots"][0]["files"], json!(2), "{}", doc["roots"]);
+    assert_eq!(
+        [&doc["roots"][0]["files"], &doc["roots"][0]["unreadable"]],
+        [&json!(1), &json!(1)],
+        "{}",
+        doc["roots"]
+    );
     assert!(files(&dir) == before, "the database folder changed");
 }
 
