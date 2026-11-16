@@ -1326,6 +1326,10 @@ const PRICED_MIXED: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/priced-mixed/claude"
 );
+const PRICED_PROMPT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/priced-prompt/claude"
+);
 
 /// `shaphan all --json` over the priced Codex fixtures and `claude`, with `extra` options.
 fn priced(claude: &str, extra: &[&str]) -> Value {
@@ -1382,10 +1386,23 @@ fn each_estimate_is_priced_at_the_model_that_read_it() {
     assert_eq!(reread["unpriced_tokens_est"], json!(0));
     let notes = doc["detectors"]["polls"]["notes"].to_string();
     assert!(
-        notes.contains("15 November 2026") && notes.contains("not a bill"),
+        notes.contains("16 November 2026") && notes.contains("not a bill"),
         "{notes}"
     );
     assert_eq!(doc["schema_version"], 2);
+}
+
+#[test]
+fn haiku_5_5_is_priced_by_the_size_of_the_prompt_that_read_it() {
+    let doc = priced(PRICED_PROMPT, &[]);
+    // 4 polls of 80,000 characters, 20,000 tokens est each, read by Haiku 5.5 with a
+    // 50,000-token prompt (US$0.10 per million), Haiku 5.5 with a 150,000-token prompt
+    // (US$0.50), Haiku 5.5 with no usage recorded (unpriced) and Claude Opus 4.5 by its
+    // dated id (US$5): US$0.002 + 0.01 + 0.1, rounded to cents.
+    let claude = find(rows(&doc, "polls", 0), &[("agent", json!("claude"))]);
+    assert_eq!(claude["poll_tokens_est"], json!(80000));
+    assert_eq!(claude["poll_usd_est"], json!(0.11));
+    assert_eq!(claude["unpriced_tokens_est"], json!(20000));
 }
 
 #[test]
@@ -1396,7 +1413,7 @@ fn a_given_rate_prices_every_estimate_and_leaves_none_unpriced() {
     assert_eq!(claude["unpriced_tokens_est"], json!(0));
     let notes = doc["detectors"]["polls"]["notes"].to_string();
     assert!(notes.contains("--usd-per-mtok"), "{notes}");
-    assert!(!notes.contains("15 November 2026"), "{notes}");
+    assert!(!notes.contains("16 November 2026"), "{notes}");
 }
 
 #[test]
