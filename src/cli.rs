@@ -87,6 +87,8 @@ pub enum Command {
     Polls,
     /// Files read again after a context compaction (Claude, Codex, pi)
     Rereads,
+    /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi)
+    Tools,
     /// Hook durations, cancellations and timeouts (Claude)
     Hooks,
 }

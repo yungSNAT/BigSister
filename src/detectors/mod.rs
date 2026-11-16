@@ -6,6 +6,7 @@ pub mod polls;
 pub mod rereads;
 pub mod schemas;
 pub mod startup;
+pub mod tools;
 
 #[cfg(test)]
 mod codex_tests;
@@ -41,6 +42,9 @@ pub fn build(cmd: Command, programs: &Rc<Programs>) -> Vec<Box<dyn Detector>> {
     }
     if all || cmd == Command::Rereads {
         v.push(Box::<rereads::Rereads>::default());
+    }
+    if all || cmd == Command::Tools {
+        v.push(Box::<tools::Tools>::default());
     }
     if all || cmd == Command::Hooks {
         v.push(Box::new(hooks::Hooks::new(Rc::clone(programs))));
