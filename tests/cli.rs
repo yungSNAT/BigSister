@@ -636,7 +636,7 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[0]["lines_skipped"], 1);
     assert_eq!(roots[1]["files"], 2);
     assert_eq!(doc["schema_version"], 2);
-    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(6));
+    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(7));
 }
 
 /// `shaphan all` over the Claude transcripts in a fixture folder, which must hold 2.
@@ -1620,6 +1620,11 @@ fn a_given_rate_prices_every_estimate_and_leaves_none_unpriced() {
     let claude = find(rows(&doc, "polls", 0), &[("agent", json!("claude"))]);
     assert_eq!(claude["poll_usd_est"], json!(7.5));
     assert_eq!(claude["unpriced_tokens_est"], json!(0));
+    let tools = rows(&doc, "tools", 0);
+    assert!(!tools.is_empty());
+    for row in tools {
+        assert_eq!(row["unpriced_tokens_est"], json!(0), "{row}");
+    }
     let notes = doc["detectors"]["polls"]["notes"].to_string();
     assert!(notes.contains("--usd-per-mtok"), "{notes}");
     assert!(!notes.contains("16 November 2026"), "{notes}");
