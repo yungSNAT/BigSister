@@ -5,8 +5,9 @@
 //! its data folder: a `session` table, a `message` table and a `part` table whose `data`
 //! columns hold JSON (`packages/schema/src/v1/session.ts`). The same database holds
 //! account tokens and credentials, so only those 3 tables are queried, with fixed SQL,
-//! SQLite refuses a read of any other, and the file is opened read-only as an immutable
-//! file, so that no file beside it is written or created.
+//! and SQLite refuses a read of any other. The file is copied into memory with ordinary
+//! reads and the copy is queried, so that no file beside it is opened, written or
+//! created.
 //!
 //! An assistant message holds one or more steps, each a model call: a `step-start` part,
 //! its `tool` parts and a `step-finish` part with the call's token usage. Each step
@@ -18,12 +19,13 @@
 //! without its state, counts as a skipped line.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::Path;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
+use rusqlite::{Connection, MAIN_DB, params};
 use serde_json::{Map, Value, json};
 
 /// One OpenCode session, as Claude Code records.
@@ -41,23 +43,15 @@ const TABLES: [&str; 3] = ["session", "message", "part"];
 /// The sessions in database `db` updated at or after `since`, oldest first.
 ///
 /// # Errors
-/// When the database cannot be opened or read, lacks the tables or columns used, has a
-/// write-ahead log holding records, or changed whilst it was read.
+/// When the database cannot be read, changed whilst it was copied, has a write-ahead log
+/// holding records, or lacks the tables or columns used.
 pub fn read(db: &Path, since: DateTime<Utc>) -> Result<Vec<Session>, String> {
-    let (mut conn, stamp) = open(db)?;
-    let out = sessions(&mut conn, since).map_err(|e| e.to_string())?;
-    drop(conn);
-    if Stamp::of(db) != Some(stamp) {
-        return Err("the database changed whilst it was read".to_owned());
-    }
-    Ok(out)
+    let conn = open(db)?;
+    sessions(&conn, since).map_err(|e| e.to_string())
 }
 
-/// Reads the sessions in one read transaction, so that every query sees the same
-/// database.
-fn sessions(conn: &mut Connection, since: DateTime<Utc>) -> rusqlite::Result<Vec<Session>> {
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
-    let sessions: Vec<(String, bool)> = tx
+fn sessions(conn: &Connection, since: DateTime<Utc>) -> rusqlite::Result<Vec<Session>> {
+    let sessions: Vec<(String, bool)> = conn
         .prepare(
             "SELECT id, parent_id IS NOT NULL FROM session WHERE time_updated >= ?1 \
              ORDER BY time_created, id",
@@ -66,11 +60,11 @@ fn sessions(conn: &mut Connection, since: DateTime<Utc>) -> rusqlite::Result<Vec
             Ok((r.get(0)?, r.get(1)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
-    let mut messages = tx.prepare(
+    let mut messages = conn.prepare(
         "SELECT id, time_created, data FROM message WHERE session_id = ?1 \
          ORDER BY time_created, id",
     )?;
-    let mut parts = tx.prepare(
+    let mut parts = conn.prepare(
         "SELECT id, message_id, time_created, data FROM part WHERE session_id = ?1 \
          ORDER BY time_created, id",
     )?;
@@ -103,7 +97,7 @@ fn sessions(conn: &mut Connection, since: DateTime<Utc>) -> rusqlite::Result<Vec
     Ok(out)
 }
 
-/// What the database file and the files beside it were when it was opened.
+/// What the database file and the files beside it were before it was copied.
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Stamp {
     len: u64,
@@ -130,57 +124,75 @@ impl Stamp {
     }
 }
 
-/// Opens database `db` read-only as an immutable file, with reads of tables other than
-/// `TABLES` refused, and the stamp to compare after reading.
+/// Copies database `db` into memory and opens the copy read-only, with reads of tables
+/// other than `TABLES` refused.
 ///
-/// SQLite treats an immutable file as a temporary one: it never opens, creates or
-/// deletes the write-ahead log (`-wal`) or its index (`-shm`) beside it, and takes no
-/// lock. Whilst OpenCode runs, its newest records sit in that log, which SQLite cannot
-/// read without sharing the index, which it can create; so a log holding records fails,
-/// and the database is read only once OpenCode has stopped and the log is gone or empty.
-/// The read counts only if the file and the files beside it are unchanged afterwards.
-fn open(db: &Path) -> Result<(Connection, Stamp), String> {
+/// The file is read twice with ordinary reads, and the copy counts only if both reads
+/// match and the file and the files beside it are unchanged, so it is the file as it
+/// stood rather than pages from before and after a write; the queries then read the
+/// copy, which nothing else changes. No file beside the database is opened, created or
+/// deleted, and no lock is taken. Whilst OpenCode runs, its newest records sit in the
+/// write-ahead log (`-wal`), which only a connection sharing the log's index (`-shm`)
+/// can read, and such a connection can create the index; so a log holding records
+/// fails, and the database is read once OpenCode has stopped and the log is empty or
+/// gone.
+///
+/// shortcut: the whole database is held in memory, twice whilst the copy is opened
+/// (OpenCode's on this machine is 1.1 MB, November 2026). Copying and checking it a
+/// page at a time would be the upgrade.
+fn open(db: &Path) -> Result<Connection, String> {
     let stamp = Stamp::of(db).ok_or("the database's size and time cannot be read")?;
     if stamp.wal.is_some_and(|len| len > 0) {
         return Err("OpenCode's write-ahead log holds records, so OpenCode is running or did not stop cleanly".to_owned());
     }
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-        | OpenFlags::SQLITE_OPEN_URI
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let mut conn =
-        Connection::open_with_flags(uri(db, "immutable=1")?, flags).map_err(|e| e.to_string())?;
+    let mut copy = std::fs::read(db).map_err(|e| e.to_string())?;
+    if !holds(db, &copy) || Stamp::of(db) != Some(stamp) {
+        return Err("the database changed whilst it was copied".to_owned());
+    }
+    // Bytes 18 and 19 of the header say whether the database uses a write-ahead log
+    // (2) or not (1). A copy in memory cannot use one and this log is empty, so the
+    // copy says not.
+    if let Some(versions) = copy.get_mut(18..20) {
+        versions.fill(1);
+    }
+    let mut conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
+    let len = copy.len();
+    conn.deserialize_read_exact(MAIN_DB, copy.as_slice(), len, true)
+        .map_err(|e| e.to_string())?;
     conn.authorizer(Some(only_tables))
         .map_err(|e| e.to_string())?;
-    Ok((conn, stamp))
+    Ok(conn)
 }
 
-/// Allows a query to read only `TABLES`, and a read transaction to begin and end.
+/// Whether file `db` holds exactly `copy`, read again a piece at a time.
+fn holds(db: &Path, copy: &[u8]) -> bool {
+    let Ok(mut file) = std::fs::File::open(db) else {
+        return false;
+    };
+    let mut piece = vec![0; 1 << 16];
+    let mut at = 0;
+    loop {
+        match file.read(&mut piece) {
+            Ok(0) => return at == copy.len(),
+            Ok(n) => {
+                if copy.get(at..at + n) != Some(&piece[..n]) {
+                    return false;
+                }
+                at += n;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Allows a query to read only `TABLES`.
 fn only_tables(ctx: AuthContext<'_>) -> Authorization {
     match ctx.action {
-        AuthAction::Select | AuthAction::Transaction { .. } => Authorization::Allow,
+        AuthAction::Select => Authorization::Allow,
         AuthAction::Read { table_name, .. } if TABLES.contains(&table_name) => Authorization::Allow,
         _ => Authorization::Deny,
     }
-}
-
-/// An SQLite URI naming `db` with `query`: its absolute path, with Windows' separators
-/// written as `/`, and `%`, `?` and `#` escaped, as SQLite's URI rules ask. A `\` in a
-/// Unix name is a character of the name, so it stays.
-fn uri(db: &Path, query: &str) -> Result<String, String> {
-    let absolute = std::path::absolute(db).map_err(|e| e.to_string())?;
-    let mut path = absolute
-        .to_str()
-        .ok_or("a database path that is not UTF-8")?
-        .to_owned();
-    if cfg!(windows) {
-        path = path.replace('\\', "/");
-    }
-    let path = path
-        .replace('%', "%25")
-        .replace('?', "%3f")
-        .replace('#', "%23");
-    let slash = if path.starts_with('/') { "" } else { "/" };
-    Ok(format!("file://{slash}{path}?{query}"))
 }
 
 /// A part of a message: its id, time and parsed `data`, which is null when it is not a
@@ -420,25 +432,6 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn a_windows_path_becomes_a_uri_with_forward_slashes() {
-        assert_eq!(
-            uri(Path::new(r"C:\a%b#c\opencode.db"), "immutable=1").as_deref(),
-            Ok("file:///C:/a%25b%23c/opencode.db?immutable=1")
-        );
-    }
-
-    /// A `\` is a character of a Unix name, not a separator.
-    #[cfg(unix)]
-    #[test]
-    fn a_unix_path_keeps_its_backslashes() {
-        assert_eq!(
-            uri(Path::new(r"/t/a\b?%#/opencode.db"), "immutable=1").as_deref(),
-            Ok(r"file:///t/a\b%3f%25%23/opencode.db?immutable=1")
-        );
-    }
-
     /// Only `TABLES` can be read through the connection `open` gives.
     #[test]
     fn a_table_other_than_sessions_messages_and_parts_is_refused() {
@@ -453,7 +446,7 @@ mod tests {
                  INSERT INTO account VALUES ('secret');",
             )
             .expect("tables");
-        let (conn, _) = open(&db).expect("open");
+        let conn = open(&db).expect("open");
         for table in TABLES {
             let rows = conn
                 .prepare(&format!("SELECT id FROM {table}"))
@@ -468,6 +461,58 @@ mod tests {
             assert!(conn.prepare(refused).is_err(), "{refused} was allowed");
         }
         drop(conn);
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// OpenCode writing to its database whilst `shaphan` queries it changes nothing the
+    /// queries see: they read the copy `open` made.
+    #[test]
+    fn a_write_after_opening_is_not_seen() {
+        let dir = std::env::temp_dir().join(format!("shaphan-opencode-w-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("folder");
+        let db = dir.join("opencode.db");
+        let writer = Connection::open(&db).expect("database");
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode = WAL; CREATE TABLE session (id text);
+                 INSERT INTO session VALUES ('before');
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .expect("table");
+        let conn = open(&db).expect("open");
+        // The write reaches the database file itself.
+        writer
+            .execute_batch("UPDATE session SET id = 'after'; PRAGMA wal_checkpoint(TRUNCATE);")
+            .expect("write");
+        let id: String = conn
+            .query_row("SELECT id FROM session", [], |r| r.get(0))
+            .expect("query");
+        assert_eq!(id, "before");
+        drop((conn, writer));
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// A file that changed after it was copied, in a byte or in length, no longer holds
+    /// the copy.
+    #[test]
+    fn a_file_changed_after_its_copy_does_not_hold_it() {
+        let dir = std::env::temp_dir().join(format!("shaphan-opencode-h-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("folder");
+        let file = dir.join("f");
+        let copy = vec![7u8; 70_000];
+        std::fs::write(&file, &copy).expect("file");
+        assert!(holds(&file, &copy));
+        let mut changed = copy.clone();
+        changed[69_999] = 8;
+        std::fs::write(&file, &changed).expect("file");
+        assert!(!holds(&file, &copy));
+        std::fs::write(&file, &copy[..69_999]).expect("file");
+        assert!(!holds(&file, &copy));
+        changed = copy.clone();
+        changed.push(7);
+        std::fs::write(&file, &changed).expect("file");
+        assert!(!holds(&file, &copy));
+        assert!(!holds(&dir.join("missing"), &copy));
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
 }

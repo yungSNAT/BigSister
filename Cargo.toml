@@ -16,7 +16,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 clap = { version = "4", features = ["derive"] }
 regex = "1"
 ruzstd = "0.9"
-rusqlite = { version = "0.41.1", features = ["bundled", "hooks"] }
+rusqlite = { version = "0.41.1", features = ["bundled", "hooks", "serialize"] }
 serde = "1"
 serde_json = { version = "1", features = ["raw_value"] }
 

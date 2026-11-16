@@ -462,8 +462,7 @@ fn a_log_holding_records_counts_as_unreadable_and_is_left_alone() {
     assert!(files(&dir) == before, "the database folder changed");
 }
 
-/// `%` and `#` in the folder's name are escaped in the URI SQLite opens, so the database
-/// read is the one in that folder.
+/// A folder whose name holds `%` and `#` is read: the database read is the one in it.
 #[test]
 fn a_folder_name_with_uri_characters_is_read() {
     let (dir, writer) = database("opencode-a%25#b");
