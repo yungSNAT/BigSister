@@ -3074,3 +3074,90 @@ fn a_pi_line_in_another_agent_s_shape_counts_nowhere() {
     assert_eq!(row["commands"], json!(1), "{row}");
     assert_eq!(row["polls"], json!(0), "{row}");
 }
+
+/// `polls` over the fixtures from `since`, with extra environment variables.
+fn since_run(since: &str, json: bool, env: &[(&str, &Path)]) -> (i32, String, String) {
+    let mut args = vec![
+        "polls",
+        "--claude-root",
+        CLAUDE,
+        "--codex-root",
+        CODEX,
+        "--since",
+        since,
+    ];
+    if json {
+        args.push("--json");
+    }
+    run_env(&args, env)
+}
+
+/// The window's start as JSON prints it.
+fn since_json(since: &str, env: &[(&str, &Path)]) -> Value {
+    let (code, stdout, stderr) = since_run(since, true, env);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    doc["since"].clone()
+}
+
+#[test]
+fn json_prints_the_window_start_in_rfc_3339_with_an_offset() {
+    for (since, printed) in [
+        ("2026-11-01T00:00:00Z", "2026-11-01T00:00:00+00:00"),
+        ("2026-11-01T11:00:00+11:00", "2026-11-01T00:00:00+00:00"),
+        ("2026-11-01T00:00:00.5Z", "2026-11-01T00:00:00.500+00:00"),
+        (
+            "2026-11-01T00:00:00.123456Z",
+            "2026-11-01T00:00:00.123456+00:00",
+        ),
+        (
+            "2026-11-01T00:00:00.1234567Z",
+            "2026-11-01T00:00:00.123456700+00:00",
+        ),
+    ] {
+        assert_eq!(since_json(since, &[]), json!(printed), "{since}");
+    }
+}
+
+/// A date is midnight where the machine is; text prints the start there, with its offset.
+#[cfg(unix)]
+#[test]
+fn a_date_is_midnight_in_the_local_zone() {
+    let sydney: &[(&str, &Path)] = &[("TZ", Path::new("Australia/Sydney"))];
+    assert_eq!(
+        since_json("2026-11-01", sydney),
+        json!("2026-10-31T13:00:00+00:00")
+    );
+    let (code, stdout, stderr) = since_run("2026-11-01", false, sydney);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains(": records since 2026-11-01 00:00 +11:00\n"),
+        "{stdout}"
+    );
+    let (_, stdout, _) = since_run("2026-07-01T00:00:00Z", false, sydney);
+    assert!(
+        stdout.contains(": records since 2026-07-01 10:00 +10:00\n"),
+        "{stdout}"
+    );
+}
+
+/// Havana's clocks go back from 01:00 to midnight on 3 November 2024, so that midnight
+/// came twice: the first is taken. On 10 March 2024 they went forward from midnight to
+/// 01:00, so that midnight never came, and the date is refused.
+#[cfg(unix)]
+#[test]
+fn a_repeated_local_midnight_takes_the_first_and_a_skipped_one_is_refused() {
+    let havana: &[(&str, &Path)] = &[("TZ", Path::new("America/Havana"))];
+    assert_eq!(
+        since_json("2024-11-03", havana),
+        json!("2024-11-03T04:00:00+00:00")
+    );
+    let (code, stdout, stderr) = since_run("2024-03-10", true, havana);
+    assert_eq!(code, 1, "stdout: {stdout}");
+    assert!(
+        stderr.contains(
+            "--since: expected 7d, 24h, YYYY-MM-DD or an RFC 3339 time, got '2024-03-10'"
+        ),
+        "{stderr}"
+    );
+}

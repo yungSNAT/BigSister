@@ -447,6 +447,17 @@ mod tests {
     use std::process::{Child, ChildStdout, Command, Stdio};
     use std::time::{Duration, Instant};
 
+    /// A row's milliseconds become an RFC 3339 time with 3 digits and `Z`.
+    #[test]
+    fn times_print_milliseconds_in_utc() {
+        assert_eq!(time(0), json!("1970-01-01T00:00:00.000Z"));
+        assert_eq!(time(1_762_560_000_120), json!("2025-11-08T00:00:00.120Z"));
+        assert_eq!(time(-1), json!("1969-12-31T23:59:59.999Z"));
+        assert_eq!(time(253_402_128_000_000), json!("9999-12-30T00:00:00.000Z"));
+        assert_eq!(time(i64::MAX), Value::Null);
+        assert_eq!(time(i64::MIN), Value::Null);
+    }
+
     fn part(id: &str, data: &Value) -> Part {
         Part::new(id.to_owned(), 0, &data.to_string())
     }

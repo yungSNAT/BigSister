@@ -83,6 +83,78 @@ mod tests {
         );
     }
 
+    /// Which timestamp forms parse, and to what instant.
+    #[test]
+    fn timestamp_forms() {
+        let z = parse_ts("2026-11-08T00:00:00Z");
+        assert!(z.is_some());
+        for s in [
+            "2026-11-08T00:00:00z",
+            "2026-11-08t00:00:00Z",
+            "2026-11-08 00:00:00Z",
+            "2026-11-08T11:00:00+11:00",
+            "2026-11-07T14:00:00-10:00",
+            "2026-11-08T00:00:00-00:00",
+            "2026-11-08T00:00:00.000Z",
+            "2026-11-08T00:00:00.000000000Z",
+        ] {
+            assert_eq!(parse_ts(s), z, "{s}");
+        }
+        assert_eq!(
+            parse_ts("2026-11-08T00:00:00.123Z"),
+            parse_ts("2026-11-08T00:00:00.123000000Z")
+        );
+        assert!(parse_ts("2026-11-08T00:00:00.1Z") > z);
+        assert!(parse_ts("2026-11-08T00:00:00.000000001Z") > z);
+        for s in [
+            "",
+            "2026-11-08",
+            "2026-11-08T00:00:00",
+            "2026-11-08T00:00Z",
+            "2026-02-30T00:00:00Z",
+            "2026-11-08T24:00:00Z",
+            "2026-11-08T00:00:00+24:00",
+            "20261108T000000Z",
+            " 2026-11-08T00:00:00Z",
+            "2026-11-08T00:00:00Z ",
+            "2026-11-08T00:00:00Z[UTC]",
+            "2026-11-08T00:00:00,5Z",
+        ] {
+            assert_eq!(parse_ts(s), None, "{s}");
+        }
+    }
+
+    #[test]
+    fn since_forms_and_messages() {
+        assert_eq!(parse_since(" 7d ", now()), parse_since("7d", now()));
+        assert_eq!(parse_since("07d", now()), parse_since("7d", now()));
+        assert_eq!(parse_since("0h", now()), Ok(now()));
+        assert_eq!(
+            parse_since("2026-11-08T00:00:00Z", now()),
+            parse_ts("2026-11-08T00:00:00Z").ok_or(String::new())
+        );
+        assert_eq!(
+            parse_since("2026-1-1", now()),
+            parse_since("2026-01-01", now())
+        );
+        assert_eq!(
+            parse_since("200000d", now()),
+            Err("--since: '200000d' is before 1970".to_owned())
+        );
+        assert_eq!(
+            parse_since("1969-12-31T23:59:59Z", now()),
+            Err("--since: '1969-12-31T23:59:59Z' is before 1970".to_owned())
+        );
+        assert_eq!(
+            parse_since("1970-01-01T00:00:00Z", now()),
+            parse_ts("1970-01-01T00:00:00Z").ok_or(String::new())
+        );
+        assert_eq!(
+            parse_since("7w", now()),
+            Err("--since: expected 7d, 24h, YYYY-MM-DD or an RFC 3339 time, got '7w'".to_owned())
+        );
+    }
+
     #[test]
     fn rejects_other_forms() {
         for s in [
