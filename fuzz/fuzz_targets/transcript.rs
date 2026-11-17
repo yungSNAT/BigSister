@@ -29,14 +29,15 @@ fuzz_target!(|data: &[u8]| {
     for name in ["s.jsonl", "s.jsonl.zst"] {
         std::fs::write(dir.join(name), data).expect("transcript");
     }
-    let mut dets = PROGRAMS.with(|p| build(Command::All, p));
+    let prices = Rc::new(Prices::bundled());
+    let mut dets = PROGRAMS.with(|p| build(Command::All, p, &prices));
     let roots = [
         (Agent::Claude, dir.clone()),
         (Agent::Codex, dir.clone()),
         (Agent::Pi, dir),
     ];
     let since = DateTime::UNIX_EPOCH;
-    let stats = scan(&roots, since, &Prices::bundled(), &mut dets);
+    let stats = scan(&roots, since, &prices, &mut dets);
     // Each root lists both files, the compressed one counted as read or skipped.
     for st in &stats {
         assert_eq!(st.files + st.compressed, 2, "{st:?}");
