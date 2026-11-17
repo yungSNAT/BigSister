@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use chrono::{DateTime, TimeDelta, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::{Value, json};
 
 use crate::report::{Opts, Section, Table, ratio};
@@ -76,7 +76,7 @@ struct Previous {
     read: u64,
     write: u64,
     model: String,
-    at: DateTime<Utc>,
+    at: Timestamp,
 }
 
 /// The cache's lifetimes: 5 minutes by default, an hour once a reply writes at that
@@ -135,7 +135,7 @@ struct Reply<'a> {
     /// `message.model`.
     model: &'a str,
     /// `timestamp`, which measures the gap since the previous reply.
-    at: DateTime<Utc>,
+    at: Timestamp,
     /// `message.usage`: `cache_read_input_tokens`, `cache_creation_input_tokens`, and
     /// `cache_creation`'s `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`,
     /// each an integer from 0 to [`MAX_COUNT`]. A usage without the `cache_creation` key,
@@ -403,7 +403,7 @@ impl Cache {
             FIVE_MINUTES
         };
         let u = &reply.usage;
-        let cause = if reply.at - p.at > TimeDelta::seconds(ttl) {
+        let cause = if reply.at.duration_since(p.at) > SignedDuration::from_secs(ttl) {
             Cause::Idle
         } else if p.model != reply.model {
             Cause::Switch
@@ -548,7 +548,7 @@ mod tests {
         assert!(read_reply(&split(u64::MAX, 1)).is_err());
     }
 
-    fn time(at: &str) -> DateTime<Utc> {
+    fn time(at: &str) -> Timestamp {
         parse_ts(at).expect("a time")
     }
 

@@ -2,7 +2,8 @@
 
 use std::fmt::Write as _;
 
-use chrono::{DateTime, Local, Utc};
+use jiff::Timestamp;
+use jiff::tz::{Offset, TimeZone};
 use serde_json::{Map, Value, json};
 
 use crate::scan::RootStats;
@@ -60,7 +61,7 @@ pub struct Section {
 
 /// Run-level facts printed above the sections.
 pub struct Meta<'a> {
-    pub since: DateTime<Utc>,
+    pub since: Timestamp,
     pub roots: &'a [RootStats],
     pub skipped_roots: &'a [String],
     pub home: Option<&'a str>,
@@ -174,10 +175,23 @@ pub fn display_path(path: &str, home: Option<&str>) -> String {
     p
 }
 
-fn local(t: DateTime<Utc>) -> String {
-    t.with_timezone(&Local)
-        .format("%Y-%m-%d %H:%M %:z")
+fn local(t: Timestamp) -> String {
+    t.to_zoned(TimeZone::system())
+        .strftime("%Y-%m-%d %H:%M %:z")
         .to_string()
+}
+
+/// RFC 3339 with a `+00:00` offset and 0, 3, 6 or 9 fractional digits, the fewest that
+/// keep the time exact.
+fn rfc3339(t: Timestamp) -> String {
+    let ns = t.subsec_nanosecond();
+    let digits = match ns {
+        0 => 0,
+        _ if ns % 1_000_000 == 0 => 3,
+        _ if ns % 1_000 == 0 => 6,
+        _ => 9,
+    };
+    format!("{:.digits$}", t.display_with_offset(Offset::UTC))
 }
 
 fn cell(v: &Value) -> String {
@@ -312,7 +326,7 @@ pub fn json(meta: &Meta<'_>, sections: &[Section]) -> String {
         "schema_version": 2,
         "tool": "shaphan",
         "version": env!("CARGO_PKG_VERSION"),
-        "since": meta.since.to_rfc3339(),
+        "since": rfc3339(meta.since),
         "roots": roots,
         "skipped_roots": meta.skipped_roots,
         "detectors": detectors,

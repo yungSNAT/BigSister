@@ -23,7 +23,7 @@ use std::io::Read;
 use std::path::Path;
 use std::time::SystemTime;
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
 use rusqlite::{Connection, MAIN_DB, params};
 use serde_json::{Map, Value, json};
@@ -48,7 +48,7 @@ const TABLES: [&str; 3] = ["session", "message", "part"];
 /// columns used. The reason, with what to do where the user can act, holds no table
 /// content: an error other than SQLite's own message is named only as such, since a
 /// conversion error can quote a row's value.
-pub fn read(db: &Path, since: DateTime<Utc>) -> Result<Vec<Session>, String> {
+pub fn read(db: &Path, since: Timestamp) -> Result<Vec<Session>, String> {
     let conn = open(db)?;
     sessions(&conn, since).map_err(|e| match e {
         rusqlite::Error::SqliteFailure(_, Some(message)) => message,
@@ -56,13 +56,13 @@ pub fn read(db: &Path, since: DateTime<Utc>) -> Result<Vec<Session>, String> {
     })
 }
 
-fn sessions(conn: &Connection, since: DateTime<Utc>) -> rusqlite::Result<Vec<Session>> {
+fn sessions(conn: &Connection, since: Timestamp) -> rusqlite::Result<Vec<Session>> {
     let sessions: Vec<(String, bool)> = conn
         .prepare(
             "SELECT id, parent_id IS NOT NULL FROM session WHERE time_updated >= ?1 \
              ORDER BY time_created, id",
         )?
-        .query_map(params![since.timestamp_millis()], |r| {
+        .query_map(params![since.as_millisecond()], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -270,9 +270,7 @@ impl Part {
 
 /// An RFC 3339 time from milliseconds since 1970, or null for an impossible one.
 fn time(ms: i64) -> Value {
-    DateTime::from_timestamp_millis(ms).map_or(Value::Null, |t| {
-        Value::from(t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
-    })
+    Timestamp::from_millisecond(ms).map_or(Value::Null, |t| Value::from(format!("{t:.3}")))
 }
 
 /// The line standing for a message or part that cannot be read: it does not end in `}`,
@@ -821,7 +819,7 @@ mod tests {
     /// a write open.
     #[test]
     fn a_read_creates_or_changes_no_file_beside_the_database() {
-        let since = DateTime::from_timestamp(0, 0).expect("1970");
+        let since = Timestamp::UNIX_EPOCH;
         let mut wrong = Vec::new();
         for case in ["none", "both", "log", "journal", "live"] {
             let (dir, db) = database(&format!("a-{case}"), case != "journal");
@@ -999,7 +997,7 @@ mod tests {
         // The page's type: no page of a table holds 0 there.
         bytes[usize::try_from((root - 1) * size).expect("offset")] = 0;
         std::fs::write(&db, bytes).expect("damage");
-        let since = DateTime::from_timestamp(0, 0).expect("1970");
+        let since = Timestamp::UNIX_EPOCH;
         assert!(read(&db, since).is_err(), "a damaged database was read");
         std::fs::remove_dir_all(&dir).expect("clean up");
     }

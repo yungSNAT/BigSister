@@ -1,58 +1,60 @@
 //! Parsing `--since` and record timestamps.
 
-use chrono::{DateTime, Local, NaiveDate, TimeDelta, TimeZone, Utc};
+use jiff::civil::Date;
+use jiff::tz::{AmbiguousOffset, TimeZone};
+use jiff::{SignedDuration, Timestamp};
 
 /// Parses `--since`: `7d`, `24h`, a date (local midnight) or an RFC 3339 time.
 ///
 /// # Errors
 /// Returns a message naming the accepted forms when `s` matches none of them.
-pub fn parse_since(s: &str, now: DateTime<Utc>) -> Result<DateTime<Utc>, String> {
+pub fn parse_since(s: &str, now: Timestamp) -> Result<Timestamp, String> {
     let t = s.trim();
     let bad = || format!("--since: expected 7d, 24h, YYYY-MM-DD or an RFC 3339 time, got '{t}'");
+    let before_1970 = || format!("--since: '{t}' is before 1970");
     let since = if let Some(delta) = relative(t) {
-        now.checked_sub_signed(delta).ok_or_else(bad)?
-    } else if let Ok(date) = NaiveDate::parse_from_str(t, "%Y-%m-%d") {
-        let midnight = date.and_hms_opt(0, 0, 0).ok_or_else(bad)?;
-        Local
-            .from_local_datetime(&midnight)
-            .earliest()
-            .map(|d| d.with_timezone(&Utc))
-            .ok_or_else(bad)?
+        now.checked_sub(delta).map_err(|_| before_1970())?
+    } else if let Ok(date) = Date::strptime("%Y-%m-%d", t) {
+        // A skipped midnight is refused; a repeated one is the first.
+        let midnight =
+            TimeZone::system().to_ambiguous_zoned(date.to_datetime(jiff::civil::Time::midnight()));
+        if let AmbiguousOffset::Gap { .. } = midnight.offset() {
+            return Err(bad());
+        }
+        midnight.earlier().map_err(|_| bad())?.timestamp()
     } else {
         parse_ts(t).ok_or_else(bad)?
     };
-    if since < DateTime::UNIX_EPOCH {
-        return Err(format!("--since: '{t}' is before 1970"));
+    if since < Timestamp::UNIX_EPOCH {
+        return Err(before_1970());
     }
     Ok(since)
 }
 
-fn relative(t: &str) -> Option<TimeDelta> {
+fn relative(t: &str) -> Option<SignedDuration> {
     let (num, unit) = t.split_at(t.char_indices().last()?.0);
     if !num.starts_with(|c: char| c.is_ascii_digit()) {
         return None;
     }
-    let n: u32 = num.parse().ok()?;
+    let hours = i64::from(num.parse::<u32>().ok()?);
     match unit {
-        "d" => TimeDelta::try_days(i64::from(n)),
-        "h" => TimeDelta::try_hours(i64::from(n)),
+        "d" => Some(SignedDuration::from_hours(hours * 24)),
+        "h" => Some(SignedDuration::from_hours(hours)),
         _ => None,
     }
 }
 
 /// Parses an RFC 3339 timestamp, as both agents write them.
 #[must_use]
-pub fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|d| d.with_timezone(&Utc))
+pub fn parse_ts(s: &str) -> Option<Timestamp> {
+    s.parse().ok()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn now() -> DateTime<Utc> {
+    fn now() -> Timestamp {
         parse_ts("2026-11-08T00:00:00Z").unwrap()
     }
 
@@ -78,7 +80,9 @@ mod tests {
     fn date_is_local_midnight() {
         let t = parse_since("2026-11-01", now()).unwrap();
         assert_eq!(
-            t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string(),
+            t.to_zoned(TimeZone::system())
+                .strftime("%Y-%m-%d %H:%M")
+                .to_string(),
             "2026-11-01 00:00"
         );
     }
