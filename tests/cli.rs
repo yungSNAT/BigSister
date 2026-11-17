@@ -428,6 +428,89 @@ fn models_rank_subagents_at_a_price_file_s_prices() {
     assert_eq!(cells(s, &keys), json!([1, 1, 2, 0.4]));
 }
 
+const MODELS_TIERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/models-tiers");
+
+/// The subagent ranks of the tiers fixture: on top, below and the on-top dollars.
+fn tier_ranks(extra: &[&str]) -> Value {
+    let mut args = vec![
+        "models",
+        "--claude-root",
+        MODELS_TIERS,
+        "--agent",
+        "claude",
+        "--since",
+        SINCE,
+        "--json",
+    ];
+    args.extend_from_slice(extra);
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let keys = [
+        "subagent_sessions_on_top_model",
+        "subagent_sessions_below_top_model",
+        "on_top_input_usd_est",
+    ];
+    cells(&doc["detectors"]["models"]["summary"], &keys)
+}
+
+#[test]
+fn models_rank_subagents_by_base_price_whatever_the_prompt_size() {
+    // t1's Haiku 5.5 subagent is on its parent's top model, although one of t1's prompts
+    // was over 100,000 tokens and so dearer; its 100,000 tokens at US$0.10 per million are
+    // US$0.01. t2's Sonnet 5.5 subagent is below Opus 5.5.
+    assert_eq!(tier_ranks(&[]), json!([1, 1, 0.01]));
+    // A price file that tiers Sonnet 5.5 above Opus 5.5 for long prompts still ranks it
+    // by its base price, below.
+    let file = price_file(
+        "prices-models-tiers.json",
+        r#"{"claude-haiku-5-5": {"input_cost_per_token": 1e-07,
+                                 "input_cost_per_token_above_100k_tokens": 5e-07},
+            "claude-opus-5-5": {"input_cost_per_token": 4e-06},
+            "claude-sonnet-5-5": {"input_cost_per_token": 2e-06,
+                                  "input_cost_per_token_above_100k_tokens": 9e-06}}"#,
+    );
+    let file = file.to_str().expect("UTF-8 path");
+    assert_eq!(tier_ranks(&["--prices", file]), json!([1, 1, 0.01]));
+}
+
+#[test]
+fn models_count_unpriced_replies_whatever_the_limit() {
+    // The unpriced row sorts last and --limit 1 cuts it; the summary still counts it, in
+    // each format: 1 reply with 10,000 cache write tokens.
+    let args = [
+        "models",
+        "--claude-root",
+        MODELS,
+        "--agent",
+        "claude",
+        "--since",
+        SINCE,
+        "--limit",
+        "1",
+    ];
+    let doc: Value = serde_json::from_str(&output(&args, "--json")).expect("valid JSON");
+    let section = &doc["detectors"]["models"];
+    let keys = ["replies_unpriced", "unpriced_input_tokens"];
+    assert_eq!(cells(&section["summary"], &keys), json!([1, 10_000]));
+    assert_eq!(section["tables"][0]["omitted"], 6);
+    let csv = output(&args, "--csv");
+    assert!(
+        csv.contains("models,summary,,,replies_unpriced,1\r\n"),
+        "{csv}"
+    );
+    let (code, text, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(text.contains("replies unpriced: 1\n"), "{text}");
+    // A rate prices every reply.
+    let mut rated = args.to_vec();
+    rated.extend(["--usd-per-mtok", "10", "--json"]);
+    let (_, stdout, _) = run(&rated);
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let s = &doc["detectors"]["models"]["summary"];
+    assert_eq!(cells(s, &keys), json!([0, 0]));
+}
+
 #[test]
 fn cache_dollars_take_a_price_file_and_name_it() {
     // Opus 5.5 at US$8 instead of US$4 doubles the first reply's 5-minute writes.
@@ -1262,6 +1345,7 @@ fn output_never_contains_transcript_content() {
     assert_no_sentinel(SKILLS, CODEX);
     assert_no_sentinel(CACHE, CODEX);
     assert_no_sentinel(MODELS, CODEX);
+    assert_no_sentinel(MODELS_TIERS, CODEX);
 }
 
 /// One main session with the attachment kinds, hook errors and pipe result the main

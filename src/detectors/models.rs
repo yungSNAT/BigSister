@@ -2,11 +2,13 @@
 //! and which subagent sessions ran on their parent session's highest-priced model.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::rc::Rc;
 
 use serde_json::{Value, json};
 
 use super::cache::{Entry, Usage, count, field, input_price, object, read, read_usage};
 use super::tools::printed;
+use crate::prices::Prices;
 use crate::report::{Opts, Section, Table};
 use crate::scan::{Agent, Detector, Record, Session};
 
@@ -62,7 +64,8 @@ struct Group {
 struct Sub {
     /// The id of the main session it ran for, from its records' `sessionId`.
     parent: Option<String>,
-    /// The lowest input price of its replies, and whether one had no price or was skipped.
+    /// The lowest base input price of its replies' models, and whether one had none or
+    /// was skipped.
     lowest: Option<f64>,
     unsure: bool,
     cost: Cost,
@@ -76,8 +79,9 @@ enum Rank {
 }
 
 /// Input-side cost by scope, model, effort and agent type.
-#[derive(Default)]
 pub struct Models {
+    /// The prices models are ranked by, at their base price.
+    prices: Rc<Prices>,
     /// The message ids of the file's replies so far.
     ids: HashSet<String>,
     /// The price the scan gave for the reply about to be recorded.
@@ -89,10 +93,11 @@ pub struct Models {
     here: HashSet<String>,
     skipped_here: bool,
     groups: BTreeMap<(&'static str, String, String, String), Group>,
-    /// By main session id, the highest input price of its priced replies in the window.
+    /// By main session id, the highest base input price of its replies' models in the
+    /// window.
     parents: HashMap<String, f64>,
-    /// Main sessions with a reply in the window skipped or unpriced, which may have been
-    /// dearer.
+    /// Main sessions with a reply in the window skipped or on a model without a price,
+    /// which may have been dearer.
     unsure: HashSet<String>,
     subs: Vec<Sub>,
     /// A reply that did not read since the previous reply: unless a later block of the
@@ -102,6 +107,9 @@ pub struct Models {
     skipped: u64,
     /// Replies counted in the window whose usage records no split by lifetime.
     without_split: u64,
+    /// The input, cache write and cache read tokens of replies counted in the window
+    /// without a price, each count at most 2^40.
+    unpriced_tokens: u64,
 }
 
 /// A reply that did not read: its message id if it has one, whether it is in the window,
@@ -234,9 +242,13 @@ impl Detector for Models {
         g.read = g.read.saturating_add(u.read);
         g.output = g.output.saturating_add(reply.output);
         g.cost.add(weighted, price);
-        g.unpriced += u64::from(price.is_none());
+        if price.is_none() {
+            g.unpriced += 1;
+            self.unpriced_tokens += reply.input + u.write + u.read;
+        }
         self.without_split += u64::from(!u.split);
-        self.session(s, reply.session, weighted, price);
+        let base = self.prices.base_usd_per_mtok(reply.model);
+        self.session(s, reply.session, weighted, price, base);
     }
 
     fn section(&self, opts: &Opts) -> Section {
@@ -252,6 +264,13 @@ impl Detector for Models {
                 Rank::Unknown => unknown += 1,
             }
         }
+        // A rate prices every reply.
+        let unpriced = if rate.is_some() {
+            (0, 0)
+        } else {
+            let replies: u64 = self.groups.values().map(|g| g.unpriced).sum();
+            (replies, self.unpriced_tokens)
+        };
         let summary = [
             (
                 "replies",
@@ -259,6 +278,8 @@ impl Detector for Models {
             ),
             ("replies_skipped", json!(self.skipped)),
             ("replies_without_split", json!(self.without_split)),
+            ("replies_unpriced", json!(unpriced.0)),
+            ("unpriced_input_tokens", json!(unpriced.1)),
             ("subagent_sessions", json!(self.subs.len())),
             ("subagent_sessions_on_top_model", json!(on_top)),
             ("subagent_sessions_below_top_model", json!(below)),
@@ -288,12 +309,33 @@ fn notes(opts: &Opts) -> Vec<String> {
     let price = input_price(opts);
     vec![
         format!("Each reply counts once (the first record of its message.id); synthetic replies are left out, and a reply none of whose records reads whole (a message with an id, a model and a usage whose input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens and, when it has a cache_creation split, ephemeral_5m_input_tokens and ephemeral_1h_input_tokens are integers from 0 to 2^40; a session id; and effort and agent type as text when recorded) counts as skipped (replies skipped) and adds to no total, so with any skipped the totals are a floor. Effort is the reasoning effort the reply records and agent type the subagent type Claude Code records (attributionAgent); {NONE} marks a reply that records neither."),
-        format!("Input usd est is an input-side estimate, not spend: uncached input at the input price, cache writes at 1.25 times it (5-minute) or 2 times (1-hour), as the reply records (1.25 times for replies without split, which record none), and cache reads at the model's cache read price, 0.025, 0.05 or 0.1 times the input price as Anthropic's pricing page gave on 16 November 2026, where the input price is {price}. Output tokens are counted but not priced, as shaphan reads input prices only; output costs several times as much as input per token. Input usd share is each row's part of all rows' input usd est. Unpriced replies are those of a model without a price. An illustration, not a bill."),
-        "A subagent session is on its parent's top model when every reply of it in the window is on a model whose input price is at least the highest of its parent session's replies in the window; below when one is cheaper; indeterminate when the parent session (the main session whose id its records carry) was not read, had no priced reply in the window or had an unpriced or skipped reply there (a skipped one without a session id counts against every session of its file), or the subagent had an unpriced or skipped reply, as such a reply's model may be dearer or cheaper. Prices compared are the bundled ones, or the price file's with --prices, whatever --usd-per-mtok gives; on top input usd est sums those sessions' input usd est.".to_owned(),
+        format!("Input usd est is an input-side estimate, not spend: uncached input at the input price, cache writes at 1.25 times it (5-minute) or 2 times (1-hour), as the reply records (1.25 times for replies without split, which record none), and cache reads at the model's cache read price, 0.025, 0.05 or 0.1 times the input price as Anthropic's pricing page gave on 16 November 2026, where the input price is {price}. Output tokens are counted but not priced, as shaphan reads input prices only; output costs several times as much as input per token. Input usd share is each row's part of all rows' input usd est, rounded to 2 places, so shares need not sum to 1. Unpriced replies are those of a model without a price, or of one priced by prompt size whose prompt size is not recorded; dollars and shares leave them out, and replies unpriced and unpriced input tokens (their input, cache write and cache read tokens) count them whatever --limit cuts. An illustration, not a bill."),
+        "Each model is ranked at its base input price (its price for the shortest prompt, so a model priced by prompt size ranks the same whatever the prompt), from the bundled prices or the price file's with --prices, whatever --usd-per-mtok gives: a subagent session is on its parent's top model when the cheapest model of its replies in the window costs at least the dearest of its parent session's, so the same model on both sides is on top, and below when cheaper. It is indeterminate when the parent session (the main session whose id its records carry) was not read, or it or the subagent had a reply in the window skipped or on a model without a price (a skipped one without a session id counts against every session of its file), as such a reply's model may be dearer or cheaper. On top input usd est sums those sessions' input usd est.".to_owned(),
     ]
 }
 
 impl Models {
+    /// The section, ranking models by their base price in `prices`.
+    #[must_use]
+    pub fn new(prices: Rc<Prices>) -> Self {
+        Self {
+            prices,
+            ids: HashSet::new(),
+            price: None,
+            sub: None,
+            here: HashSet::new(),
+            skipped_here: false,
+            groups: BTreeMap::new(),
+            parents: HashMap::new(),
+            unsure: HashSet::new(),
+            subs: Vec::new(),
+            unreadable: None,
+            skipped: 0,
+            without_split: 0,
+            unpriced_tokens: 0,
+        }
+    }
+
     /// Whether the pending unreadable reply has message id `id`: a later block of it.
     fn pending(&self, id: Option<&str>) -> bool {
         self.unreadable
@@ -347,16 +389,23 @@ impl Models {
         self.ids.insert(id.to_owned());
     }
 
-    /// Notes a reply's model price for its session: the lowest of a subagent session,
-    /// or the highest of a main session.
-    fn session(&mut self, s: &Session, session: &str, weighted: f64, price: Option<f64>) {
+    /// Notes a reply's dollars at its `price`, and its model's `base` price for its
+    /// session: the lowest of a subagent session, or the highest of a main session.
+    fn session(
+        &mut self,
+        s: &Session,
+        session: &str,
+        weighted: f64,
+        price: Option<f64>,
+        base: Option<f64>,
+    ) {
         if s.subagent {
             let sub = self.sub.get_or_insert_with(Sub::default);
             if sub.parent.is_none() {
                 sub.parent = Some(session.to_owned());
             }
             sub.cost.add(weighted, price);
-            match price {
+            match base {
                 Some(p) => sub.lowest = Some(sub.lowest.map_or(p, |l| l.min(p))),
                 None => sub.unsure = true,
             }
@@ -364,12 +413,12 @@ impl Models {
             if !self.here.contains(session) {
                 self.here.insert(session.to_owned());
             }
-            match price {
+            match base {
                 Some(p) => {
                     let top = self.parents.entry(session.to_owned()).or_insert(p);
                     *top = top.max(p);
                 }
-                // An unpriced reply's model may be dearer than the priced ones.
+                // An unpriced model may be dearer than the priced ones.
                 None => {
                     self.unsure.insert(session.to_owned());
                 }
@@ -555,13 +604,19 @@ mod tests {
         }
     }
 
+    /// The section with model `m` at US$5 per million input tokens.
+    fn models() -> Models {
+        let prices = r#"{"m": {"input_cost_per_token": 5e-06}}"#;
+        Models::new(Rc::new(Prices::from_file(prices, "test").expect("prices")))
+    }
+
     /// The detector after `records` of one main session, each in the window or not.
     fn run(records: &[(Value, bool)]) -> Models {
         let s = Session {
             agent: Agent::Claude,
             subagent: false,
         };
-        let mut m = Models::default();
+        let mut m = models();
         m.begin(&s);
         for (v, in_window) in records {
             m.record(
@@ -641,7 +696,7 @@ mod tests {
 
     /// The ranks of subagent files `subs` after the main file `parent`.
     fn ranks(parent: &[At], subs: &[&[At]]) -> Vec<&'static str> {
-        let mut m = Models::default();
+        let mut m = models();
         file(&mut m, false, parent);
         for sub in subs {
             file(&mut m, true, sub);
@@ -719,7 +774,8 @@ mod tests {
     fn an_unpriced_parent_reply_leaves_its_subagents_indeterminate() {
         let good = json!(10);
         // The unpriced reply's model may be dearer than the priced one's.
-        let unpriced = (reply("q", &good), None, true);
+        let mut unpriced = (reply("q", &good), None, true);
+        unpriced.0["message"]["model"] = json!("unpriced");
         let parent = [(reply("p", &good), Some(5.0), true), unpriced];
         let sub = [(reply("a", &good), Some(5.0), true)];
         assert_eq!(ranks(&parent, &[&sub]), ["indeterminate"]);
