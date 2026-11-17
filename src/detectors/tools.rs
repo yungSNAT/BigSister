@@ -117,9 +117,9 @@ fn notes() -> Vec<String> {
     ]
 }
 
-/// A tool or skill name as printed: a name of letters, digits and `_`, `-`, `.` or `:`,
-/// up to 128 characters, as tool and skill names are; anything else is `(other)`, so
-/// that no other text reaches the output.
+/// A tool or skill name, model id, effort label or agent type as printed: a name of
+/// letters, digits and `_`, `-`, `.` or `:`, up to 128 characters, as such names are;
+/// anything else is `(other)`, so that no other text reaches the output.
 pub(super) fn printed(name: &str) -> String {
     let fits = !name.is_empty()
         && name.len() <= 128

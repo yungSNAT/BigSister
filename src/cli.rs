@@ -91,6 +91,8 @@ pub enum Command {
     Tools,
     /// Cache writes by cause: new context, or rebuilds after an idle gap, a model switch or otherwise (Claude)
     Cache,
+    /// Input-side cost by model, reasoning effort and subagent type, and subagents on their parent's top-priced model (Claude)
+    Models,
     /// Hook durations, cancellations and timeouts (Claude)
     Hooks,
 }
