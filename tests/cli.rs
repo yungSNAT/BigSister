@@ -647,6 +647,44 @@ fn schemas_list_skills_against_skill_calls_and_slash_commands() {
     assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
 }
 
+/// A skill listing without a `names` array and a `Skill` call without a string skill are
+/// counted as skipped in every format, not dropped.
+#[test]
+fn schemas_count_skill_listings_and_calls_they_cannot_read() {
+    let out = |format: &str| {
+        let (code, stdout, stderr) = run(&[
+            "schemas",
+            "--claude-root",
+            SKILLS,
+            "--agent",
+            "claude",
+            "--since",
+            SINCE,
+            format,
+        ]);
+        assert_eq!(code, 0, "stderr: {stderr}");
+        stdout
+    };
+    let doc: Value = serde_json::from_str(&out("--json")).expect("valid JSON");
+    let s = &doc["detectors"]["schemas"]["summary"];
+    assert_eq!(
+        (&s["skill_listings_skipped"], &s["skill_calls_skipped"]),
+        (&json!(1), &json!(2))
+    );
+    let text = out("--limit=20");
+    assert!(text.contains("\nskill listings skipped: 1\n"), "{text}");
+    assert!(text.contains("\nskill calls skipped: 2\n"), "{text}");
+    let csv = out("--csv");
+    assert!(
+        csv.contains("schemas,summary,,,skill_listings_skipped,1"),
+        "{csv}"
+    );
+    assert!(
+        csv.contains("schemas,summary,,,skill_calls_skipped,2"),
+        "{csv}"
+    );
+}
+
 #[test]
 fn pipes_count_unguarded_test_runs_and_masked_failures() {
     let doc = report("pipes", &[]);
