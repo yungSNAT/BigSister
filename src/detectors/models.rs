@@ -85,7 +85,7 @@ pub struct Models {
     /// The file's, when it is a subagent's with a reply in the window.
     sub: Option<Sub>,
     /// The main session ids the file's replies in the window carry, and whether one of
-    /// its replies in the window was skipped.
+    /// its replies in the window was skipped with no session id to mark.
     here: HashSet<String>,
     skipped_here: bool,
     groups: BTreeMap<(&'static str, String, String, String), Group>,
@@ -94,14 +94,21 @@ pub struct Models {
     /// Main sessions with a reply in the window skipped, which may have been dearer.
     unsure: HashSet<String>,
     subs: Vec<Sub>,
-    /// A reply that did not read since the previous reply, by its message id if it has
-    /// one, and whether it is in the window: unless a later block of the same reply reads,
-    /// it counts as skipped.
-    unreadable: Option<(Option<String>, bool)>,
+    /// A reply that did not read since the previous reply: unless a later block of the
+    /// same reply reads, it counts as skipped.
+    unreadable: Option<Unreadable>,
     /// Replies in the window none of whose records reads as a [`Reply`].
     skipped: u64,
     /// Replies counted in the window whose usage records no split by lifetime.
     without_split: u64,
+}
+
+/// A reply that did not read: its message id if it has one, whether it is in the window,
+/// and in a main session's file the session id it carries, if it has one.
+struct Unreadable {
+    id: Option<String>,
+    in_window: bool,
+    session: Option<String>,
 }
 
 /// A Claude reply as this section reads it. Every field is required but `effort` and
@@ -188,7 +195,10 @@ impl Detector for Models {
             Entry::Skipped(id) => {
                 // A later block of a reply already counted or skipped adds nothing.
                 if !id.is_some_and(|id| self.ids.contains(id)) {
-                    self.unreadable(id, r.in_window);
+                    // A main session's skipped reply leaves its own session's top unknown.
+                    let session = field(r.value, "sessionId", Value::as_str).ok();
+                    let session = session.filter(|_| !s.subagent);
+                    self.unreadable(id, r.in_window, session);
                 }
                 return;
             }
@@ -276,9 +286,9 @@ fn cents(usd: f64) -> f64 {
 fn notes(opts: &Opts) -> Vec<String> {
     let price = input_price(opts);
     vec![
-        format!("Each reply counts once (the first record of its message.id); synthetic replies are left out, and a reply none of whose records reads whole (a message with an id, a model and usage counts that are integers from 0 to 2^40, a session id, and effort and agent type as text when recorded) counts as skipped (replies skipped) and adds to no total, so with any skipped the totals are a floor. Effort is the reasoning effort the reply records and agent type the subagent type Claude Code records (attributionAgent); {NONE} marks a reply that records neither."),
+        format!("Each reply counts once (the first record of its message.id); synthetic replies are left out, and a reply none of whose records reads whole (a message with an id, a model and a usage whose input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens and, when it has a cache_creation split, ephemeral_5m_input_tokens and ephemeral_1h_input_tokens are integers from 0 to 2^40; a session id; and effort and agent type as text when recorded) counts as skipped (replies skipped) and adds to no total, so with any skipped the totals are a floor. Effort is the reasoning effort the reply records and agent type the subagent type Claude Code records (attributionAgent); {NONE} marks a reply that records neither."),
         format!("Input usd est is an input-side estimate, not spend: uncached input at the input price, cache writes at 1.25 times it (5-minute) or 2 times (1-hour), as the reply records (1.25 times for replies without split, which record none), and cache reads at the model's cache read price, 0.025, 0.05 or 0.1 times the input price as Anthropic's pricing page gave on 16 November 2026, where the input price is {price}. Output tokens are counted but not priced, as shaphan reads input prices only; output costs several times as much as input per token. Input usd share is each row's part of all rows' input usd est. Unpriced replies are those of a model without a price. An illustration, not a bill."),
-        "A subagent session is on its parent's top model when every reply of it in the window is on a model whose input price is at least the highest of its parent session's replies in the window; below when one is cheaper; indeterminate when the parent session (the main session whose id its records carry) was not read, had no priced reply in the window or had a reply skipped there, or the subagent had an unpriced or skipped reply, as a skipped reply's model is unknown. Prices compared are the bundled ones, or the price file's with --prices, whatever --usd-per-mtok gives; on top input usd est sums those sessions' input usd est.".to_owned(),
+        "A subagent session is on its parent's top model when every reply of it in the window is on a model whose input price is at least the highest of its parent session's replies in the window; below when one is cheaper; indeterminate when the parent session (the main session whose id its records carry) was not read, had no priced reply in the window or had a reply skipped there (one without a session id counts against every session of its file), or the subagent had an unpriced or skipped reply, as a skipped reply's model is unknown. Prices compared are the bundled ones, or the price file's with --prices, whatever --usd-per-mtok gives; on top input usd est sums those sessions' input usd est.".to_owned(),
     ]
 }
 
@@ -287,24 +297,36 @@ impl Models {
     fn pending(&self, id: Option<&str>) -> bool {
         self.unreadable
             .as_ref()
-            .is_some_and(|(bad, _)| bad.is_some() && bad.as_deref() == id)
+            .is_some_and(|u| u.id.is_some() && u.id.as_deref() == id)
     }
 
     /// Counts the pending unreadable reply, if any, as skipped when it is in the window,
     /// so that any later block of it is ignored.
     fn skip(&mut self) {
-        if let Some((id, in_window)) = self.unreadable.take() {
-            self.ids.extend(id);
-            self.skipped += u64::from(in_window);
-            self.skipped_here |= in_window;
+        let Some(u) = self.unreadable.take() else {
+            return;
+        };
+        self.ids.extend(u.id);
+        if u.in_window {
+            self.skipped += 1;
+            match u.session {
+                Some(session) => {
+                    self.unsure.insert(session);
+                }
+                None => self.skipped_here = true,
+            }
         }
     }
 
     /// Notes a reply with message id `id`, if it has one, that does not read.
-    fn unreadable(&mut self, id: Option<&str>, in_window: bool) {
+    fn unreadable(&mut self, id: Option<&str>, in_window: bool, session: Option<&str>) {
         if !self.pending(id) {
             self.skip();
-            self.unreadable = Some((id.map(str::to_owned), in_window));
+            self.unreadable = Some(Unreadable {
+                id: id.map(str::to_owned),
+                in_window,
+                session: session.map(str::to_owned),
+            });
         }
     }
 
@@ -584,47 +606,93 @@ mod tests {
         assert!(m.groups.is_empty());
     }
 
-    /// Feeds one main or subagent file of `records`, each in the window at its price.
-    fn file(m: &mut Models, subagent: bool, records: &[(Value, Option<f64>)]) {
+    /// A record at a price, in the window or not.
+    type At = (Value, Option<f64>, bool);
+
+    /// Feeds one main or subagent file of `records` to `m`.
+    fn file(m: &mut Models, subagent: bool, records: &[At]) {
         let s = Session {
             agent: Agent::Claude,
             subagent,
         };
         m.begin(&s);
-        for (v, price) in records {
+        for (v, price, in_window) in records {
             m.read_by(&s, *price);
             let r = Record {
                 value: v,
-                in_window: true,
+                in_window: *in_window,
             };
             m.record(&s, &r);
         }
         m.end(&s);
     }
 
+    /// The ranks of subagent files `subs` after the main file `parent`.
+    fn ranks(parent: &[At], subs: &[&[At]]) -> Vec<&'static str> {
+        let mut m = Models::default();
+        file(&mut m, false, parent);
+        for sub in subs {
+            file(&mut m, true, sub);
+        }
+        let rank = |sub| match m.rank(sub) {
+            Rank::OnTop => "on top",
+            Rank::Below => "below",
+            Rank::Unknown => "indeterminate",
+        };
+        m.subs.iter().map(rank).collect()
+    }
+
     #[test]
     fn a_skipped_reply_leaves_its_subagent_session_indeterminate() {
         let (good, bad) = (json!(10), json!("x"));
-        let ranks = |parent: &[(Value, Option<f64>)], sub: &[(Value, Option<f64>)]| {
-            let mut m = Models::default();
-            file(&mut m, false, parent);
-            file(&mut m, true, sub);
-            let rank = |sub| match m.rank(sub) {
-                Rank::OnTop => "on top",
-                Rank::Below => "below",
-                Rank::Unknown => "indeterminate",
-            };
-            m.subs.iter().map(rank).collect::<Vec<_>>()
-        };
-        let top = || (reply("p", &good), Some(5.0));
-        let on = || (reply("a", &good), Some(5.0));
-        let skipped = |id| (reply(id, &bad), Some(9.0));
-        assert_eq!(ranks(&[top()], &[on()]), ["on top"]);
+        let top = || (reply("p", &good), Some(5.0), true);
+        let on = || (reply("a", &good), Some(5.0), true);
+        let skipped = |id| (reply(id, &bad), Some(9.0), true);
+        assert_eq!(ranks(&[top()], &[&[on()]]), ["on top"]);
         // The subagent's skipped reply may have been on a cheaper model.
-        assert_eq!(ranks(&[top()], &[on(), skipped("b")]), ["indeterminate"]);
+        assert_eq!(ranks(&[top()], &[&[on(), skipped("b")]]), ["indeterminate"]);
         // A subagent session whose every reply is skipped is still a session.
-        assert_eq!(ranks(&[top()], &[skipped("b")]), ["indeterminate"]);
+        assert_eq!(ranks(&[top()], &[&[skipped("b")]]), ["indeterminate"]);
         // The parent's skipped reply may have been on a dearer model.
-        assert_eq!(ranks(&[top(), skipped("q")], &[on()]), ["indeterminate"]);
+        assert_eq!(ranks(&[top(), skipped("q")], &[&[on()]]), ["indeterminate"]);
+        // A reply skipped outside the window, or whose later block reads, changes nothing.
+        let (mut early, recovered) = (skipped("q"), (reply("q", &good), Some(5.0), true));
+        early.2 = false;
+        assert_eq!(ranks(&[early, top()], &[&[on()]]), ["on top"]);
+        assert_eq!(
+            ranks(&[skipped("q"), recovered, top()], &[&[on()]]),
+            ["on top"]
+        );
+    }
+
+    #[test]
+    fn a_parent_s_skipped_reply_affects_only_its_own_session() {
+        let (good, bad) = (json!(10), json!("x"));
+        // One main file holds sessions s and t; t's skipped reply leaves only t's subagent
+        // indeterminate, and a skipped reply without a session id leaves both.
+        let at = |id, session, input: &Value| {
+            let mut v = reply(id, input);
+            v["sessionId"] = json!(session);
+            (v, Some(5.0), true)
+        };
+        let sub = |session| [at("a", session, &good)];
+        let (s, t) = (sub("s"), sub("t"));
+        let parent = [at("p", "s", &good), at("q", "t", &good)];
+        assert_eq!(ranks(&parent, &[&s, &t]), ["on top", "on top"]);
+        let mut with_skip = parent.to_vec();
+        with_skip.push(at("r", "t", &bad));
+        assert_eq!(ranks(&with_skip, &[&s, &t]), ["on top", "indeterminate"]);
+        let mut no_session = at("r", "t", &bad);
+        no_session
+            .0
+            .as_object_mut()
+            .expect("record")
+            .remove("sessionId");
+        let mut with_skip = parent.to_vec();
+        with_skip.push(no_session);
+        assert_eq!(
+            ranks(&with_skip, &[&s, &t]),
+            ["indeterminate", "indeterminate"]
+        );
     }
 }
