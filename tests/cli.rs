@@ -1654,6 +1654,7 @@ fn a_folder_that_cannot_be_listed_prints_its_reason() {
     let (doc, text) = claude_root_report(&dir);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("mode");
     let reason = "a folder cannot be listed: Permission denied (os error 13)";
+    assert_eq!(doc["roots"][0]["unreadable"], 1);
     assert_eq!(
         doc["roots"][0]["unreadable_reasons"],
         json!([{"reason": reason, "count": 1}])
