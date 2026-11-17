@@ -5,9 +5,9 @@
 //! its data folder: a `session` table, a `message` table and a `part` table whose `data`
 //! columns hold JSON (`packages/schema/src/v1/session.ts`). The same database holds
 //! account tokens and credentials, so only those 3 tables are queried, with fixed SQL,
-//! and SQLite refuses a read of any other. The file is copied into memory with ordinary
-//! reads and the copy is queried, so that no file beside it is opened, written or
-//! created.
+//! and SQLite refuses a read of any other. The file is copied into memory whilst no
+//! other program can write to it, and the copy is queried, so that no file beside it is
+//! written or created.
 //!
 //! An assistant message holds one or more steps, each a model call: a `step-start` part,
 //! its `tool` parts and a `step-finish` part with the call's token usage. Each step
@@ -19,6 +19,7 @@
 //! without its state, counts as a skipped line.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::time::SystemTime;
@@ -127,26 +128,37 @@ impl Stamp {
 /// Copies database `db` into memory and opens the copy read-only, with reads of tables
 /// other than `TABLES` refused.
 ///
-/// The file is read twice with ordinary reads, and the copy counts only if both reads
-/// match and the file and the files beside it are unchanged, so it is the file as it
-/// stood rather than pages from before and after a write; the queries then read the
-/// copy, which nothing else changes. No file beside the database is opened, created or
-/// deleted, and no lock is taken. Whilst OpenCode runs, its newest records sit in the
-/// write-ahead log (`-wal`), which only a connection sharing the log's index (`-shm`)
-/// can read, and such a connection can create the index; so a log holding records
-/// fails, and the database is read once OpenCode has stopped and the log is empty or
-/// gone.
+/// The copy is taken whilst no other program can write to the file (`Guard`), so it is
+/// the database as it stood, and the queries then read the copy, which nothing else
+/// changes. No file beside the database is written or created. Whilst OpenCode runs, its
+/// newest records sit in the write-ahead log (`-wal`), which only a connection sharing
+/// the log's index (`-shm`) can read, and such a connection can create the index; so a
+/// log holding records, or OpenCode holding the database open, fails, and the database
+/// is read once OpenCode has stopped. The copy also fails if the log or the index
+/// appears, changes or goes whilst it is taken.
 ///
 /// shortcut: the whole database is held in memory, twice whilst the copy is opened
-/// (OpenCode's on this machine is 1.1 MB, November 2026). Copying and checking it a
-/// page at a time would be the upgrade.
+/// (OpenCode's on this machine is 1.1 MB, November 2026). Copying it a page at a time
+/// would be the upgrade.
 fn open(db: &Path) -> Result<Connection, String> {
+    open_with(db, || {})
+}
+
+/// `open`, running `during` whilst the copy is guarded, as a test's other writer does.
+fn open_with(db: &Path, during: impl FnOnce()) -> Result<Connection, String> {
     let stamp = Stamp::of(db).ok_or("the database's size and time cannot be read")?;
     if stamp.wal.is_some_and(|len| len > 0) {
         return Err("OpenCode's write-ahead log holds records, so OpenCode is running or did not stop cleanly".to_owned());
     }
-    let mut copy = std::fs::read(db).map_err(|e| e.to_string())?;
-    if !holds(db, &copy) || Stamp::of(db) != Some(stamp) {
+    let mut guard = Guard::take(db)?;
+    during();
+    let mut copy = Vec::new();
+    guard
+        .file
+        .read_to_end(&mut copy)
+        .map_err(|e| e.to_string())?;
+    drop(guard);
+    if Stamp::of(db) != Some(stamp) {
         return Err("the database changed whilst it was copied".to_owned());
     }
     // Bytes 18 and 19 of the header say whether the database uses a write-ahead log
@@ -164,26 +176,110 @@ fn open(db: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
-/// Whether file `db` holds exactly `copy`, read again a piece at a time.
-fn holds(db: &Path, copy: &[u8]) -> bool {
-    let Ok(mut file) = std::fs::File::open(db) else {
-        return false;
-    };
-    let mut piece = vec![0; 1 << 16];
-    let mut at = 0;
-    loop {
-        match file.read(&mut piece) {
-            Ok(0) => return at == copy.len(),
-            Ok(n) => {
-                if copy.get(at..at + n) != Some(&piece[..n]) {
-                    return false;
+/// The database file, open for reading whilst no other program can write to it.
+struct Guard {
+    file: File,
+    /// The log's index, open so that the locks on it hold.
+    #[cfg(unix)]
+    _index: Option<File>,
+}
+
+impl Guard {
+    /// On Windows, the file is opened sharing it only for reading: the open fails whilst
+    /// another program has it open for writing, as OpenCode does whilst it runs, and no
+    /// program can open it for writing until the guard is dropped.
+    #[cfg(windows)]
+    fn take(db: &Path) -> Result<Self, String> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 1;
+        const ERROR_SHARING_VIOLATION: i32 = 32;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(db)
+            .map_err(|e| {
+                if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
+                    "another program, such as OpenCode, has the database open for writing"
+                        .to_owned()
+                } else {
+                    e.to_string()
                 }
-                at += n;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return false,
-        }
+            })?;
+        Ok(Self { file })
     }
+
+    /// On Unix, the guard takes the locks of SQLite's own protocol that stop a writer
+    /// (`sqlite3.c` in SQLite 3.54.1): a read lock on the database's shared bytes, which
+    /// a writer outside the log, and a connection removing the log as it closes, must
+    /// lock exclusively; and, when the log's index exists, read locks on its write and
+    /// checkpoint bytes, which a writer to the log and a checkpoint must lock
+    /// exclusively, and on its deadman byte. It fails whilst another program holds any of
+    /// those exclusively, or holds the deadman byte at all, as every connection to the
+    /// database does whilst it is open. A program that opens the database during the
+    /// copy can write only to a new log, and cannot remove the log or its index
+    /// afterwards, so the copy fails. Locks are released when the files close, so the
+    /// files are not opened again until then.
+    #[cfg(unix)]
+    fn take(db: &Path) -> Result<Self, String> {
+        const SHARED_FIRST: i64 = 0x4000_0000 + 2;
+        const SHARED_SIZE: i64 = 510;
+        const WRITE_AND_CHECKPOINT: i64 = 120;
+        const DEADMAN: i64 = 128;
+        let busy = "another program, such as OpenCode, has the database open";
+        let file = File::open(db).map_err(|e| e.to_string())?;
+        read_lock(&file, SHARED_FIRST, SHARED_SIZE).ok_or(busy)?;
+        let mut name = db.as_os_str().to_owned();
+        name.push("-shm");
+        let index = match File::open(Path::new(&name)) {
+            Ok(index) => Some(index),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.to_string()),
+        };
+        if let Some(index) = &index {
+            read_lock(index, WRITE_AND_CHECKPOINT, 2).ok_or(busy)?;
+            read_lock(index, DEADMAN, 1).ok_or(busy)?;
+            if held_elsewhere(index, DEADMAN).ok_or(busy)? {
+                return Err(busy.to_owned());
+            }
+        }
+        Ok(Self {
+            file,
+            _index: index,
+        })
+    }
+}
+
+/// A POSIX lock description of `kind` on `len` bytes of a file from `start`.
+#[cfg(unix)]
+fn lock(kind: libc::c_short, start: i64, len: i64) -> libc::flock {
+    // SAFETY: `flock` is a plain C struct, for which all bytes zero is a valid value.
+    let mut l: libc::flock = unsafe { std::mem::zeroed() };
+    l.l_type = kind;
+    l.l_whence = libc::SEEK_SET as libc::c_short;
+    l.l_start = start;
+    l.l_len = len;
+    l
+}
+
+/// Takes a read lock on `len` bytes of `file` from `start`, or `None` when another
+/// program holds a conflicting lock or the lock cannot be taken.
+#[cfg(unix)]
+fn read_lock(file: &File, start: i64, len: i64) -> Option<()> {
+    use std::os::fd::AsRawFd;
+    let l = lock(libc::F_RDLCK as libc::c_short, start, len);
+    // SAFETY: the descriptor is open for the call and `l` is a valid `flock`.
+    (unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &raw const l) } == 0).then_some(())
+}
+
+/// Whether another program holds any lock on byte `at` of `file`, or `None` when that
+/// cannot be told.
+#[cfg(unix)]
+fn held_elsewhere(file: &File, at: i64) -> Option<bool> {
+    use std::os::fd::AsRawFd;
+    let mut l = lock(libc::F_WRLCK as libc::c_short, at, 1);
+    // SAFETY: the descriptor is open for the call and `l` is a valid `flock` to fill.
+    (unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &raw mut l) } == 0)
+        .then(|| l.l_type != libc::F_UNLCK as libc::c_short)
 }
 
 /// Allows a query to read only `TABLES`.
@@ -471,15 +567,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("shaphan-opencode-w-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("folder");
         let db = dir.join("opencode.db");
-        let writer = Connection::open(&db).expect("database");
-        writer
+        Connection::open(&db)
+            .expect("database")
             .execute_batch(
                 "PRAGMA journal_mode = WAL; CREATE TABLE session (id text);
-                 INSERT INTO session VALUES ('before');
-                 PRAGMA wal_checkpoint(TRUNCATE);",
+                 INSERT INTO session VALUES ('before');",
             )
             .expect("table");
         let conn = open(&db).expect("open");
+        let writer = Connection::open(&db).expect("writer");
         // The write reaches the database file itself.
         writer
             .execute_batch("UPDATE session SET id = 'after'; PRAGMA wal_checkpoint(TRUNCATE);")
@@ -492,27 +588,105 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
 
-    /// A file that changed after it was copied, in a byte or in length, no longer holds
-    /// the copy.
+    /// What a child process running `writer_child` in `mode` printed: `WROTE` or
+    /// `REFUSED`.
+    fn child(db: &Path, mode: &str) -> String {
+        let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "opencode::tests::writer_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("SHAPHAN_TEST_DB", db)
+            .env("SHAPHAN_TEST_MODE", mode)
+            .output()
+            .expect("child");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        stdout
+            .lines()
+            .find(|l| matches!(*l, "WROTE" | "REFUSED"))
+            .unwrap_or("NONE")
+            .to_owned()
+    }
+
+    /// Another program, as OpenCode is to `shaphan`, run as a child process by
+    /// `a_writer_in_another_process_cannot_change_an_accepted_copy`. In mode `leave` it
+    /// reads the database and stops without closing it, leaving the write-ahead log and
+    /// its index behind, as OpenCode does when it is stopped. In mode `write` it writes
+    /// a row spanning many pages, changes another and checkpoints the log into the file,
+    /// without waiting for a lock.
     #[test]
-    fn a_file_changed_after_its_copy_does_not_hold_it() {
-        let dir = std::env::temp_dir().join(format!("shaphan-opencode-h-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("folder");
-        let file = dir.join("f");
-        let copy = vec![7u8; 70_000];
-        std::fs::write(&file, &copy).expect("file");
-        assert!(holds(&file, &copy));
-        let mut changed = copy.clone();
-        changed[69_999] = 8;
-        std::fs::write(&file, &changed).expect("file");
-        assert!(!holds(&file, &copy));
-        std::fs::write(&file, &copy[..69_999]).expect("file");
-        assert!(!holds(&file, &copy));
-        changed = copy.clone();
-        changed.push(7);
-        std::fs::write(&file, &changed).expect("file");
-        assert!(!holds(&file, &copy));
-        assert!(!holds(&dir.join("missing"), &copy));
-        std::fs::remove_dir_all(&dir).expect("clean up");
+    #[ignore = "run as a child process by another test"]
+    fn writer_child() {
+        let (Some(db), Some(mode)) = (
+            std::env::var_os("SHAPHAN_TEST_DB"),
+            std::env::var_os("SHAPHAN_TEST_MODE"),
+        ) else {
+            return;
+        };
+        let conn = Connection::open(&db).expect("database");
+        if mode == "leave" {
+            let _: i64 = conn
+                .query_row("SELECT count(*) FROM session", [], |r| r.get(0))
+                .expect("read");
+            std::process::exit(0);
+        }
+        let wrote = conn.busy_timeout(std::time::Duration::ZERO).and_then(|()| {
+            conn.execute_batch(
+                "INSERT INTO session VALUES (hex(randomblob(20000)));
+                     UPDATE session SET id = 'after' WHERE id = 'before';
+                     PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+        });
+        println!("{}", if wrote.is_ok() { "WROTE" } else { "REFUSED" });
+    }
+
+    /// Whilst the copy is taken, another process cannot change it. With the log and its
+    /// index left behind, as OpenCode leaves them, the process is refused a write and the
+    /// copy holds the database as it was. With neither, the log and index the process
+    /// creates (on Unix it can then write to the new log; on Windows SQLite opens the
+    /// database read-only for it) make the copy refused.
+    #[test]
+    fn a_writer_in_another_process_cannot_change_an_accepted_copy() {
+        for leave in [true, false] {
+            let dir = std::env::temp_dir().join(format!(
+                "shaphan-opencode-x{}-{}",
+                u8::from(leave),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("folder");
+            let db = dir.join("opencode.db");
+            Connection::open(&db)
+                .expect("database")
+                .execute_batch(
+                    "PRAGMA journal_mode = WAL; CREATE TABLE session (id text);
+                     INSERT INTO session VALUES ('before');",
+                )
+                .expect("table");
+            if leave {
+                child(&db, "leave");
+                assert!(dir.join("opencode.db-shm").exists(), "no index left");
+            }
+            let mut seen = String::new();
+            let copy = open_with(&db, || seen = child(&db, "write"));
+            if leave {
+                assert_eq!(seen, "REFUSED");
+                let id: String = copy
+                    .expect("a copy")
+                    .query_row("SELECT id FROM session WHERE id = 'before'", [], |r| {
+                        r.get(0)
+                    })
+                    .expect("the row as it was");
+                assert_eq!(id, "before");
+            } else {
+                assert!(
+                    copy.is_err(),
+                    "a copy taken whilst another process opened the database: {seen}"
+                );
+            }
+            std::fs::remove_dir_all(&dir).expect("clean up");
+        }
     }
 }

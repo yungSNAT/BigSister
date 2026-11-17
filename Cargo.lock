@@ -504,6 +504,7 @@ dependencies = [
  "chrono",
  "clap",
  "csv",
+ "libc",
  "regex",
  "rusqlite",
  "ruzstd",
