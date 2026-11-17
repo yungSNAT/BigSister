@@ -88,8 +88,9 @@ pub struct Models {
     price: Option<f64>,
     /// The file's, when it is a subagent's with a reply in the window.
     sub: Option<Sub>,
-    /// The main session ids the file's replies in the window carry, and whether one of
-    /// its replies in the window was skipped with no session id to mark.
+    /// The main session ids the file's replies and unreadable records in the window
+    /// carry, and whether one of its replies in the window was skipped with no one
+    /// session id to mark.
     here: HashSet<String>,
     skipped_here: bool,
     groups: BTreeMap<(&'static str, String, String, String), Group>,
@@ -364,6 +365,10 @@ impl Models {
 
     /// Notes a reply with message id `id`, if it has one, that does not read.
     fn unreadable(&mut self, id: Option<&str>, in_window: bool, session: Option<&str>) {
+        // The file's sessions, which a skip with no one session to mark leaves unsure.
+        if in_window && let Some(session) = session {
+            self.here.insert(session.to_owned());
+        }
         if !self.pending(id) {
             self.skip();
             self.unreadable = Some(Unreadable {
@@ -733,16 +738,18 @@ mod tests {
         );
     }
 
+    /// A reply of `session` at US$5 in the window.
+    fn at(id: &str, session: &str, input: &Value) -> At {
+        let mut v = reply(id, input);
+        v["sessionId"] = json!(session);
+        (v, Some(5.0), true)
+    }
+
     #[test]
     fn a_parent_s_skipped_reply_affects_only_its_own_session() {
         let (good, bad) = (json!(10), json!("x"));
         // One main file holds sessions s and t; t's skipped reply leaves only t's subagent
         // indeterminate, and a skipped reply without a session id leaves both.
-        let at = |id, session, input: &Value| {
-            let mut v = reply(id, input);
-            v["sessionId"] = json!(session);
-            (v, Some(5.0), true)
-        };
         let sub = |session| [at("a", session, &good)];
         let (s, t) = (sub("s"), sub("t"));
         let parent = [at("p", "s", &good), at("q", "t", &good)];
@@ -780,5 +787,23 @@ mod tests {
         let parent = [(reply("p", &good), Some(5.0), true), unpriced];
         let sub = [(reply("a", &good), Some(5.0), true)];
         assert_eq!(ranks(&parent, &[&sub]), ["indeterminate"]);
+    }
+
+    #[test]
+    fn a_skipped_reply_alone_in_a_main_file_still_marks_the_sessions_it_names() {
+        let (good, bad) = (json!(10), json!("x"));
+        let mut m = models();
+        file(&mut m, false, &[at("p", "s", &good), at("q", "t", &good)]);
+        // Another main file holds only one reply's unreadable blocks, naming s and t.
+        file(&mut m, false, &[at("r", "s", &bad), at("r", "t", &bad)]);
+        for session in ["s", "t"] {
+            file(&mut m, true, &[at("a", session, &good)]);
+        }
+        let unknown: Vec<bool> = m
+            .subs
+            .iter()
+            .map(|sub| matches!(m.rank(sub), Rank::Unknown))
+            .collect();
+        assert_eq!(unknown, [true, true]);
     }
 }

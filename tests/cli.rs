@@ -511,13 +511,22 @@ fn models_count_unpriced_replies_whatever_the_limit() {
     assert_eq!(cells(&section["summary"], &keys), json!([1, 10_000]));
     assert_eq!(section["tables"][0]["omitted"], 6);
     let csv = output(&args, "--csv");
-    assert!(
-        csv.contains("models,summary,,,replies_unpriced,1\r\n"),
-        "{csv}"
-    );
+    for record in [
+        "models,summary,,,replies_unpriced,1\r\n",
+        "models,summary,,,unpriced_input_tokens,10000\r\n",
+        "models,omitted,0,,,6\r\n",
+    ] {
+        assert!(csv.contains(record), "{record} {csv}");
+    }
     let (code, text, stderr) = run(&args);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(text.contains("replies unpriced: 1\n"), "{text}");
+    for line in [
+        "replies unpriced: 1\n",
+        "unpriced input tokens: 10000\n",
+        "(6 more rows; raise --limit to see them)",
+    ] {
+        assert!(text.contains(line), "{line} {text}");
+    }
     // A rate prices every reply.
     let mut rated = args.to_vec();
     rated.extend(["--usd-per-mtok", "10", "--json"]);
