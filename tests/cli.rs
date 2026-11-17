@@ -234,6 +234,63 @@ fn schemas_report_idle_groups_first_and_skip_deferred_tools() {
     );
 }
 
+const SKILLS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/skills");
+
+#[test]
+fn schemas_list_skills_against_skill_calls_and_slash_commands() {
+    let (code, stdout, stderr) = run(&[
+        "schemas",
+        "--claude-root",
+        SKILLS,
+        "--agent",
+        "claude",
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let r = rows(&doc, "schemas", 1);
+    let skill = |name: &str| find(r, &[("scope", json!("main")), ("skill", json!(name))]);
+    // Called with Skill in one session, listed and idle in the other, where a second,
+    // shorter listing of it leaves its largest entry.
+    let used = skill("used-skill");
+    assert_eq!(
+        [
+            &used["sessions_listed"],
+            &used["sessions_used"],
+            &used["uses"],
+            &used["idle_chars"]
+        ],
+        [&json!(2), &json!(1), &json!(1), &json!(29)]
+    );
+    // A slash command uses a skill; its name quoted in a tool result does not.
+    assert_eq!(skill("slash-skill")["sessions_used"], 1);
+    let idle = skill("plug:idle-skill");
+    assert_eq!(
+        [
+            &idle["sessions_used"],
+            &idle["idle_chars"],
+            &idle["idle_tokens_est"]
+        ],
+        [&json!(0), &json!(60), &json!(15)]
+    );
+    // A name listed alone, a name listed in a later listing, and a name that is not
+    // printable.
+    assert_eq!(skill("bare-skill")["idle_chars"], 13);
+    assert_eq!(skill("late-skill")["idle_chars"], 28);
+    assert_eq!(skill("(other)")["idle_chars"], 26);
+    // A line goes to the longest name it starts: `- pre:fix:` is not `pre`'s.
+    assert_eq!(skill("pre")["idle_chars"], 18);
+    assert_eq!(skill("pre:fix")["idle_chars"], 22);
+    assert_eq!(
+        r[0]["skill"], "plug:idle-skill",
+        "most idle characters first"
+    );
+    assert_eq!(r.len(), 8);
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+}
+
 #[test]
 fn pipes_count_unguarded_test_runs_and_masked_failures() {
     let doc = report("pipes", &[]);
@@ -374,6 +431,21 @@ fn polls_read_codex_command_results() {
     let summary = &doc["detectors"]["polls"]["summary"];
     assert_eq!(summary["codex_outputs_not_paired"], 2);
     assert_eq!(summary["codex_commands_not_paired"], 4);
+    // Every command counts by verb class, polled or not; only paired results add
+    // characters: `git status` printed 20 and then 5, and 1 of 3 `cargo` runs printed 52.
+    let results = rows(&doc, "polls", 2);
+    let verb = |v: &str| {
+        let r = find(results, &[("agent", json!("codex")), ("verb", json!(v))]);
+        (
+            r["commands"].clone(),
+            r["results"].clone(),
+            r["result_chars"].clone(),
+            r["result_tokens_est"].clone(),
+        )
+    };
+    assert_eq!(verb("cargo"), (json!(3), json!(1), json!(52), json!(13)));
+    assert_eq!(verb("git"), (json!(4), json!(2), json!(25), json!(7)));
+    assert_eq!(results[0]["verb"], "cargo", "largest results first");
 }
 
 #[test]
@@ -939,6 +1011,7 @@ fn output_never_contains_transcript_content() {
     assert_no_sentinel(RESULTS, CODEX_RESULTS);
     assert_no_sentinel(RESULTS, CODEX_WRAPPED);
     assert_no_sentinel(KINDS, CODEX);
+    assert_no_sentinel(SKILLS, CODEX);
 }
 
 /// One main session with the attachment kinds, hook errors and pipe result the main
@@ -1279,20 +1352,26 @@ fn roots_no_detector_reads_are_left_out_and_cut_lines_still_count() {
 fn a_rate_prices_each_token_estimate_and_nothing_else() {
     let plain = report("all", &[]);
     let priced = report("all", &["--usd-per-mtok", "1000"]);
-    for (detector, tokens, usd) in [
-        ("polls", "poll_tokens_est", "poll_usd_est"),
-        ("rereads", "reread_tokens_est", "reread_usd_est"),
-        ("schemas", "idle_tokens_est", "idle_usd_est"),
+    for (detector, table, tokens, usd) in [
+        ("polls", 0, "poll_tokens_est", "poll_usd_est"),
+        ("polls", 2, "result_tokens_est", "result_usd_est"),
+        ("rereads", 0, "reread_tokens_est", "reread_usd_est"),
+        ("schemas", 0, "idle_tokens_est", "idle_usd_est"),
     ] {
-        let rows = rows(&priced, detector, 0);
+        let rows = rows(&priced, detector, table);
         assert!(!rows.is_empty(), "{detector}");
         for row in rows {
             let want = (row[tokens].as_f64().unwrap() * 1000.0 / 1e6 * 100.0).round() / 100.0;
             assert_eq!(row[usd].as_f64(), Some(want), "{detector} {row}");
         }
         // Without a rate, the fixtures name no model, so nothing is priced.
+        let plain_rows: Vec<Value> = rows_of(&plain, detector)
+            .into_iter()
+            .filter(|r| r.get(usd).is_some())
+            .collect();
+        assert!(!plain_rows.is_empty(), "{detector} {usd}");
         assert!(
-            rows_of(&plain, detector)
+            plain_rows
                 .iter()
                 .all(|r| r[usd] == json!(0.0) && r["unpriced_tokens_est"] == r[tokens])
         );
