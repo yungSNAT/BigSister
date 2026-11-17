@@ -117,14 +117,14 @@ pub struct Cache {
 }
 
 /// A reply's cache usage.
-struct Usage {
-    read: u64,
-    write: u64,
+pub(super) struct Usage {
+    pub(super) read: u64,
+    pub(super) write: u64,
     /// The write price multiplier, weighted by the tokens written at each lifetime.
-    multiplier: f64,
+    pub(super) multiplier: f64,
     one_hour: bool,
     /// Whether the reply records its split by lifetime.
-    split: bool,
+    pub(super) split: bool,
 }
 
 /// A Claude reply as this section reads it. Every field is required, but for the split
@@ -144,12 +144,12 @@ struct Reply<'a> {
     usage: Usage,
 }
 
-/// A record as this section reads it.
-enum Entry<'a> {
+/// A record as a section reads it, with replies read as `R`.
+pub(super) enum Entry<'a, R> {
     /// A `system` record of subtype `compact_boundary`.
     Compaction,
-    Reply(Reply<'a>),
-    /// A reply that does not read as a [`Reply`], with its `message.id` if that is a string.
+    Reply(R),
+    /// A reply that does not read as an `R`, with its `message.id` if that is a string.
     Skipped(Option<&'a str>),
     /// Any other record, including a synthetic reply.
     Other,
@@ -159,15 +159,19 @@ enum Entry<'a> {
 /// enough that token sums stay exact.
 const MAX_COUNT: u64 = 1 << 40;
 
-/// Reads a record: the one place this section reads transcript JSON.
-fn read<'a>(r: &Record<'a>) -> Entry<'a> {
+/// Reads a record, a reply with `reply`: with `reply`, the one place a section that uses
+/// it reads transcript JSON.
+pub(super) fn read<'a, R>(
+    r: &Record<'a>,
+    reply: impl FnOnce(&'a Value) -> Result<R, &'static str>,
+) -> Entry<'a, R> {
     let v = r.value;
     let model = v.pointer("/message/model").and_then(Value::as_str);
     match r.kind() {
         "system" if v.get("subtype").and_then(Value::as_str) == Some("compact_boundary") => {
             Entry::Compaction
         }
-        "assistant" if model != Some("<synthetic>") => read_reply(v).map_or_else(
+        "assistant" if model != Some("<synthetic>") => reply(v).map_or_else(
             |_| Entry::Skipped(v.pointer("/message/id").and_then(Value::as_str)),
             Entry::Reply,
         ),
@@ -176,7 +180,7 @@ fn read<'a>(r: &Record<'a>) -> Entry<'a> {
 }
 
 /// `object`'s `key`, which `read` must accept; else the key, naming the field.
-fn field<'a, T>(
+pub(super) fn field<'a, T>(
     object: &'a Value,
     key: &'static str,
     read: impl FnOnce(&'a Value) -> Option<T>,
@@ -184,18 +188,27 @@ fn field<'a, T>(
     object.get(key).and_then(read).ok_or(key)
 }
 
-fn object(v: &Value) -> Option<&Value> {
+pub(super) fn object(v: &Value) -> Option<&Value> {
     v.is_object().then_some(v)
 }
 
-fn count(v: &Value) -> Option<u64> {
+pub(super) fn count(v: &Value) -> Option<u64> {
     v.as_u64().filter(|&n| n <= MAX_COUNT)
 }
 
 /// A reply record read as a [`Reply`], or the name of a field that does not read.
 fn read_reply(v: &Value) -> Result<Reply<'_>, &'static str> {
     let message = field(v, "message", object)?;
-    let usage = field(message, "usage", object)?;
+    Ok(Reply {
+        id: field(message, "id", Value::as_str)?,
+        model: field(message, "model", Value::as_str)?,
+        at: field(v, "timestamp", |t| t.as_str().and_then(parse_ts))?,
+        usage: read_usage(field(message, "usage", object)?)?,
+    })
+}
+
+/// A `message.usage` object's cache counts, as [`Reply`] describes them.
+pub(super) fn read_usage(usage: &Value) -> Result<Usage, &'static str> {
     let split = match usage.get("cache_creation") {
         None => None,
         Some(_) => {
@@ -215,17 +228,12 @@ fn read_reply(v: &Value) -> Result<Reply<'_>, &'static str> {
     } else {
         WRITE_5M
     };
-    Ok(Reply {
-        id: field(message, "id", Value::as_str)?,
-        model: field(message, "model", Value::as_str)?,
-        at: field(v, "timestamp", |t| t.as_str().and_then(parse_ts))?,
-        usage: Usage {
-            read: field(usage, "cache_read_input_tokens", count)?,
-            write: field(usage, "cache_creation_input_tokens", count)?,
-            multiplier,
-            one_hour: hour > 0,
-            split: split.is_some(),
-        },
+    Ok(Usage {
+        read: field(usage, "cache_read_input_tokens", count)?,
+        write: field(usage, "cache_creation_input_tokens", count)?,
+        multiplier,
+        one_hour: hour > 0,
+        split: split.is_some(),
     })
 }
 
@@ -266,7 +274,7 @@ impl Detector for Cache {
     fn record(&mut self, s: &Session, r: &Record<'_>) {
         // The scan gives a reply's price just before the reply, and none for a copy.
         let price = self.price.take();
-        let reply = match read(r) {
+        let reply = match read(r, read_reply) {
             Entry::Compaction => {
                 self.fresh = true;
                 return;

@@ -23,11 +23,12 @@ use scan::Agent;
 pub fn run(cli: &Cli) -> Result<String, String> {
     let since = time::parse_since(&cli.since, chrono::Utc::now())?;
     let home = std::env::home_dir().map(|h| report::display_path(&h.display().to_string(), None));
+    let prices = std::rc::Rc::new(read_prices(cli, home.as_deref())?);
     let mut dets = detectors::build(
         cli.command,
         &std::rc::Rc::new(programs::Programs::from_env()),
+        &prices,
     );
-    let prices = read_prices(cli, home.as_deref())?;
     let read: Vec<Agent> = dets.iter().flat_map(|d| d.agents()).copied().collect();
     let (roots, skipped) = resolve_roots(cli, &read, home.as_deref())?;
     let stats = scan::scan(&roots, since, &prices, &mut dets);

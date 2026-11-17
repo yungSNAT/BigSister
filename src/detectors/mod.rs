@@ -2,6 +2,7 @@
 
 pub mod cache;
 pub mod hooks;
+pub mod models;
 pub mod pipes;
 pub mod polls;
 pub mod rereads;
@@ -18,15 +19,17 @@ use std::rc::Rc;
 use serde_json::Value;
 
 use crate::cli::Command;
+use crate::prices::Prices;
 use crate::programs::Programs;
 #[cfg(test)]
 use crate::scan::Session;
 use crate::scan::{Detector, Record};
 use crate::shell::{self, Step};
 
-/// The detectors a subcommand runs, in report order.
+/// The detectors a subcommand runs, in report order; `prices` are those the scan
+/// prices with, which `models` also ranks models by.
 #[must_use]
-pub fn build(cmd: Command, programs: &Rc<Programs>) -> Vec<Box<dyn Detector>> {
+pub fn build(cmd: Command, programs: &Rc<Programs>, prices: &Rc<Prices>) -> Vec<Box<dyn Detector>> {
     let all = cmd == Command::All;
     let mut v: Vec<Box<dyn Detector>> = Vec::new();
     if all || cmd == Command::Startup {
@@ -49,6 +52,9 @@ pub fn build(cmd: Command, programs: &Rc<Programs>) -> Vec<Box<dyn Detector>> {
     }
     if all || cmd == Command::Cache {
         v.push(Box::<cache::Cache>::default());
+    }
+    if all || cmd == Command::Models {
+        v.push(Box::new(models::Models::new(Rc::clone(prices))));
     }
     if all || cmd == Command::Hooks {
         v.push(Box::new(hooks::Hooks::new(Rc::clone(programs))));
