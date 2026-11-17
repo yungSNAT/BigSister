@@ -44,10 +44,16 @@ const TABLES: [&str; 3] = ["session", "message", "part"];
 ///
 /// # Errors
 /// When the database cannot be read, changed whilst it was copied, has a write-ahead log
-/// holding records, or lacks the tables or columns used.
+/// or a journal holding records, fails SQLite's quick check, or lacks the tables or
+/// columns used. The reason, with what to do where the user can act, holds no table
+/// content: a row that cannot be read is named only as such, since a conversion error
+/// can quote its value.
 pub fn read(db: &Path, since: DateTime<Utc>) -> Result<Vec<Session>, String> {
     let conn = open(db)?;
-    sessions(&conn, since).map_err(|e| e.to_string())
+    sessions(&conn, since).map_err(|e| match e {
+        rusqlite::Error::SqliteFailure(_, Some(message)) => message,
+        _ => "a row of OpenCode's tables cannot be read as OpenCode writes it".to_owned(),
+    })
 }
 
 fn sessions(conn: &Connection, since: DateTime<Utc>) -> rusqlite::Result<Vec<Session>> {
@@ -140,15 +146,21 @@ impl Stamp {
 /// index exists are unchanged, and SQLite's quick check passes on the copy. The queries
 /// then read the copy, which nothing else changes. A log holding records, which only a
 /// connection sharing its index can read, fails, so committed records still in the log
-/// are not read: the database is read once OpenCode has checkpointed them, as it does
-/// when it stops. A journal holding a write under way or cut short fails too.
+/// are not read. Once OpenCode has written since it started, its log holds records until
+/// it stops cleanly, so the database is read only after a clean stop; after OpenCode is
+/// killed, only once it has next started and stopped cleanly. A journal holding a write
+/// under way or cut short fails too.
 ///
-/// shortcut: consistency is detected, not enforced. A write that starts within the file
-/// clock's resolution of the previous one and stalls across both reads could give a copy
-/// holding pages from 2 states that passes every check. The upgrade is SQLite's own
-/// read-only reader once it can open without creating a file. The whole database is also
-/// held in memory, twice whilst the copy is opened (OpenCode's on this machine is 1.1 MB,
-/// November 2026); copying and checking it a page at a time would be the upgrade there.
+/// shortcut: consistency is detected, not enforced. For OpenCode's database, which uses
+/// the log, a copy holding pages from 2 states passes every check only if a `TRUNCATE`
+/// checkpoint rewrites pages in place, stalls across both reads and empties the log
+/// before the second stamp without moving the file's time: within the file clock's
+/// resolution, or on Windows, which need not move the time whilst a writer holds the
+/// file open. A writer with no journal on disk (`journal_mode` `OFF` or `MEMORY`) that
+/// stalls across both reads passes too. The upgrade is SQLite's own read-only reader
+/// once it can open without creating a file. The whole database is also held in memory,
+/// twice whilst the copy is opened (OpenCode's on this machine is 1.1 MB, November
+/// 2026); copying and checking it a page at a time would be the upgrade there.
 fn open(db: &Path) -> Result<Connection, String> {
     open_with(db, || {})
 }
@@ -158,15 +170,17 @@ fn open(db: &Path) -> Result<Connection, String> {
 fn open_with(db: &Path, during: impl FnOnce()) -> Result<Connection, String> {
     let stamp = Stamp::of(db).ok_or("the database's size and time cannot be read")?;
     if stamp.wal.is_some_and(|len| len > 0) {
-        return Err("OpenCode's write-ahead log holds records, so OpenCode is running or did not stop cleanly".to_owned());
+        return Err("OpenCode's write-ahead log holds records, as it does from OpenCode's first write until it stops cleanly: quit OpenCode (if it was killed, start and quit it again) and run again".to_owned());
     }
     if stamp.journal.is_some_and(|len| len > 0) {
-        return Err("the database's rollback journal is not empty, so a write is under way or was cut short".to_owned());
+        return Err("the database's rollback journal holds records, so a write is under way or was cut short: quit OpenCode and run again".to_owned());
     }
     let mut copy = std::fs::read(db).map_err(|e| e.to_string())?;
     during();
     if !holds(db, &copy) || Stamp::of(db) != Some(stamp) {
-        return Err("the database changed whilst it was copied".to_owned());
+        return Err(
+            "the database changed whilst it was copied: quit OpenCode and run again".to_owned(),
+        );
     }
     // Bytes 18 and 19 of the header say whether the database uses a write-ahead log
     // (2) or not (1). A copy in memory cannot use one and this log is empty, so the
@@ -182,7 +196,9 @@ fn open_with(db: &Path, during: impl FnOnce()) -> Result<Connection, String> {
         .query_row("PRAGMA quick_check(1)", [], |r| r.get(0))
         .map_err(|e| e.to_string())?;
     if check != "ok" {
-        return Err("the copy fails SQLite's quick check".to_owned());
+        return Err(
+            "the copy fails SQLite's quick check, so the database may be damaged".to_owned(),
+        );
     }
     conn.authorizer(Some(only_tables))
         .map_err(|e| e.to_string())?;
@@ -418,7 +434,8 @@ fn usage(tokens: Option<&Value>) -> Value {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use std::io::{BufRead, BufReader, Write};
+    use std::fs::OpenOptions;
+    use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
     use std::path::PathBuf;
     use std::process::{Child, ChildStdout, Command, Stdio};
     use std::time::{Duration, Instant};
@@ -843,8 +860,9 @@ mod tests {
             assert_eq!(run(&db, "write"), SOUND, "before");
             leave();
             let mut during = String::new();
-            let _ = open_with(&db, || during = run(&db, "write"));
+            let read = open_with(&db, || during = run(&db, "write"));
             assert_eq!(during, SOUND, "during");
+            assert!(read.is_err(), "a copy taken across another program's write");
             leave();
             let _ = open(&db);
             assert_eq!(run(&db, "write"), SOUND, "after");
@@ -901,6 +919,33 @@ mod tests {
             }
             churn.end();
             eprintln!("WAL {wal}: {copies} copies read, {refused} refused");
+            std::fs::remove_dir_all(&dir).expect("clean up");
+        }
+    }
+
+    /// A change between the 2 reads of the file that only one check sees refuses the
+    /// copy: a byte changed in place with the file's time put back, which only the second
+    /// read sees, and the time alone moved or an empty journal created, which only the
+    /// second stamp sees.
+    #[test]
+    fn a_change_between_the_reads_refuses_the_copy() {
+        for change in ["byte", "time", "journal"] {
+            let (dir, db) = database(&format!("e-{change}"), false);
+            let read = open_with(&db, || {
+                let mut file = OpenOptions::new().write(true).open(&db).expect("file");
+                let modified = file.metadata().and_then(|m| m.modified()).expect("time");
+                match change {
+                    "byte" => file
+                        .seek(SeekFrom::End(-1))
+                        .and_then(|_| file.write_all(b"x"))
+                        .and_then(|()| file.set_modified(modified)),
+                    "time" => file.set_modified(modified + Duration::from_secs(2)),
+                    _ => std::fs::File::create(beside(&db, "-journal")).map(drop),
+                }
+                .expect("change");
+            });
+            let reason = read.err().unwrap_or_default();
+            assert!(reason.contains("changed whilst"), "{change}: {reason:?}");
             std::fs::remove_dir_all(&dir).expect("clean up");
         }
     }

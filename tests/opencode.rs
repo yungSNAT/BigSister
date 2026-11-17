@@ -234,6 +234,7 @@ fn opencode_sessions_feed_polls() {
     let doc = counts("opencode-polls");
     assert_eq!(doc["roots"][0]["files"], json!(2), "{}", doc["roots"]);
     assert_eq!(doc["roots"][0]["unreadable"], json!(0), "{}", doc["roots"]);
+    assert_eq!(doc["roots"][0]["unreadable_reason"], Value::Null);
     let polls = row(&doc, "polls", &[("agent", "opencode"), ("scope", "main")]);
     assert_eq!(
         [
@@ -437,7 +438,8 @@ fn a_database_missing_a_table_counts_as_unreadable_with_no_sessions() {
 
 /// Whilst OpenCode runs, its newest records sit in the write-ahead log, which SQLite
 /// cannot read without sharing the log's index: the database counts as one unreadable
-/// file, and the database, the log and the index are untouched, times included.
+/// file, the report gives the reason and what to do, and the database, the log and the
+/// index are untouched, times included.
 #[test]
 fn a_log_holding_records_counts_as_unreadable_and_is_left_alone() {
     let (dir, writer) = database("opencode-live");
@@ -458,6 +460,19 @@ fn a_log_holding_records_counts_as_unreadable_and_is_left_alone() {
         [&json!(1), &json!(1)],
         "{}",
         doc["roots"]
+    );
+    let reason = doc["roots"][0]["unreadable_reason"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        reason.starts_with("OpenCode's write-ahead log holds records")
+            && reason.contains("quit OpenCode"),
+        "{reason:?}"
+    );
+    let (text, _) = report(&dir, &[]);
+    assert!(
+        text.contains(&format!("\n  unreadable: {reason}\n")),
+        "{text}"
     );
     assert!(files(&dir) == before, "the database folder changed");
 }
@@ -605,7 +620,7 @@ fn attached_files_count_as_images_and_documents() {
 }
 
 /// A row that cannot be read after a valid session makes the whole database unreadable:
-/// the sessions already read count nowhere.
+/// the sessions already read count nowhere, and the reason names the row only as one.
 #[test]
 fn a_late_unreadable_row_leaves_no_partial_report() {
     let (dir, writer) = database("opencode-late-blob");
@@ -629,6 +644,10 @@ fn a_late_unreadable_row_leaves_no_partial_report() {
         [&json!(1), &json!(1)],
         "{}",
         doc["roots"]
+    );
+    assert_eq!(
+        doc["roots"][0]["unreadable_reason"],
+        json!("a row of OpenCode's tables cannot be read as OpenCode writes it")
     );
     assert_eq!(doc["detectors"]["polls"]["tables"][0]["rows"], json!([]));
 }

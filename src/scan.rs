@@ -111,6 +111,9 @@ pub struct RootStats {
     /// `*.jsonl.zst` transcripts in the window that do not start with the zstd magic
     /// number, so nothing in them was read.
     pub compressed: u64,
+    /// Why the root's database was not read, as OpenCode's reader gives it, with no
+    /// table content.
+    pub unreadable_reason: Option<String>,
 }
 
 /// Claude's request blobs repeat message content already in the transcript.
@@ -145,6 +148,7 @@ pub fn scan(
             unreadable: 0,
             bad_lines: 0,
             compressed: 0,
+            unreadable_reason: None,
         };
         if *agent == Agent::OpenCode {
             scan_opencode(root, &window, dets, &active, &mut st, &mut earlier);
@@ -195,8 +199,8 @@ fn scan_files(
 
 /// Reads the OpenCode sessions in `root`'s `opencode.db`, each as one transcript. A
 /// folder without the file holds none. A database that cannot be read, or whose
-/// presence cannot be checked, counts as one unreadable file, and none of its sessions
-/// are read.
+/// presence cannot be checked, counts as one unreadable file, with the reason the reader
+/// gives, and none of its sessions are read.
 fn scan_opencode(
     root: &Path,
     window: &Window<'_>,
@@ -209,10 +213,14 @@ fn scan_opencode(
     if std::fs::metadata(&db).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) {
         return;
     }
-    let Ok(sessions) = crate::opencode::read(&db, window.since) else {
-        st.files += 1;
-        st.unreadable += 1;
-        return;
+    let sessions = match crate::opencode::read(&db, window.since) {
+        Ok(sessions) => sessions,
+        Err(reason) => {
+            st.files += 1;
+            st.unreadable += 1;
+            st.unreadable_reason = Some(reason);
+            return;
+        }
     };
     for s in sessions {
         st.files += 1;
@@ -779,6 +787,7 @@ mod tests {
                 unreadable: 0,
                 bad_lines: 0,
                 compressed: 0,
+                unreadable_reason: None,
             };
             let n = std::rc::Rc::default();
             let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count(std::rc::Rc::clone(&n)))];
