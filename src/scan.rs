@@ -502,8 +502,7 @@ fn scan_file(
     for &i in active {
         feed.dets[i].end(&session);
     }
-    let (uuids, replies) = (feed.uuids, feed.replies);
-    earlier.add(agent, path, uuids, replies);
+    earlier.add(agent, path, feed.uuids, feed.replies);
     result
 }
 
