@@ -430,8 +430,8 @@ fn models_rank_subagents_at_a_price_file_s_prices() {
 
 const MODELS_TIERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/models-tiers");
 
-/// The subagent ranks of the tiers fixture: on top, below and the on-top dollars.
-fn tier_ranks(extra: &[&str]) -> Value {
+/// The models section of the tiers fixture.
+fn tier_report(extra: &[&str]) -> Value {
     let mut args = vec![
         "models",
         "--claude-root",
@@ -446,12 +446,17 @@ fn tier_ranks(extra: &[&str]) -> Value {
     let (code, stdout, stderr) = run(&args);
     assert_eq!(code, 0, "stderr: {stderr}");
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    doc["detectors"]["models"].clone()
+}
+
+/// The subagent ranks of the tiers fixture: on top, below and the on-top dollars.
+fn tier_ranks(extra: &[&str]) -> Value {
     let keys = [
         "subagent_sessions_on_top_model",
         "subagent_sessions_below_top_model",
         "on_top_input_usd_est",
     ];
-    cells(&doc["detectors"]["models"]["summary"], &keys)
+    cells(&tier_report(extra)["summary"], &keys)
 }
 
 #[test]
@@ -460,6 +465,17 @@ fn models_rank_subagents_by_base_price_whatever_the_prompt_size() {
     // was over 100,000 tokens and so dearer; its 100,000 tokens at US$0.10 per million are
     // US$0.01. t2's Sonnet 5.5 subagent is below Opus 5.5.
     assert_eq!(tier_ranks(&[]), json!([1, 1, 0.01]));
+    // Dollars keep each reply's tier: t1's 150,000 tokens at US$0.50 per million and its
+    // 50,000 at US$0.10 are US$0.08.
+    let section = tier_report(&[]);
+    let main = find(
+        section["tables"][0]["rows"].as_array().expect("rows"),
+        &[
+            ("scope", json!("main")),
+            ("model", json!("claude-haiku-5-5")),
+        ],
+    );
+    assert_eq!(main["input_usd_est"], 0.08);
     // A price file that tiers Sonnet 5.5 above Opus 5.5 for long prompts still ranks it
     // by its base price, below.
     let file = price_file(
