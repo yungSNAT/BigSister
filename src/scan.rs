@@ -442,23 +442,29 @@ struct Window<'a> {
     prices: &'a Prices,
 }
 
-/// The `uuid` of each Claude-shaped record parsed in an earlier file.
+/// The `uuid` of each Claude-shaped record parsed in an earlier file, and the message id
+/// of each Claude Code reply.
 ///
-/// shortcut: every uuid of the scan is held as a string, about 100 bytes each (a million
-/// uuids added 96 MB of peak memory, 14 November 2026). Holding a uuid as the 128-bit
-/// number it spells would cut that to about a quarter.
+/// shortcut: every uuid and message id of the scan is held as a string, about 100 bytes
+/// each (a million uuids added 96 MB of peak memory, 14 November 2026). Holding a uuid as
+/// the 128-bit number it spells would cut that to about a quarter.
 #[derive(Default)]
 struct Earlier {
     /// Claude Code's, all together: a resumed session does not name the file it copies.
     claude: HashSet<String>,
+    /// Claude Code's reply message ids: a reply's block can be written again in another
+    /// file under a new uuid.
+    replies: HashSet<String>,
     /// pi's, by session file name: a fork's header names the file it copies, whose own
     /// uuids include those it copied in turn.
     pi: HashMap<String, HashSet<String>>,
 }
 
 impl Earlier {
-    /// Holds the `uuids` of `agent`'s file `path`, once it is read.
-    fn add(&mut self, agent: Agent, path: &Path, uuids: HashSet<String>) {
+    /// Holds the `uuids` and reply message ids `replies` of `agent`'s file `path`, once it
+    /// is read.
+    fn add(&mut self, agent: Agent, path: &Path, uuids: HashSet<String>, replies: HashSet<String>) {
+        self.replies.extend(replies);
         if agent == Agent::Pi {
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             self.pi.insert(name.into_owned(), uuids);
@@ -498,6 +504,7 @@ fn scan_file(
         last_time: None,
         codex_model: None,
         uuids: HashSet::new(),
+        replies: HashSet::new(),
         earlier,
         pi: (agent == Agent::Pi).then(crate::pi::Tree::default),
         replaying: false,
@@ -526,8 +533,7 @@ fn scan_file(
     for &i in active {
         feed.dets[i].end(&session);
     }
-    let uuids = feed.uuids;
-    earlier.add(agent, path, uuids);
+    earlier.add(agent, path, feed.uuids, feed.replies);
     result
 }
 
@@ -558,6 +564,8 @@ struct Feed<'a> {
     codex_model: Option<String>,
     /// The `uuid` of each Claude record parsed so far in the file.
     uuids: HashSet<String>,
+    /// The message id of each Claude Code reply parsed so far in the file.
+    replies: HashSet<String>,
     earlier: &'a Earlier,
     /// A pi session's tree; `None` for other agents.
     pi: Option<crate::pi::Tree>,
@@ -653,8 +661,9 @@ impl Feed<'_> {
     /// repeats one of this file's. Claude Code can write a record again later in its
     /// file, with the same uuid; such a record counts nowhere. A resumed session's file
     /// starts with copies of the earlier file's records; such a copy still builds the
-    /// session's state but counts nowhere, as does a pi path given again at a branch. A
-    /// pi session holds copies only of the file its header names.
+    /// session's state but counts nowhere, as does a pi path given again at a branch, and
+    /// a Claude Code reply's block whose message id an earlier file holds, under any uuid.
+    /// A pi session holds copies only of the file its header names.
     fn copied(&mut self, value: &Value) -> Option<bool> {
         if self.replaying {
             return Some(true);
@@ -669,6 +678,15 @@ impl Feed<'_> {
             return None;
         }
         Some(match &self.pi {
+            None if self.session.agent == Agent::Claude => {
+                let reply = value
+                    .pointer("/message/id")
+                    .and_then(Value::as_str)
+                    .filter(|_| value.get("type").and_then(Value::as_str) == Some("assistant"));
+                self.replies.extend(reply.map(str::to_owned));
+                self.earlier.claude.contains(uuid)
+                    || reply.is_some_and(|id| self.earlier.replies.contains(id))
+            }
             None => self.earlier.claude.contains(uuid),
             Some(tree) => tree
                 .parent

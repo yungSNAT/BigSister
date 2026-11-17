@@ -490,6 +490,62 @@ fn models_rank_subagents_by_base_price_whatever_the_prompt_size() {
     assert_eq!(tier_ranks(&["--prices", file]), json!([1, 1, 0.01]));
 }
 
+/// Claude Code 2.1.308 wrote a block of a subagent's reply again in sibling subagent files
+/// with new uuids (seen on one machine, October 2026): the message id says it is one reply,
+/// counted once.
+#[test]
+fn a_reply_another_file_holds_under_new_uuids_counts_once() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("reply-copies");
+    let _ = std::fs::remove_dir_all(&dir);
+    let subs = dir.join("proj/p/subagents");
+    std::fs::create_dir_all(&subs).expect("folder");
+    let block = |uuid: &str, time: &str| {
+        json!({"type": "assistant", "uuid": uuid, "timestamp": time, "sessionId": "p",
+               "message": {"model": "claude-opus-5-5", "id": "msg_x", "role": "assistant",
+                           "content": [], "usage": {"input_tokens": 10,
+                           "cache_creation_input_tokens": 40000,
+                           "cache_read_input_tokens": 0, "output_tokens": 5}}})
+        .to_string()
+    };
+    let start = json!({"type": "user", "uuid": "start", "timestamp": "2026-11-08T01:00:00Z",
+                       "sessionId": "p", "message": {"role": "user", "content": "go"}})
+    .to_string();
+    let a = [
+        start.clone(),
+        block("a1", "2026-11-08T01:00:10Z"),
+        block("a2", "2026-11-08T01:00:11Z"),
+    ];
+    let b = [
+        start.replace("\"start\"", "\"start-b\""),
+        block("b1", "2026-11-08T01:00:11Z"),
+    ];
+    std::fs::write(subs.join("agent-a.jsonl"), a.join("\n")).expect("file");
+    std::fs::write(subs.join("agent-b.jsonl"), b.join("\n")).expect("file");
+    let root = dir.to_str().expect("UTF-8 path");
+    let report = |section: &str| {
+        let args = [
+            section,
+            "--claude-root",
+            root,
+            "--agent",
+            "claude",
+            "--since",
+            SINCE,
+            "--json",
+        ];
+        let (code, stdout, stderr) = run(&args);
+        assert_eq!(code, 0, "stderr: {stderr}");
+        serde_json::from_str::<Value>(&stdout).expect("valid JSON")["detectors"][section]["summary"]
+            .clone()
+    };
+    let models = report("models");
+    assert_eq!(
+        cells(&models, &["replies", "subagent_sessions"]),
+        json!([1, 1])
+    );
+    assert_eq!(report("cache")["write_tokens"], json!(40000));
+}
+
 #[test]
 fn models_count_unpriced_replies_whatever_the_limit() {
     // The unpriced row sorts last and --limit 1 cuts it; the summary still counts it, in
