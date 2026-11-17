@@ -54,7 +54,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub paths: bool,
 
-    /// Price every token estimate at this one rate in US dollars per million tokens, instead of each model's price (above 0, up to 1000)
+    /// Price every token estimate, and cache writes at their write multipliers, at this one rate in US dollars per million tokens, instead of each model's price (above 0, up to 1000)
     #[arg(long, global = true, value_name = "USD", value_parser = parse_usd_per_mtok)]
     pub usd_per_mtok: Option<f64>,
 
@@ -83,7 +83,7 @@ pub enum Command {
     All,
     /// What loads before the first non-synthetic reply of each main session (Claude)
     Startup,
-    /// Tool schemas loaded against tools called (Claude)
+    /// Tool schemas loaded against tools called, and skills listed against skills used (Claude)
     Schemas,
     /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex, pi, OpenCode)
     Pipes,
@@ -93,6 +93,8 @@ pub enum Command {
     Rereads,
     /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi, OpenCode)
     Tools,
+    /// Cache writes by cause: new context, or rebuilds after an idle gap, a model switch or otherwise (Claude)
+    Cache,
     /// Hook durations, cancellations and timeouts (Claude)
     Hooks,
 }

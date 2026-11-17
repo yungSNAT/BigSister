@@ -198,6 +198,120 @@ fn startup_alone_stops_reading_at_the_first_reply() {
     assert_eq!(report("all", &[])["roots"][0]["lines_skipped"], 1);
 }
 
+const CACHE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cache");
+
+/// The cache section over the cache fixture, with `extra` options.
+fn cache_report(extra: &[&str]) -> Value {
+    let mut args = vec![
+        "cache",
+        "--claude-root",
+        CACHE,
+        "--agent",
+        "claude",
+        "--since",
+        SINCE,
+        "--json",
+    ];
+    args.extend_from_slice(extra);
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+#[test]
+fn cache_splits_writes_into_new_context_and_rebuilds_by_cause() {
+    let doc = cache_report(&[]);
+    let r = rows(&doc, "cache", 0);
+    let row = |scope: &str, cause: &str| {
+        let row = find(r, &[("scope", json!(scope)), ("cause", json!(cause))]);
+        (
+            row["replies"].as_u64().unwrap(),
+            row["write_tokens"].as_u64().unwrap(),
+            row["write_usd_est"].as_f64().unwrap(),
+            row["unpriced_tokens"].as_u64().unwrap(),
+        )
+    };
+    // A second record of the first reply adds nothing; 5-minute writes cost 1.25 times
+    // the input price (Opus 5.5, US$4), 1-hour writes 2 times (Sonnet 5.5, US$2).
+    assert_eq!(row("main", "first reply"), (1, 1_000_000, 5.0, 0));
+    // Warm replies, the new part of each rebuild, after a compaction, and the new part
+    // of the second reply of a session whose first is before the window.
+    assert_eq!(row("main", "new context"), (7, 1_110_000, 4.94, 0));
+    // 9 minutes past a 5-minute write, 3 hours past a 1-hour write, and 2 days after a
+    // reply before the window.
+    assert_eq!(
+        row("main", "rebuilt after idle gap"),
+        (3, 2_500_000, 11.7, 0)
+    );
+    assert_eq!(
+        row("main", "rebuilt after model switch"),
+        (1, 1_600_000, 4.0, 0)
+    );
+    // 28 minutes after a 1-hour write is inside the lifetime.
+    assert_eq!(row("main", "rebuilt otherwise"), (1, 1_750_000, 7.0, 0));
+    assert_eq!(row("subagent", "first reply"), (1, 400_000, 2.0, 0));
+    // A model without a price leaves its rebuild unpriced.
+    assert_eq!(
+        row("subagent", "rebuilt after idle gap"),
+        (1, 400_000, 0.0, 400_000)
+    );
+    assert_eq!(r.len(), 7);
+    let s = &doc["detectors"]["cache"]["summary"];
+    assert_eq!(s["sessions"], 3);
+    assert_eq!(s["write_tokens"], 8_760_000);
+    assert_eq!(s["idle_rebuilds"], 4);
+    assert_eq!(s["sessions_with_idle_rebuilds"], 3);
+    assert_eq!(s["idle_rebuild_share"], 0.33);
+    assert_eq!(s["replies_skipped"], 1);
+    assert_eq!(s["replies_without_split"], 2);
+}
+
+#[test]
+fn cache_dollars_take_the_given_rate_times_the_write_multiplier() {
+    let doc = cache_report(&["--usd-per-mtok", "10"]);
+    let idle = find(
+        rows(&doc, "cache", 0),
+        &[
+            ("scope", json!("main")),
+            ("cause", json!("rebuilt after idle gap")),
+        ],
+    );
+    // 1,100,000 and 600,000 at 1.25, 800,000 at 2: 3,725,000 at US$10 a million.
+    assert_eq!(idle["write_usd_est"], 37.25);
+    let sub = find(
+        rows(&doc, "cache", 0),
+        &[
+            ("scope", json!("subagent")),
+            ("cause", json!("rebuilt after idle gap")),
+        ],
+    );
+    assert_eq!(
+        (sub["write_usd_est"].clone(), sub["unpriced_tokens"].clone()),
+        (json!(5.0), json!(0))
+    );
+    let notes = doc["detectors"]["cache"]["notes"].to_string();
+    assert!(notes.contains("--usd-per-mtok"), "{notes}");
+}
+
+#[test]
+fn cache_dollars_take_a_price_file_and_name_it() {
+    // Opus 5.5 at US$8 instead of US$4 doubles the first reply's 5-minute writes.
+    let file = price_file(
+        "prices-cache.json",
+        r#"{"claude-opus-5-5": {"input_cost_per_token": 8e-06}}"#,
+    );
+    let doc = cache_report(&["--prices", file.to_str().expect("UTF-8 path")]);
+    let first = find(
+        rows(&doc, "cache", 0),
+        &[("scope", json!("main")), ("cause", json!("first reply"))],
+    );
+    assert_eq!(first["write_usd_est"], 10.0);
+    let notes = doc["detectors"]["cache"]["notes"].to_string();
+    assert!(notes.contains("prices-cache.json"), "{notes}");
+    assert!(!notes.contains("bundled"), "{notes}");
+}
+
 #[test]
 fn schemas_report_idle_groups_first_and_skip_deferred_tools() {
     let doc = report("schemas", &[]);
@@ -232,6 +346,63 @@ fn schemas_report_idle_groups_first_and_skip_deferred_tools() {
         find(r, &[("scope", json!("subagent")), ("tool", json!("Bash"))])["calls"],
         2
     );
+}
+
+const SKILLS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/skills");
+
+#[test]
+fn schemas_list_skills_against_skill_calls_and_slash_commands() {
+    let (code, stdout, stderr) = run(&[
+        "schemas",
+        "--claude-root",
+        SKILLS,
+        "--agent",
+        "claude",
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let r = rows(&doc, "schemas", 1);
+    let skill = |name: &str| find(r, &[("scope", json!("main")), ("skill", json!(name))]);
+    // Called with Skill in one session, listed and idle in the other, where a second,
+    // shorter listing of it leaves its largest entry.
+    let used = skill("used-skill");
+    assert_eq!(
+        [
+            &used["sessions_listed"],
+            &used["sessions_used"],
+            &used["uses"],
+            &used["idle_chars"]
+        ],
+        [&json!(2), &json!(1), &json!(1), &json!(29)]
+    );
+    // A slash command uses a skill; its name quoted in a tool result does not.
+    assert_eq!(skill("slash-skill")["sessions_used"], 1);
+    let idle = skill("plug:idle-skill");
+    assert_eq!(
+        [
+            &idle["sessions_used"],
+            &idle["idle_chars"],
+            &idle["idle_tokens_est"]
+        ],
+        [&json!(0), &json!(60), &json!(15)]
+    );
+    // A name listed alone, a name listed in a later listing, and a name that is not
+    // printable.
+    assert_eq!(skill("bare-skill")["idle_chars"], 13);
+    assert_eq!(skill("late-skill")["idle_chars"], 28);
+    assert_eq!(skill("(other)")["idle_chars"], 26);
+    // A line goes to the longest name it starts: `- pre:fix:` is not `pre`'s.
+    assert_eq!(skill("pre")["idle_chars"], 18);
+    assert_eq!(skill("pre:fix")["idle_chars"], 22);
+    assert_eq!(
+        r[0]["skill"], "plug:idle-skill",
+        "most idle characters first"
+    );
+    assert_eq!(r.len(), 8);
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
 }
 
 #[test]
@@ -374,6 +545,21 @@ fn polls_read_codex_command_results() {
     let summary = &doc["detectors"]["polls"]["summary"];
     assert_eq!(summary["codex_outputs_not_paired"], 2);
     assert_eq!(summary["codex_commands_not_paired"], 4);
+    // Every command counts by verb class, polled or not; only paired results add
+    // characters: `git status` printed 20 and then 5, and 1 of 3 `cargo` runs printed 52.
+    let results = rows(&doc, "polls", 2);
+    let verb = |v: &str| {
+        let r = find(results, &[("agent", json!("codex")), ("verb", json!(v))]);
+        (
+            r["commands"].clone(),
+            r["results"].clone(),
+            r["result_chars"].clone(),
+            r["result_tokens_est"].clone(),
+        )
+    };
+    assert_eq!(verb("cargo"), (json!(3), json!(1), json!(52), json!(13)));
+    assert_eq!(verb("git"), (json!(4), json!(2), json!(25), json!(7)));
+    assert_eq!(results[0]["verb"], "cargo", "largest results first");
 }
 
 #[test]
@@ -636,7 +822,7 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[0]["lines_skipped"], 1);
     assert_eq!(roots[1]["files"], 2);
     assert_eq!(doc["schema_version"], 2);
-    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(7));
+    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(8));
 }
 
 /// `shaphan all` over the Claude transcripts in a fixture folder, which must hold 2.
@@ -939,6 +1125,8 @@ fn output_never_contains_transcript_content() {
     assert_no_sentinel(RESULTS, CODEX_RESULTS);
     assert_no_sentinel(RESULTS, CODEX_WRAPPED);
     assert_no_sentinel(KINDS, CODEX);
+    assert_no_sentinel(SKILLS, CODEX);
+    assert_no_sentinel(CACHE, CODEX);
 }
 
 /// One main session with the attachment kinds, hook errors and pipe result the main
@@ -1079,7 +1267,7 @@ fn text_output_has_a_section_per_detector() {
     let (code, stdout, _) = run(&fixture_args("all", &["--limit", "1"]));
     assert_eq!(code, 0);
     for name in [
-        "startup", "schemas", "pipes", "polls", "rereads", "tools", "hooks",
+        "startup", "schemas", "pipes", "polls", "rereads", "tools", "cache", "hooks",
     ] {
         assert!(stdout.contains(&format!("== {name}: ")), "{name}");
     }
@@ -1279,20 +1467,26 @@ fn roots_no_detector_reads_are_left_out_and_cut_lines_still_count() {
 fn a_rate_prices_each_token_estimate_and_nothing_else() {
     let plain = report("all", &[]);
     let priced = report("all", &["--usd-per-mtok", "1000"]);
-    for (detector, tokens, usd) in [
-        ("polls", "poll_tokens_est", "poll_usd_est"),
-        ("rereads", "reread_tokens_est", "reread_usd_est"),
-        ("schemas", "idle_tokens_est", "idle_usd_est"),
+    for (detector, table, tokens, usd) in [
+        ("polls", 0, "poll_tokens_est", "poll_usd_est"),
+        ("polls", 2, "result_tokens_est", "result_usd_est"),
+        ("rereads", 0, "reread_tokens_est", "reread_usd_est"),
+        ("schemas", 0, "idle_tokens_est", "idle_usd_est"),
     ] {
-        let rows = rows(&priced, detector, 0);
+        let rows = rows(&priced, detector, table);
         assert!(!rows.is_empty(), "{detector}");
         for row in rows {
             let want = (row[tokens].as_f64().unwrap() * 1000.0 / 1e6 * 100.0).round() / 100.0;
             assert_eq!(row[usd].as_f64(), Some(want), "{detector} {row}");
         }
         // Without a rate, the fixtures name no model, so nothing is priced.
+        let plain_rows: Vec<Value> = rows_of(&plain, detector)
+            .into_iter()
+            .filter(|r| r.get(usd).is_some())
+            .collect();
+        assert!(!plain_rows.is_empty(), "{detector} {usd}");
         assert!(
-            rows_of(&plain, detector)
+            plain_rows
                 .iter()
                 .all(|r| r[usd] == json!(0.0) && r["unpriced_tokens_est"] == r[tokens])
         );
@@ -1394,6 +1588,129 @@ fn each_estimate_is_priced_at_the_model_that_read_it() {
         "{notes}"
     );
     assert_eq!(doc["schema_version"], 2);
+}
+
+/// Appends to a Codex transcript a call running `git status` that prints `printed`
+/// characters and, when `read_in` gives a prompt size, the usage record of the model
+/// call that read its output: Codex writes a call's usage as the call completes.
+fn codex_git_status(lines: &mut Vec<Value>, call: &str, printed: usize, read_in: Option<u64>) {
+    lines.push(
+        json!({"timestamp": "2026-11-09T04:01:00.000Z", "type": "response_item",
+        "payload": {"type": "custom_tool_call", "name": "exec", "call_id": call,
+            "input": "text(await tools.exec_command({cmd: \"git status\"}));"}}),
+    );
+    let chunk = json!({"chunk_id": "k", "exit_code": 0, "original_token_count": 1,
+        "output": "y".repeat(printed), "wall_time_seconds": 0.5});
+    lines.push(
+        json!({"timestamp": "2026-11-09T04:02:00.000Z", "type": "response_item",
+        "payload": {"type": "custom_tool_call_output", "call_id": call, "output": [
+            {"type": "input_text", "text": "Script completed\nWall time: 0.5 seconds\nOutput:\n"},
+            {"type": "input_text", "text": chunk.to_string()}]}}),
+    );
+    if let Some(tokens) = read_in {
+        lines.push(json!({"timestamp": "2026-11-09T04:03:00.000Z",
+            "type": "token_usage_record", "payload": {"turn_id": "t", "response_id": call,
+            "usage": {"input_tokens": tokens, "cached_input_tokens": 0, "output_tokens": 10}}}));
+    }
+}
+
+/// A Codex `turn_context` naming `model`.
+fn codex_turn(model: &str) -> Value {
+    json!({"timestamp": "2026-11-09T04:00:30.000Z", "type": "turn_context",
+           "payload": {"turn_id": "t", "cwd": "/work", "model": model}})
+}
+
+#[test]
+fn codex_results_are_priced_by_the_prompt_of_the_call_that_read_them() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("codex-prompt-tiers");
+    let _ = std::fs::remove_dir_all(&dir);
+    let day = dir.join("2026/11/09");
+    std::fs::create_dir_all(&day).expect("folder");
+    let mut lines = vec![
+        json!({"timestamp": "2026-11-09T04:00:00.000Z", "type": "session_meta",
+               "payload": {"id": "c-tiers", "cwd": "/work"}}),
+        codex_turn("gpt-6.1-sol"),
+    ];
+    // `git status` once, then 4 polls of it. GPT-6.1 Sol costs US$2 per million up to
+    // 272,000 prompt tokens and US$4 above.
+    codex_git_status(&mut lines, "c0", 4, Some(20_000));
+    codex_git_status(&mut lines, "c1", 80_000, Some(272_000));
+    codex_git_status(&mut lines, "c2", 80_000, Some(272_001));
+    // No call reads this one before the turn ends, so its prompt size is not known.
+    codex_git_status(&mut lines, "c3", 40_000, None);
+    // GPT-5.3 Codex has one price, so a result no recorded call follows is still priced.
+    lines.push(codex_turn("gpt-5.3-codex"));
+    codex_git_status(&mut lines, "c4", 40_000, None);
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(day.join("rollout-tiers.jsonl"), text).expect("transcript");
+    let codex = dir.to_str().expect("UTF-8 path");
+    let (code, stdout, stderr) = run(&[
+        "polls",
+        "--codex-root",
+        codex,
+        "--claude-root",
+        CLAUDE,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let row = find(rows(&doc, "polls", 0), &[("agent", json!("codex"))]);
+    assert_eq!(row["polls"], json!(4), "{row}");
+    // 20,000 tokens est at US$2, 20,000 at US$4, 10,000 unpriced and 10,000 at US$1.75:
+    // US$0.04 + 0.08 + 0.0175. At one price per model, US$0.1175 and none unpriced.
+    assert_eq!(row["poll_usd_est"], json!(0.14), "{row}");
+    assert_eq!(row["unpriced_tokens_est"], json!(10000), "{row}");
+}
+
+#[test]
+fn a_codex_result_is_priced_once_and_one_left_at_the_end_stays_unpriced() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("codex-prompt-once");
+    let _ = std::fs::remove_dir_all(&dir);
+    let day = dir.join("2026/11/09");
+    std::fs::create_dir_all(&day).expect("folder");
+    let usage = |tokens: u64| {
+        json!({"timestamp": "2026-11-09T04:04:00.000Z", "type": "token_usage_record",
+            "payload": {"turn_id": "t", "response_id": "later",
+            "usage": {"input_tokens": tokens, "cached_input_tokens": 0, "output_tokens": 10}}})
+    };
+    let mut lines = vec![
+        json!({"timestamp": "2026-11-09T04:00:00.000Z", "type": "session_meta",
+               "payload": {"id": "c-once", "cwd": "/work"}}),
+        codex_turn("gpt-6.1-sol"),
+    ];
+    codex_git_status(&mut lines, "c0", 4, Some(20_000));
+    // Both read at one 20,000-token prompt; the later, larger calls and the next turn's
+    // call read them again but price them no more.
+    codex_git_status(&mut lines, "c1", 80_000, None);
+    codex_git_status(&mut lines, "c1b", 80_000, Some(20_000));
+    lines.push(usage(272_001));
+    lines.push(usage(272_001));
+    lines.push(codex_turn("gpt-6.1-sol"));
+    lines.push(usage(272_001));
+    // No call reads this one before the file ends, so its prompt size is not known.
+    codex_git_status(&mut lines, "c2", 80_000, None);
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(day.join("rollout-once.jsonl"), text).expect("transcript");
+    let codex = dir.to_str().expect("UTF-8 path");
+    let (code, stdout, stderr) = run(&[
+        "polls",
+        "--codex-root",
+        codex,
+        "--claude-root",
+        CLAUDE,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let row = find(rows(&doc, "polls", 0), &[("agent", json!("codex"))]);
+    assert_eq!(row["polls"], json!(3), "{row}");
+    // 40,000 tokens est at US$2, once, and 20,000 unpriced.
+    assert_eq!(row["poll_usd_est"], json!(0.08), "{row}");
+    assert_eq!(row["unpriced_tokens_est"], json!(20000), "{row}");
 }
 
 /// A Claude transcript of `calls`, each a tool name, its input, its result's content and

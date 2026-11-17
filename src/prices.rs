@@ -23,7 +23,7 @@ pub const READ: &str = "16 November 2026";
 /// <https://platform.claude.com/docs/en/about-claude/pricing>, for each model
 /// <https://platform.claude.com/docs/en/about-claude/model-deprecations> lists as active
 /// under its API id, and <https://developers.openai.com/api/docs/pricing> (standard,
-/// short context).
+/// short context, and long context above 272,000 input tokens).
 const BUNDLED: &str = include_str!("prices.json");
 
 /// The note of each section whose estimates are priced at each model's price, from the
@@ -88,6 +88,12 @@ impl Prices {
         let tokens = prompt_tokens()?;
         let tier = price.above.iter().rev().find(|(most, _)| tokens > *most);
         Some(tier.map_or(price.usd_per_mtok, |&(_, usd)| usd))
+    }
+
+    /// The price file as the report shows it, when one was given.
+    #[must_use]
+    pub fn file(&self) -> Option<&str> {
+        self.file.as_deref()
     }
 
     /// The note of each section whose estimates are priced at each model's price.
@@ -317,8 +323,9 @@ mod tests {
         assert_eq!(flat(&p, "claude-opus-4-8"), Some(5.0));
         assert_eq!(flat(&p, "claude-opus-4-5-20251101"), Some(5.0));
         assert_eq!(flat(&p, "claude-haiku-4-5-20251001"), Some(1.0));
-        assert_eq!(flat(&p, "gpt-6.1-sol"), Some(2.0));
-        assert_eq!(flat(&p, "gpt-6-luna"), Some(0.1));
+        // GPT-6 models are priced by prompt size; these prompts are in the short tier.
+        assert_eq!(p.usd_per_mtok("gpt-6.1-sol", || Some(272_000)), Some(2.0));
+        assert_eq!(p.usd_per_mtok("gpt-6-luna", || Some(1)), Some(0.1));
         assert_eq!(flat(&p, "gpt-5.3-codex"), Some(1.75));
         for unpriced in [
             "claude-opus-4-5",
@@ -337,13 +344,33 @@ mod tests {
     fn the_bundled_file_prices_every_listed_model() {
         let p = Prices::bundled();
         assert_eq!(p.models.len(), 27);
-        let tiered: Vec<&String> = p
+        let mut tiered: Vec<&str> = p
             .models
             .iter()
             .filter(|(_, price)| !price.above.is_empty())
-            .map(|(id, _)| id)
+            .map(|(id, _)| id.as_str())
             .collect();
-        assert_eq!(tiered, ["claude-haiku-5-5"]);
+        tiered.sort_unstable();
+        assert_eq!(
+            tiered,
+            [
+                "claude-haiku-5-5",
+                "gpt-5.6-luna",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-6-astra",
+                "gpt-6-luna",
+                "gpt-6-sol",
+                "gpt-6.1-sol",
+                "gpt-6.1-terra"
+            ]
+        );
+        // OpenAI's long context doubles each GPT-6 and GPT-5.6 input price.
+        for (id, price) in p.models.iter().filter(|(id, _)| id.starts_with("gpt-")) {
+            if id != "gpt-5.3-codex" {
+                assert_eq!(price.above, [(272_000, 2.0 * price.usd_per_mtok)], "{id}");
+            }
+        }
         assert!(p.models.values().all(|price| price.usd_per_mtok > 0.0));
         assert_eq!(p.note(), NOTE);
     }

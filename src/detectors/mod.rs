@@ -1,5 +1,6 @@
 //! The detectors and the record helpers they share.
 
+pub mod cache;
 pub mod hooks;
 pub mod pipes;
 pub mod polls;
@@ -45,6 +46,9 @@ pub fn build(cmd: Command, programs: &Rc<Programs>) -> Vec<Box<dyn Detector>> {
     }
     if all || cmd == Command::Tools {
         v.push(Box::<tools::Tools>::default());
+    }
+    if all || cmd == Command::Cache {
+        v.push(Box::<cache::Cache>::default());
     }
     if all || cmd == Command::Hooks {
         v.push(Box::new(hooks::Hooks::new(Rc::clone(programs))));

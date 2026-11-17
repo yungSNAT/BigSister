@@ -481,7 +481,7 @@ fn scan_file(
     // A Codex turn's model reads its results; a Claude result no reply read stays
     // unpriced.
     if agent == Agent::Codex {
-        let price = feed.codex_model.flatten();
+        let price = feed.codex_price(|| None);
         feed.read_by(price);
     }
     for &i in active {
@@ -515,8 +515,8 @@ struct Feed<'a> {
     since: DateTime<Utc>,
     prices: &'a Prices,
     last_time: Option<DateTime<Utc>>,
-    /// The price of the model of the latest Codex `turn_context`, once one is seen.
-    codex_model: Option<Option<f64>>,
+    /// The model the latest Codex `turn_context` names, if any.
+    codex_model: Option<String>,
     /// The `uuid` of each Claude record parsed so far in the file.
     uuids: HashSet<String>,
     earlier: &'a Earlier,
@@ -645,8 +645,9 @@ impl Feed<'_> {
         }
     }
 
-    /// Finds where a model reads what came before. A new Codex turn ends the last
-    /// turn, whose model read that turn's results; the detectors are told here. A
+    /// Finds where a model reads what came before. A Codex model call's usage record,
+    /// and a new turn, which ends the last, are where the turn's model read the results
+    /// not yet read; the detectors are told here. A
     /// Claude reply reads the results before it: its model's price, if it has one, is
     /// returned for `line` to pass on once the record is known to be no copy.
     ///
@@ -667,22 +668,49 @@ impl Feed<'_> {
                     .then(|| self.prices.usd_per_mtok(model, || prompt_tokens(line)))
             }
             Agent::Codex => {
-                if !line.contains("\"type\":\"turn_context\"") {
+                if !line.contains("\"type\":\"turn_context\"")
+                    && !line.contains("\"type\":\"token_usage_record\"")
+                {
                     return None;
                 }
                 let v = serde_json::from_str::<Value>(line).ok()?;
-                if v.get("type").and_then(Value::as_str) != Some("turn_context") {
-                    return None;
+                match v.get("type").and_then(Value::as_str) {
+                    // Codex writes a model call's usage as the call completes, so the call
+                    // read the results before it, in a prompt of `input_tokens`.
+                    //
+                    // shortcut: a tool can finish whilst the call that asked for it is
+                    // still writing, so its result comes before that call's usage record
+                    // and is priced at a prompt that lacks it (6 of 92,410 results in
+                    // 895 real rollouts in November 2026). Only a tier boundary between
+                    // the 2 prompts changes the price; pairing each result's call_id
+                    // with the call that made it would be the upgrade.
+                    Some("token_usage_record") => {
+                        let price = self.codex_price(|| {
+                            v.pointer("/payload/usage/input_tokens")
+                                .and_then(Value::as_u64)
+                        });
+                        self.read_by(price);
+                    }
+                    Some("turn_context") => {
+                        let ended = self.codex_price(|| None);
+                        self.read_by(ended);
+                        self.codex_model = v
+                            .pointer("/payload/model")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned);
+                    }
+                    _ => {}
                 }
-                let price = v
-                    .pointer("/payload/model")
-                    .and_then(Value::as_str)
-                    .and_then(|model| self.prices.usd_per_mtok(model, || None));
-                let ended = self.codex_model.replace(price).flatten();
-                self.read_by(ended);
                 None
             }
         }
+    }
+
+    /// The price of the current Codex turn's model, for a call whose prompt size
+    /// `prompt_tokens` gives.
+    fn codex_price(&self, prompt_tokens: impl FnOnce() -> Option<u64>) -> Option<f64> {
+        self.prices
+            .usd_per_mtok(self.codex_model.as_deref()?, prompt_tokens)
     }
 }
 
