@@ -146,10 +146,10 @@ impl Detector for Models {
         // The scan gives a reply's price just before the reply, and none for a copy.
         let price = self.price.take();
         let v = r.value;
-        let model = v.pointer("/message/model").and_then(Value::as_str);
-        let Some(model) = model.filter(|m| r.kind() == "assistant" && *m != "<synthetic>") else {
+        let model = v.pointer("/message/model");
+        if r.kind() != "assistant" || model.and_then(Value::as_str) == Some("<synthetic>") {
             return;
-        };
+        }
         // Claude Code writes a record for each block of a reply, each with its usage.
         let id = v.pointer("/message/id").and_then(Value::as_str);
         if id.is_some_and(|id| self.ids.contains(id)) {
@@ -162,7 +162,8 @@ impl Detector for Models {
                 .try_fold(0_u64, u64::checked_add)
                 .is_some()
         });
-        let Some((u, (input, output))) = readable else {
+        let Some((model, (u, (input, output)))) = model.and_then(Value::as_str).zip(readable)
+        else {
             self.unreadable(id, r.in_window);
             return;
         };
@@ -240,7 +241,7 @@ fn cents(usd: f64) -> f64 {
 fn notes(opts: &Opts) -> Vec<String> {
     let price = input_price(opts);
     vec![
-        format!("Each reply counts once (the first record of its message.id); synthetic replies are left out, and a reply none of whose records has token counts that are non-negative integers summing within 64 bits counts as skipped (replies skipped) and adds to no total, so with any skipped the totals are a floor. Effort is the reasoning effort the reply records and agent type the subagent type Claude Code records (attributionAgent); {NONE} marks a reply that records neither."),
+        format!("Each reply counts once (the first record of its message.id); synthetic replies are left out, and a reply none of whose records has a model name and token counts that are non-negative integers summing within 64 bits counts as skipped (replies skipped) and adds to no total, so with any skipped the totals are a floor. Effort is the reasoning effort the reply records and agent type the subagent type Claude Code records (attributionAgent); {NONE} marks a reply that records neither."),
         format!("Input usd est is an input-side estimate, not spend: uncached input at the input price, cache writes at 1.25 times it (5-minute) or 2 times (1-hour), as the reply records, and cache reads at the model's cache read price, 0.025, 0.05 or 0.1 times the input price as Anthropic's pricing page gave on 16 November 2026, where the input price is {price}. Output tokens are counted but not priced, as shaphan reads input prices only; output costs several times as much as input per token. Input usd share is each row's part of all rows' input usd est. Unpriced replies are those of a model without a price. An illustration, not a bill."),
         "A subagent session is on its parent's top model when every reply of it in the window is on a model whose input price is at least the highest of its parent session's replies in the window; below when one is cheaper; indeterminate when the parent session (the main session whose id its records carry) was not read or had no priced reply in the window, or the subagent had an unpriced reply. Prices compared are the bundled ones, or the price file's with --prices, whatever --usd-per-mtok gives; on top input usd est sums those sessions' input usd est.".to_owned(),
     ]
@@ -254,9 +255,11 @@ impl Models {
             .is_some_and(|(bad, _)| bad.is_some() && bad.as_deref() == id)
     }
 
-    /// Counts the pending unreadable reply, if any, as skipped when it is in the window.
+    /// Counts the pending unreadable reply, if any, as skipped when it is in the window,
+    /// so that any later block of it is ignored.
     fn skip(&mut self) {
-        if let Some((_, in_window)) = self.unreadable.take() {
+        if let Some((id, in_window)) = self.unreadable.take() {
+            self.ids.extend(id);
             self.skipped += u64::from(in_window);
         }
     }
@@ -425,5 +428,25 @@ mod tests {
             skipped(&[("a", &bad, true), ("b", &good, true), ("c", &bad, false)]),
             (1, 1)
         );
+    }
+
+    #[test]
+    fn a_reply_without_a_string_model_is_skipped_and_a_skipped_reply_stays_skipped() {
+        let (good, bad) = (json!(10), json!("x"));
+        let mut no_model = reply("b", &good);
+        no_model["message"]
+            .as_object_mut()
+            .expect("message")
+            .remove("model");
+        let m = run(&[(reply("a", &good), true), (no_model, true)]);
+        assert_eq!(m.skipped, 1);
+        // a's later block, after b superseded it, is not counted as well.
+        let m = run(&[
+            (reply("a", &bad), true),
+            (reply("b", &bad), true),
+            (reply("a", &good), true),
+        ]);
+        assert_eq!(m.skipped, 2);
+        assert!(m.groups.is_empty());
     }
 }
