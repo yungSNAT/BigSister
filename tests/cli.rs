@@ -2600,6 +2600,43 @@ fn pi_sessions_feed_pipes_polls_and_rereads_once_despite_a_fork() {
     assert_eq!(roots[0]["lines_skipped"], json!(0));
 }
 
+/// pi's command results by verb class leave a blank command out, as the note says, whilst
+/// the commands total counts it.
+#[test]
+fn pi_command_results_count_each_non_blank_command_by_verb_class() {
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pi-blank");
+    let (code, stdout, stderr) = run(&[
+        "polls",
+        "--agent",
+        "pi",
+        "--pi-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let totals = find(rows(&doc, "polls", 0), &[("agent", json!("pi"))]);
+    assert_eq!(totals["commands"], json!(3));
+    let results = rows(&doc, "polls", 2);
+    assert_eq!(results.len(), 2, "{results:?}");
+    for (verb, expected) in [("git", [1, 1, 10]), ("cargo", [1, 1, 7])] {
+        let r = find(results, &[("agent", json!("pi")), ("verb", json!(verb))]);
+        assert_eq!(
+            [
+                r["commands"].clone(),
+                r["results"].clone(),
+                r["result_chars"].clone()
+            ],
+            expected.map(|n| json!(n)),
+            "{verb}"
+        );
+    }
+    let notes = doc["detectors"]["polls"]["notes"].to_string();
+    assert!(notes.contains("count every non-blank command"), "{notes}");
+}
+
 #[test]
 fn pi_tool_calls_count_once_despite_a_fork() {
     let doc = pi_report(&[]);
