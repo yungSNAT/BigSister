@@ -3141,22 +3141,22 @@ fn a_date_is_midnight_in_the_local_zone() {
     );
 }
 
-/// Havana's clocks go back from 01:00 to midnight on 3 November 2024, so that midnight
-/// came twice: the first is taken. On 10 March 2024 they went forward from midnight to
+/// Havana's clocks went back from 01:00 to midnight on 4 November 2018, so that midnight
+/// came twice: the first is taken. On 11 March 2018 they went forward from midnight to
 /// 01:00, so that midnight never came, and the date is refused.
 #[cfg(unix)]
 #[test]
 fn a_repeated_local_midnight_takes_the_first_and_a_skipped_one_is_refused() {
     let havana: &[(&str, &Path)] = &[("TZ", Path::new("America/Havana"))];
     assert_eq!(
-        since_json("2024-11-03", havana),
-        json!("2024-11-03T04:00:00+00:00")
+        since_json("2018-11-04", havana),
+        json!("2018-11-04T04:00:00+00:00")
     );
-    let (code, stdout, stderr) = since_run("2024-03-10", true, havana);
+    let (code, stdout, stderr) = since_run("2018-03-11", true, havana);
     assert_eq!(code, 1, "stdout: {stdout}");
     assert!(
         stderr.contains(
-            "--since: expected 7d, 24h, YYYY-MM-DD or an RFC 3339 time, got '2024-03-10'"
+            "--since: expected 7d, 24h, YYYY-MM-DD or an RFC 3339 time, got '2018-03-11'"
         ),
         "{stderr}"
     );
