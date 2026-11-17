@@ -45,6 +45,8 @@ fuzz_target!(|data: &[u8]| {
         limit: 20,
         paths: true,
         home: None,
+        usd_per_mtok: None,
+        prices_file: None,
     };
     let sections: Vec<_> = dets.iter().map(|d| d.section(&opts)).collect();
     let meta = Meta {

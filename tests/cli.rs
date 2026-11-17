@@ -198,6 +198,120 @@ fn startup_alone_stops_reading_at_the_first_reply() {
     assert_eq!(report("all", &[])["roots"][0]["lines_skipped"], 1);
 }
 
+const CACHE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cache");
+
+/// The cache section over the cache fixture, with `extra` options.
+fn cache_report(extra: &[&str]) -> Value {
+    let mut args = vec![
+        "cache",
+        "--claude-root",
+        CACHE,
+        "--agent",
+        "claude",
+        "--since",
+        SINCE,
+        "--json",
+    ];
+    args.extend_from_slice(extra);
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+#[test]
+fn cache_splits_writes_into_new_context_and_rebuilds_by_cause() {
+    let doc = cache_report(&[]);
+    let r = rows(&doc, "cache", 0);
+    let row = |scope: &str, cause: &str| {
+        let row = find(r, &[("scope", json!(scope)), ("cause", json!(cause))]);
+        (
+            row["replies"].as_u64().unwrap(),
+            row["write_tokens"].as_u64().unwrap(),
+            row["write_usd_est"].as_f64().unwrap(),
+            row["unpriced_tokens"].as_u64().unwrap(),
+        )
+    };
+    // A second record of the first reply adds nothing; 5-minute writes cost 1.25 times
+    // the input price (Opus 5.5, US$4), 1-hour writes 2 times (Sonnet 5.5, US$2).
+    assert_eq!(row("main", "first reply"), (1, 1_000_000, 5.0, 0));
+    // Warm replies, the new part of each rebuild, after a compaction, and the new part
+    // of the second reply of a session whose first is before the window.
+    assert_eq!(row("main", "new context"), (7, 1_110_000, 4.94, 0));
+    // 9 minutes past a 5-minute write, 3 hours past a 1-hour write, and 2 days after a
+    // reply before the window.
+    assert_eq!(
+        row("main", "rebuilt after idle gap"),
+        (3, 2_500_000, 11.7, 0)
+    );
+    assert_eq!(
+        row("main", "rebuilt after model switch"),
+        (1, 1_600_000, 4.0, 0)
+    );
+    // 28 minutes after a 1-hour write is inside the lifetime.
+    assert_eq!(row("main", "rebuilt otherwise"), (1, 1_750_000, 7.0, 0));
+    assert_eq!(row("subagent", "first reply"), (1, 400_000, 2.0, 0));
+    // A model without a price leaves its rebuild unpriced.
+    assert_eq!(
+        row("subagent", "rebuilt after idle gap"),
+        (1, 400_000, 0.0, 400_000)
+    );
+    assert_eq!(r.len(), 7);
+    let s = &doc["detectors"]["cache"]["summary"];
+    assert_eq!(s["sessions"], 3);
+    assert_eq!(s["write_tokens"], 8_760_000);
+    assert_eq!(s["idle_rebuilds"], 4);
+    assert_eq!(s["sessions_with_idle_rebuilds"], 3);
+    assert_eq!(s["idle_rebuild_share"], 0.33);
+    assert_eq!(s["replies_skipped"], 1);
+    assert_eq!(s["replies_without_split"], 2);
+}
+
+#[test]
+fn cache_dollars_take_the_given_rate_times_the_write_multiplier() {
+    let doc = cache_report(&["--usd-per-mtok", "10"]);
+    let idle = find(
+        rows(&doc, "cache", 0),
+        &[
+            ("scope", json!("main")),
+            ("cause", json!("rebuilt after idle gap")),
+        ],
+    );
+    // 1,100,000 and 600,000 at 1.25, 800,000 at 2: 3,725,000 at US$10 a million.
+    assert_eq!(idle["write_usd_est"], 37.25);
+    let sub = find(
+        rows(&doc, "cache", 0),
+        &[
+            ("scope", json!("subagent")),
+            ("cause", json!("rebuilt after idle gap")),
+        ],
+    );
+    assert_eq!(
+        (sub["write_usd_est"].clone(), sub["unpriced_tokens"].clone()),
+        (json!(5.0), json!(0))
+    );
+    let notes = doc["detectors"]["cache"]["notes"].to_string();
+    assert!(notes.contains("--usd-per-mtok"), "{notes}");
+}
+
+#[test]
+fn cache_dollars_take_a_price_file_and_name_it() {
+    // Opus 5.5 at US$8 instead of US$4 doubles the first reply's 5-minute writes.
+    let file = price_file(
+        "prices-cache.json",
+        r#"{"claude-opus-5-5": {"input_cost_per_token": 8e-06}}"#,
+    );
+    let doc = cache_report(&["--prices", file.to_str().expect("UTF-8 path")]);
+    let first = find(
+        rows(&doc, "cache", 0),
+        &[("scope", json!("main")), ("cause", json!("first reply"))],
+    );
+    assert_eq!(first["write_usd_est"], 10.0);
+    let notes = doc["detectors"]["cache"]["notes"].to_string();
+    assert!(notes.contains("prices-cache.json"), "{notes}");
+    assert!(!notes.contains("bundled"), "{notes}");
+}
+
 #[test]
 fn schemas_report_idle_groups_first_and_skip_deferred_tools() {
     let doc = report("schemas", &[]);
@@ -708,7 +822,7 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[0]["lines_skipped"], 1);
     assert_eq!(roots[1]["files"], 2);
     assert_eq!(doc["schema_version"], 2);
-    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(7));
+    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(8));
 }
 
 /// `shaphan all` over the Claude transcripts in a fixture folder, which must hold 2.
@@ -1012,6 +1126,7 @@ fn output_never_contains_transcript_content() {
     assert_no_sentinel(RESULTS, CODEX_WRAPPED);
     assert_no_sentinel(KINDS, CODEX);
     assert_no_sentinel(SKILLS, CODEX);
+    assert_no_sentinel(CACHE, CODEX);
 }
 
 /// One main session with the attachment kinds, hook errors and pipe result the main
@@ -1152,7 +1267,7 @@ fn text_output_has_a_section_per_detector() {
     let (code, stdout, _) = run(&fixture_args("all", &["--limit", "1"]));
     assert_eq!(code, 0);
     for name in [
-        "startup", "schemas", "pipes", "polls", "rereads", "tools", "hooks",
+        "startup", "schemas", "pipes", "polls", "rereads", "tools", "cache", "hooks",
     ] {
         assert!(stdout.contains(&format!("== {name}: ")), "{name}");
     }
