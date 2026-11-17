@@ -110,7 +110,7 @@ pub struct Cache {
     writes: BTreeMap<(&'static str, Cause), Writes>,
     sessions: BTreeMap<&'static str, u64>,
     sessions_idle: u64,
-    /// Replies in the window none of whose records has readable usage.
+    /// Replies in the window none of whose records has a model name and readable usage.
     skipped: u64,
 }
 
@@ -137,9 +137,15 @@ fn count(usage: &Value, key: &str) -> Option<u64> {
 }
 
 fn usage(reply: &Value) -> Option<Usage> {
-    let u = reply.pointer("/message/usage")?;
+    let u = reply.pointer("/message/usage").filter(|u| u.is_object())?;
     let write = count(u, "cache_creation_input_tokens")?;
-    let split = u.get("cache_creation").unwrap_or(&Value::Null);
+    // A missing or null split records none; any other value that is not an object is
+    // unreadable.
+    let split = match u.get("cache_creation") {
+        None => &Value::Null,
+        Some(s) if s.is_null() || s.is_object() => s,
+        Some(_) => return None,
+    };
     let five = count(split, "ephemeral_5m_input_tokens")?;
     let hour = count(split, "ephemeral_1h_input_tokens")?;
     let both = five + hour;
@@ -204,16 +210,16 @@ impl Detector for Cache {
             self.fresh = true;
             return;
         }
-        let model = v.pointer("/message/model").and_then(Value::as_str);
-        let Some(model) = model.filter(|m| r.kind() == "assistant" && *m != "<synthetic>") else {
+        let model = v.pointer("/message/model");
+        if r.kind() != "assistant" || model.and_then(Value::as_str) == Some("<synthetic>") {
             return;
-        };
+        }
         // Claude Code writes a record for each block of a reply, each with its usage.
         let id = v.pointer("/message/id").and_then(Value::as_str);
         if id.is_some_and(|id| self.ids.contains(id)) {
             return;
         }
-        let Some(u) = usage(v) else {
+        let (Some(model), Some(u)) = (model.and_then(Value::as_str), usage(v)) else {
             self.unreadable(id, r.in_window);
             return;
         };
@@ -304,7 +310,7 @@ pub(super) fn input_price(opts: &Opts) -> String {
 fn notes(opts: &Opts) -> Vec<String> {
     let price = input_price(opts);
     vec![
-        "Each reply's cache writes (cache_creation_input_tokens) are measured. Rebuilt tokens are an estimate of what was cached again: of the tokens the previous reply in the session left cached (its cache reads and writes), those this reply did not read, up to what it wrote. They assume each reply extends the previous one's prompt, as Claude Code's replies in one file do; the rest of a reply's writes are new context, and a reply after a compaction, or after a reply none of whose records has readable usage, writes new context only. Such replies count as skipped (replies skipped) and add to no total, so with any skipped the totals are a floor.".to_owned(),
+        "Each reply's cache writes (cache_creation_input_tokens) are measured. Rebuilt tokens are an estimate of what was cached again: of the tokens the previous reply in the session left cached (its cache reads and writes), those this reply did not read, up to what it wrote. They assume each reply extends the previous one's prompt, as Claude Code's replies in one file do; the rest of a reply's writes are new context, and a reply after a compaction, or after a reply none of whose records has a model name and readable usage, writes new context only. Such replies count as skipped (replies skipped) and add to no total, so with any skipped the totals are a floor.".to_owned(),
         "A rebuild follows an idle gap when the time between the 2 replies exceeds the cache's lifetime: 1 hour once a reply of the session has written 1-hour cache, otherwise 5 minutes. Otherwise it follows a model switch when the model changed, and is rebuilt otherwise when neither holds, as after a rewind or a changed prefix.".to_owned(),
         format!("Dollars (write usd est) estimate what the writes cost, not what could have been saved: the tokens at the cache write price, 1.25 times the input price for 5-minute writes and 2 times for 1-hour writes, split as the reply records (1.25 times when it does not), where the input price is {price}. A warm cache would have read rebuilt tokens at a fraction of the input price: a tenth or less, by model. Unpriced tokens are those of a model without a price. An illustration, not a bill."),
     ]
@@ -352,11 +358,12 @@ impl Cache {
     }
 
     /// Counts the pending unreadable reply, if any, as skipped when it is in the window,
-    /// and says whether there was one.
+    /// so that any later block of it is ignored, and says whether there was one.
     fn skip(&mut self) -> bool {
-        let Some((_, in_window)) = self.unreadable.take() else {
+        let Some((id, in_window)) = self.unreadable.take() else {
             return false;
         };
+        self.ids.extend(id);
         self.skipped += u64::from(in_window);
         true
     }
@@ -488,26 +495,24 @@ mod tests {
         assert!(cause("2026-11-08T01:05:00.000Z") == Cause::Other);
     }
 
-    /// The cache tokens by cause after `replies` of one main session.
-    /// The detector after `records` of one main session, all in the window.
-    fn run(records: &[Value]) -> Cache {
+    /// The detector after `records` of one main session, each in the window or not.
+    fn run_with(records: &[(&Value, bool)]) -> Cache {
         let s = Session {
             agent: Agent::Claude,
             subagent: false,
         };
         let mut c = Cache::default();
         c.begin(&s);
-        for v in records {
-            c.record(
-                &s,
-                &Record {
-                    value: v,
-                    in_window: true,
-                },
-            );
+        for &(value, in_window) in records {
+            c.record(&s, &Record { value, in_window });
         }
         c.end(&s);
         c
+    }
+
+    /// The detector after `records` of one main session, all in the window.
+    fn run(records: &[Value]) -> Cache {
+        run_with(&records.iter().map(|v| (v, true)).collect::<Vec<_>>())
     }
 
     /// The cache tokens by cause after `records` of one main session.
@@ -531,7 +536,44 @@ mod tests {
         assert_eq!(skipped(&[a.clone(), b_bad.clone(), b_good, c.clone()]), 0);
         assert_eq!(skipped(&[a.clone(), b_bad.clone(), c_bad, c]), 1);
         // Still unreadable when the session ends.
-        assert_eq!(skipped(&[a, b_bad]), 1);
+        assert_eq!(skipped(&[a.clone(), b_bad.clone()]), 1);
+        // Outside the window, a skipped reply is not counted.
+        let in_window = |bad: bool| run_with(&[(&b_bad, bad), (&a, true)]).skipped;
+        assert_eq!((in_window(false), in_window(true)), (0, 1));
+    }
+
+    #[test]
+    fn a_reply_without_a_string_model_is_skipped_and_breaks_the_chain() {
+        let write = json!({"cache_creation_input_tokens": 100});
+        let a = reply("a", "2026-11-08T01:00:00Z", &write);
+        let c = reply("c", "2026-11-08T01:01:00Z", &write);
+        for model in [None, Some(json!(null)), Some(json!(7))] {
+            let mut b = reply("b", "2026-11-08T01:00:30Z", &write);
+            let message = b["message"].as_object_mut().expect("message");
+            match model.clone() {
+                Some(m) => message.insert("model".to_owned(), m),
+                None => message.remove("model"),
+            };
+            let records = [a.clone(), b, c.clone()];
+            assert_eq!(run(&records).skipped, 1, "{model:?}");
+            // c's writes are new context, not a rebuild of what a cached.
+            assert_eq!(causes(&records), [Some(100), Some(100), None], "{model:?}");
+        }
+    }
+
+    #[test]
+    fn a_skipped_reply_s_later_blocks_are_not_counted() {
+        let bad = json!({"cache_creation_input_tokens": "x"});
+        let a_bad = reply("a", "2026-11-08T01:00:00Z", &bad);
+        let b_bad = reply("b", "2026-11-08T01:00:10Z", &bad);
+        let a = reply(
+            "a",
+            "2026-11-08T01:00:20Z",
+            &json!({"cache_creation_input_tokens": 100}),
+        );
+        let c = run(&[a_bad, b_bad, a]);
+        assert_eq!(c.skipped, 2);
+        assert!(c.writes.is_empty());
     }
 
     #[test]
@@ -605,6 +647,21 @@ mod tests {
         };
         assert_eq!(usage(&writes(1 << 40)).map(|u| u.write), Some(1 << 40));
         assert!(usage(&writes((1 << 40) + 1)).is_none());
+    }
+
+    #[test]
+    fn usage_or_a_split_that_is_not_an_object_is_unreadable() {
+        let at = "2026-11-08T01:00:00Z";
+        for bad in [json!(null), json!(7), json!([1])] {
+            assert!(usage(&reply("a", at, &bad)).is_none(), "usage {bad}");
+            let split = json!({"cache_creation_input_tokens": 100, "cache_creation": bad});
+            let unread = bad.is_null().then_some(100);
+            assert_eq!(
+                usage(&reply("a", at, &split)).map(|u| u.write),
+                unread,
+                "split {bad}"
+            );
+        }
     }
 
     #[test]
