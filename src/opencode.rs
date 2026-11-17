@@ -19,14 +19,11 @@
 //! without its state, counts as a skipped line.
 
 use std::collections::HashMap;
-use std::fs::File;
-use std::io::Read;
 use std::path::Path;
-use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-use rusqlite::{Connection, MAIN_DB, params};
+use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Map, Value, json};
 
 /// One OpenCode session, as Claude Code records.
@@ -98,188 +95,35 @@ fn sessions(conn: &Connection, since: DateTime<Utc>) -> rusqlite::Result<Vec<Ses
     Ok(out)
 }
 
-/// What the database file and the files beside it were before it was copied.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Stamp {
-    len: u64,
-    modified: SystemTime,
-    /// The write-ahead log's length, if there is one.
-    wal: Option<u64>,
-    shm: bool,
-}
-
-impl Stamp {
-    fn of(db: &Path) -> Option<Self> {
-        let m = std::fs::metadata(db).ok()?;
-        let beside = |suffix: &str| {
-            let mut name = db.as_os_str().to_owned();
-            name.push(suffix);
-            std::fs::metadata(Path::new(&name))
-        };
-        Some(Self {
-            len: m.len(),
-            modified: m.modified().ok()?,
-            wal: beside("-wal").ok().map(|w| w.len()),
-            shm: beside("-shm").is_ok(),
-        })
-    }
-}
-
-/// Copies database `db` into memory and opens the copy read-only, with reads of tables
-/// other than `TABLES` refused.
-///
-/// The copy is taken whilst no other program can write to the file (`Guard`), so it is
-/// the database as it stood, and the queries then read the copy, which nothing else
-/// changes. No file beside the database is written or created. Whilst OpenCode runs, its
-/// newest records sit in the write-ahead log (`-wal`), which only a connection sharing
-/// the log's index (`-shm`) can read, and such a connection can create the index; so a
-/// log holding records, or OpenCode holding the database open, fails, and the database
-/// is read once OpenCode has stopped. The copy also fails if the log or the index
-/// appears, changes or goes whilst it is taken.
-///
-/// shortcut: the whole database is held in memory, twice whilst the copy is opened
-/// (OpenCode's on this machine is 1.1 MB, November 2026). Copying it a page at a time
-/// would be the upgrade.
+/// Opens database `db` with SQLite's own read-only reader, which shares the log's
+/// index read-only (`readonly_shm`), and begins one read transaction, with reads of
+/// tables other than `TABLES` refused.
 fn open(db: &Path) -> Result<Connection, String> {
     open_with(db, || {})
 }
 
-/// `open`, running `during` whilst the copy is guarded, as a test's other writer does.
+/// `open`, running `during` once the read transaction has begun.
 fn open_with(db: &Path, during: impl FnOnce()) -> Result<Connection, String> {
-    let stamp = Stamp::of(db).ok_or("the database's size and time cannot be read")?;
-    if stamp.wal.is_some_and(|len| len > 0) {
-        return Err("OpenCode's write-ahead log holds records, so OpenCode is running or did not stop cleanly".to_owned());
-    }
-    let mut guard = Guard::take(db)?;
+    let path = db.to_str().ok_or("the database's path is not UTF-8")?;
+    let path = path
+        .replace('%', "%25")
+        .replace('#', "%23")
+        .replace('?', "%3f");
+    let conn = Connection::open_with_flags(
+        format!("file:{path}?mode=ro&readonly_shm=1"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+    let _: i64 = conn
+        .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
     during();
-    let mut copy = Vec::new();
-    guard
-        .file
-        .read_to_end(&mut copy)
-        .map_err(|e| e.to_string())?;
-    drop(guard);
-    if Stamp::of(db) != Some(stamp) {
-        return Err("the database changed whilst it was copied".to_owned());
-    }
-    // Bytes 18 and 19 of the header say whether the database uses a write-ahead log
-    // (2) or not (1). A copy in memory cannot use one and this log is empty, so the
-    // copy says not.
-    if let Some(versions) = copy.get_mut(18..20) {
-        versions.fill(1);
-    }
-    let mut conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
-    let len = copy.len();
-    conn.deserialize_read_exact(MAIN_DB, copy.as_slice(), len, true)
-        .map_err(|e| e.to_string())?;
     conn.authorizer(Some(only_tables))
         .map_err(|e| e.to_string())?;
     Ok(conn)
-}
-
-/// The database file, open for reading whilst no other program can write to it.
-struct Guard {
-    file: File,
-    /// The log's index, open so that the locks on it hold.
-    #[cfg(unix)]
-    _index: Option<File>,
-}
-
-impl Guard {
-    /// On Windows, the file is opened sharing it only for reading: the open fails whilst
-    /// another program has it open for writing, as OpenCode does whilst it runs, and no
-    /// program can open it for writing until the guard is dropped.
-    #[cfg(windows)]
-    fn take(db: &Path) -> Result<Self, String> {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_SHARE_READ: u32 = 1;
-        const ERROR_SHARING_VIOLATION: i32 = 32;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .share_mode(FILE_SHARE_READ)
-            .open(db)
-            .map_err(|e| {
-                if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
-                    "another program, such as OpenCode, has the database open for writing"
-                        .to_owned()
-                } else {
-                    e.to_string()
-                }
-            })?;
-        Ok(Self { file })
-    }
-
-    /// On Unix, the guard takes the locks of SQLite's own protocol that stop a writer
-    /// (`sqlite3.c` in SQLite 3.54.1): a read lock on the database's shared bytes, which
-    /// a writer outside the log, and a connection removing the log as it closes, must
-    /// lock exclusively; and, when the log's index exists, read locks on its write and
-    /// checkpoint bytes, which a writer to the log and a checkpoint must lock
-    /// exclusively, and on its deadman byte. It fails whilst another program holds any of
-    /// those exclusively, or holds the deadman byte at all, as every connection to the
-    /// database does whilst it is open. A program that opens the database during the
-    /// copy can write only to a new log, and cannot remove the log or its index
-    /// afterwards, so the copy fails. Locks are released when the files close, so the
-    /// files are not opened again until then.
-    #[cfg(unix)]
-    fn take(db: &Path) -> Result<Self, String> {
-        const SHARED_FIRST: i64 = 0x4000_0000 + 2;
-        const SHARED_SIZE: i64 = 510;
-        const WRITE_AND_CHECKPOINT: i64 = 120;
-        const DEADMAN: i64 = 128;
-        let busy = "another program, such as OpenCode, has the database open";
-        let file = File::open(db).map_err(|e| e.to_string())?;
-        read_lock(&file, SHARED_FIRST, SHARED_SIZE).ok_or(busy)?;
-        let mut name = db.as_os_str().to_owned();
-        name.push("-shm");
-        let index = match File::open(Path::new(&name)) {
-            Ok(index) => Some(index),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => return Err(e.to_string()),
-        };
-        if let Some(index) = &index {
-            read_lock(index, WRITE_AND_CHECKPOINT, 2).ok_or(busy)?;
-            read_lock(index, DEADMAN, 1).ok_or(busy)?;
-            if held_elsewhere(index, DEADMAN).ok_or(busy)? {
-                return Err(busy.to_owned());
-            }
-        }
-        Ok(Self {
-            file,
-            _index: index,
-        })
-    }
-}
-
-/// A POSIX lock description of `kind` on `len` bytes of a file from `start`.
-#[cfg(unix)]
-fn lock(kind: libc::c_short, start: i64, len: i64) -> libc::flock {
-    // SAFETY: `flock` is a plain C struct, for which all bytes zero is a valid value.
-    let mut l: libc::flock = unsafe { std::mem::zeroed() };
-    l.l_type = kind;
-    l.l_whence = libc::SEEK_SET as libc::c_short;
-    l.l_start = start;
-    l.l_len = len;
-    l
-}
-
-/// Takes a read lock on `len` bytes of `file` from `start`, or `None` when another
-/// program holds a conflicting lock or the lock cannot be taken.
-#[cfg(unix)]
-fn read_lock(file: &File, start: i64, len: i64) -> Option<()> {
-    use std::os::fd::AsRawFd;
-    let l = lock(libc::F_RDLCK as libc::c_short, start, len);
-    // SAFETY: the descriptor is open for the call and `l` is a valid `flock`.
-    (unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &raw const l) } == 0).then_some(())
-}
-
-/// Whether another program holds any lock on byte `at` of `file`, or `None` when that
-/// cannot be told.
-#[cfg(unix)]
-fn held_elsewhere(file: &File, at: i64) -> Option<bool> {
-    use std::os::fd::AsRawFd;
-    let mut l = lock(libc::F_WRLCK as libc::c_short, at, 1);
-    // SAFETY: the descriptor is open for the call and `l` is a valid `flock` to fill.
-    let told = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &raw mut l) } == 0;
-    told.then_some(l.l_type != libc::F_UNLCK as libc::c_short)
 }
 
 /// Allows a query to read only `TABLES`.
@@ -488,11 +332,12 @@ fn usage(tokens: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::MAIN_DB;
     use std::collections::BTreeSet;
     use std::io::{BufRead, BufReader, Write};
     use std::path::PathBuf;
     use std::process::{Child, ChildStdout, Command, Stdio};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     fn part(id: &str, data: &Value) -> Part {
         Part::new(id.to_owned(), 0, &data.to_string())
