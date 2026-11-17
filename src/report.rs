@@ -208,8 +208,10 @@ pub fn text(meta: &Meta<'_>, sections: &[Section]) -> String {
             r.compressed
         );
         for (reason, n) in &r.unreadable_reasons {
-            let count = if *n == 1 { String::new() } else { format!(" ({n})") };
-            let _ = writeln!(out, "  unreadable{count}: {reason}");
+            let _ = match n {
+                1 => writeln!(out, "  unreadable: {reason}"),
+                n => writeln!(out, "  unreadable ({n}): {reason}"),
+            };
         }
     }
     for s in meta.skipped_roots {

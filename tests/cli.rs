@@ -1574,7 +1574,9 @@ fn each_reason_a_transcript_is_unreadable_prints_with_its_count() {
         json!([{"reason": opened, "count": 2}, {"reason": read, "count": 1}])
     );
     assert!(
-        text.contains(&format!("\n  unreadable (2): {opened}\n  unreadable: {read}\n")),
+        text.contains(&format!(
+            "\n  unreadable (2): {opened}\n  unreadable: {read}\n"
+        )),
         "{text}"
     );
 }
@@ -1600,7 +1602,10 @@ fn a_folder_that_cannot_be_listed_prints_its_reason() {
         doc["roots"][0]["unreadable_reasons"],
         json!([{"reason": reason, "count": 1}])
     );
-    assert!(text.contains(&format!("\n  unreadable: {reason}\n")), "{text}");
+    assert!(
+        text.contains(&format!("\n  unreadable: {reason}\n")),
+        "{text}"
+    );
 }
 
 #[test]
