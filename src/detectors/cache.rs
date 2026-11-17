@@ -112,6 +112,8 @@ pub struct Cache {
     sessions_idle: u64,
     /// Replies in the window none of whose records reads as a [`Reply`].
     skipped: u64,
+    /// Replies counted in the window whose usage records no split by lifetime.
+    without_split: u64,
 }
 
 /// A reply's cache usage.
@@ -121,10 +123,12 @@ struct Usage {
     /// The write price multiplier, weighted by the tokens written at each lifetime.
     multiplier: f64,
     one_hour: bool,
+    /// Whether the reply records its split by lifetime.
+    split: bool,
 }
 
-/// A Claude reply as this section reads it. Every field is required: a reply whose record
-/// lacks one, or holds null or another type, is skipped.
+/// A Claude reply as this section reads it. Every field is required, but for the split
+/// by lifetime: a reply whose record lacks one, or holds null or another type, is skipped.
 struct Reply<'a> {
     /// `message.id`: Claude Code writes a record for each block of a reply.
     id: &'a str,
@@ -134,7 +138,9 @@ struct Reply<'a> {
     at: DateTime<Utc>,
     /// `message.usage`: `cache_read_input_tokens`, `cache_creation_input_tokens`, and
     /// `cache_creation`'s `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`,
-    /// each an integer from 0 to [`MAX_COUNT`].
+    /// each an integer from 0 to [`MAX_COUNT`]. A usage without the `cache_creation` key,
+    /// as an API response may lack it, has no split, and its writes are priced at the
+    /// 5-minute rate, the lower.
     usage: Usage,
 }
 
@@ -190,9 +196,15 @@ fn count(v: &Value) -> Option<u64> {
 fn read_reply(v: &Value) -> Result<Reply<'_>, &'static str> {
     let message = field(v, "message", object)?;
     let usage = field(message, "usage", object)?;
-    let split = field(usage, "cache_creation", object)?;
-    let five = field(split, "ephemeral_5m_input_tokens", count)?;
-    let hour = field(split, "ephemeral_1h_input_tokens", count)?;
+    let split = match usage.get("cache_creation") {
+        None => None,
+        Some(_) => {
+            let split = field(usage, "cache_creation", object)?;
+            let five = field(split, "ephemeral_5m_input_tokens", count)?;
+            Some((five, field(split, "ephemeral_1h_input_tokens", count)?))
+        }
+    };
+    let (five, hour) = split.unwrap_or((0, 0));
     let both = five + hour;
     #[expect(
         clippy::cast_precision_loss,
@@ -212,6 +224,7 @@ fn read_reply(v: &Value) -> Result<Reply<'_>, &'static str> {
             write: field(usage, "cache_creation_input_tokens", count)?,
             multiplier,
             one_hour: hour > 0,
+            split: split.is_some(),
         },
     })
 }
@@ -276,6 +289,7 @@ impl Detector for Cache {
         let u = &reply.usage;
         if r.in_window {
             self.counted = true;
+            self.without_split += u64::from(!u.split);
             let scope = s.scope();
             if cause == Cause::First {
                 self.add(scope, Cause::First, u.write, u, price);
@@ -327,6 +341,10 @@ impl Detector for Cache {
                 ),
                 ("idle_rebuild_share".to_owned(), ratio(idle_tokens, total)),
                 ("replies_skipped".to_owned(), json!(self.skipped)),
+                (
+                    "replies_without_split".to_owned(),
+                    json!(self.without_split),
+                ),
             ],
             tables: vec![self.table(opts)],
             notes: notes(opts),
@@ -357,7 +375,7 @@ fn notes(opts: &Opts) -> Vec<String> {
     vec![
         "Each reply's cache writes (cache_creation_input_tokens) are measured. Rebuilt tokens are an estimate of what was cached again: of the tokens the previous reply in the session left cached (its cache reads and writes), those this reply did not read, up to what it wrote. They assume each reply extends the previous one's prompt, as Claude Code's replies in one file do; the rest of a reply's writes are new context, and a reply after a compaction, or after a reply none of whose records holds every field this section reads, writes new context only. Such replies count as skipped (replies skipped) and add to no total, so with any skipped the totals are a floor.".to_owned(),
         "A rebuild follows an idle gap when the time between the 2 replies exceeds the cache's lifetime: 1 hour once a reply of the session has written 1-hour cache, otherwise 5 minutes. Otherwise it follows a model switch when the model changed, and is rebuilt otherwise when neither holds, as after a rewind or a changed prefix.".to_owned(),
-        format!("Dollars (write usd est) estimate what the writes cost, not what could have been saved: the tokens at the cache write price, 1.25 times the input price for 5-minute writes and 2 times for 1-hour writes, split as the reply records (1.25 times when its split is 0 at both lifetimes), where the input price is {price}. A warm cache would have read rebuilt tokens at a fraction of the input price: a tenth or less, by model. Unpriced tokens are those of a model without a price. An illustration, not a bill."),
+        format!("Dollars (write usd est) estimate what the writes cost, not what could have been saved: the tokens at the cache write price, 1.25 times the input price for 5-minute writes and 2 times for 1-hour writes, split as the reply records (1.25 times when its split is 0 at both lifetimes, or when it records no split at all, as replies without split do: their 1-hour writes, if any, are priced as 5-minute ones, so dollars stay a floor), where the input price is {price}. A warm cache would have read rebuilt tokens at a fraction of the input price: a tenth or less, by model. Unpriced tokens are those of a model without a price. An illustration, not a bill."),
     ]
 }
 
@@ -537,6 +555,7 @@ mod tests {
                 write,
                 multiplier: WRITE_5M,
                 one_hour: false,
+                split: true,
             },
         }
     }
@@ -623,20 +642,23 @@ mod tests {
         }
     }
 
-    /// Each field a reply must have, as its path from the record, and a value of another
-    /// type.
-    fn fields() -> [(&'static [&'static str], Value); 10] {
-        [
-            (&["message"], json!("m")),
-            (&["message", "id"], json!(7)),
-            (&["message", "model"], json!(7)),
-            (&["message", "usage"], json!(7)),
+    /// Each field a reply reads, as its path from the record, and values of other types.
+    fn fields() -> Vec<(&'static [&'static str], Vec<Value>)> {
+        const USAGE: [&str; 3] = ["message", "usage", "cache_creation"];
+        vec![
+            (&["message"], vec![json!("m")]),
+            (&["message", "id"], vec![json!(7)]),
+            (&["message", "model"], vec![json!(7)]),
+            (&USAGE[..2], vec![json!(7)]),
             (
                 &["message", "usage", "cache_creation_input_tokens"],
-                json!(-1),
+                vec![json!(-1), json!(1.0)],
             ),
-            (&["message", "usage", "cache_read_input_tokens"], json!(1.5)),
-            (&["message", "usage", "cache_creation"], json!([])),
+            (
+                &["message", "usage", "cache_read_input_tokens"],
+                vec![json!(1.5), json!(1.0)],
+            ),
+            (&USAGE, vec![json!([])]),
             (
                 &[
                     "message",
@@ -644,7 +666,7 @@ mod tests {
                     "cache_creation",
                     "ephemeral_5m_input_tokens",
                 ],
-                json!("1"),
+                vec![json!("1"), json!(1.0)],
             ),
             (
                 &[
@@ -653,9 +675,9 @@ mod tests {
                     "cache_creation",
                     "ephemeral_1h_input_tokens",
                 ],
-                json!(true),
+                vec![json!(true), json!(1.0)],
             ),
-            (&["timestamp"], json!("yesterday")),
+            (&["timestamp"], vec![json!("yesterday"), json!(7)]),
         ]
     }
 
@@ -679,7 +701,10 @@ mod tests {
         let b = reply("b", "2026-11-08T01:00:30Z", &write);
         let c = reply("c", "2026-11-08T01:01:00Z", &write);
         for (path, wrong) in fields() {
-            for value in [None, Some(&Value::Null), Some(&wrong)] {
+            // A reply without a split reads (a_reply_without_a_split_reads_at_the_5_minute_price).
+            let missing = (path != USAGE_SPLIT).then_some(None);
+            let values = missing.into_iter().chain([Some(&Value::Null)]);
+            for value in values.chain(wrong.iter().map(Some)) {
                 let records = [a.clone(), with(&b, path, value), c.clone()];
                 let case = format!("{path:?} {value:?}");
                 assert_eq!(
@@ -695,6 +720,28 @@ mod tests {
                 assert_eq!(causes(&records), [Some(100), Some(100), None], "{case}");
             }
         }
+    }
+
+    const USAGE_SPLIT: &[&str] = &["message", "usage", "cache_creation"];
+
+    #[test]
+    fn a_reply_without_a_split_reads_at_the_5_minute_price() {
+        let write = json!({"cache_creation_input_tokens": 100});
+        let a = reply("a", "2026-11-08T01:00:00Z", &write);
+        let b = with(
+            &reply("b", "2026-11-08T01:00:30Z", &write),
+            USAGE_SPLIT,
+            None,
+        );
+        let c = run(&[a, b]);
+        assert_eq!(c.skipped, 0);
+        let rebuilt = c.writes[&("main", Cause::Other)];
+        assert_eq!(rebuilt.tokens, 100);
+        assert!(
+            (rebuilt.weighted - 125.0).abs() < 1e-9,
+            "{}",
+            rebuilt.weighted
+        );
     }
 
     #[test]
