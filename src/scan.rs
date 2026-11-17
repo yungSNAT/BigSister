@@ -1,7 +1,7 @@
 //! One pass over transcript files, feeding each wanted record to the detectors.
 
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -111,9 +111,17 @@ pub struct RootStats {
     /// `*.jsonl.zst` transcripts in the window that do not start with the zstd magic
     /// number, so nothing in them was read.
     pub compressed: u64,
-    /// Why the root's database was not read, as OpenCode's reader gives it, with no
-    /// table content.
-    pub unreadable_reason: Option<String>,
+    /// Why files or folders were unreadable, each reason with how many, summing to
+    /// `unreadable`. A reason holds no file or table content.
+    pub unreadable_reasons: BTreeMap<String, u64>,
+}
+
+impl RootStats {
+    /// Counts one unreadable file or folder, and why.
+    fn count_unreadable(&mut self, reason: String) {
+        self.unreadable += 1;
+        *self.unreadable_reasons.entry(reason).or_default() += 1;
+    }
 }
 
 /// Claude's request blobs repeat message content already in the transcript.
@@ -148,7 +156,7 @@ pub fn scan(
             unreadable: 0,
             bad_lines: 0,
             compressed: 0,
-            unreadable_reason: None,
+            unreadable_reasons: BTreeMap::new(),
         };
         if *agent == Agent::OpenCode {
             scan_opencode(root, &window, dets, &active, &mut st, &mut earlier);
@@ -184,15 +192,15 @@ fn scan_files(
                 st.compressed += 1;
                 continue;
             }
-            Err(Open::Io) => {
+            Err(Open::Io(reason)) => {
                 st.files += 1;
-                st.unreadable += 1;
+                st.count_unreadable(reason);
                 continue;
             }
         };
         st.files += 1;
-        if scan_file(reader, &path, window, dets, active, st, earlier).is_err() {
-            st.unreadable += 1;
+        if let Err(e) = scan_file(reader, &path, window, dets, active, st, earlier) {
+            st.count_unreadable(read_error(&e));
         }
     }
 }
@@ -217,8 +225,7 @@ fn scan_opencode(
         Ok(sessions) => sessions,
         Err(reason) => {
             st.files += 1;
-            st.unreadable += 1;
-            st.unreadable_reason = Some(reason);
+            st.count_unreadable(reason);
             return;
         }
     };
@@ -242,14 +249,20 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            st.unreadable += 1;
-            continue;
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                st.count_unreadable(format!("a folder cannot be listed: {e}"));
+                continue;
+            }
         };
         for entry in entries {
-            let Ok((entry, ft)) = entry.and_then(|e| e.file_type().map(|ft| (e, ft))) else {
-                st.unreadable += 1;
-                continue;
+            let (entry, ft) = match entry.and_then(|e| e.file_type().map(|ft| (e, ft))) {
+                Ok(read) => read,
+                Err(e) => {
+                    st.count_unreadable(format!("a folder entry cannot be read: {e}"));
+                    continue;
+                }
             };
             let path = entry.path();
             if ft.is_dir() {
@@ -265,7 +278,7 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
                 match entry.metadata().and_then(|m| m.modified()) {
                     Ok(m) if m >= cutoff => out.push(path),
                     Ok(_) => {}
-                    Err(_) => st.unreadable += 1,
+                    Err(e) => st.count_unreadable(format!("a file's time cannot be read: {e}")),
                 }
             }
         }
@@ -307,13 +320,31 @@ enum Open {
     /// A `*.jsonl.zst` file that does not start with the zstd magic number, or is
     /// shorter than it.
     NotZstd,
-    /// A file that cannot be read, or a zstd frame header that cannot be decoded.
-    Io,
+    /// A file that cannot be opened, or a zstd frame header that cannot be decoded,
+    /// and why.
+    Io(String),
+}
+
+/// Why a zstd frame header could not be read. The decoder's message is not given, as
+/// it can quote the file's bytes.
+const ZSTD_HEADER: &str = "its zstd frame header cannot be read";
+
+/// Why a transcript failed part way. An error the system gives names no file content;
+/// any other comes from decoding a `*.jsonl.zst` one, whose message can quote the data,
+/// so it is named only as such.
+fn read_error(e: &io::Error) -> String {
+    if e.raw_os_error().is_some() {
+        format!("a file cannot be read: {e}")
+    } else {
+        "its zstd data cannot be decoded (damaged, cut short or more than one frame)".to_owned()
+    }
 }
 
 /// Opens a transcript, decoding a `*.jsonl.zst` one as it is read.
 fn open(path: &Path) -> Result<Box<dyn BufRead>, Open> {
-    let file = BufReader::new(File::open(path).map_err(|_| Open::Io)?);
+    let file = BufReader::new(
+        File::open(path).map_err(|e| Open::Io(format!("a file cannot be opened: {e}")))?,
+    );
     if path.extension().is_none_or(|x| x != "zst") {
         return Ok(Box::new(file));
     }
@@ -326,12 +357,12 @@ fn open(path: &Path) -> Result<Box<dyn BufRead>, Open> {
 fn header_error(e: FrameDecoderError) -> Open {
     use ReadFrameHeaderError::{BadMagicNumber, MagicNumberReadError};
     let FrameDecoderError::ReadFrameHeaderError(e) = e else {
-        return Open::Io;
+        return Open::Io(ZSTD_HEADER.to_owned());
     };
     match e {
         BadMagicNumber(_) => Open::NotZstd,
         MagicNumberReadError(e) if e.kind() == io::ErrorKind::UnexpectedEof => Open::NotZstd,
-        _ => Open::Io,
+        _ => Open::Io(ZSTD_HEADER.to_owned()),
     }
 }
 
@@ -787,7 +818,7 @@ mod tests {
                 unreadable: 0,
                 bad_lines: 0,
                 compressed: 0,
-                unreadable_reason: None,
+                unreadable_reasons: BTreeMap::new(),
             };
             let n = std::rc::Rc::default();
             let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count(std::rc::Rc::clone(&n)))];

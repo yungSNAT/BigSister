@@ -207,8 +207,9 @@ pub fn text(meta: &Meta<'_>, sections: &[Section]) -> String {
             r.bad_lines,
             r.compressed
         );
-        if let Some(reason) = &r.unreadable_reason {
-            let _ = writeln!(out, "  unreadable: {reason}");
+        for (reason, n) in &r.unreadable_reasons {
+            let count = if *n == 1 { String::new() } else { format!(" ({n})") };
+            let _ = writeln!(out, "  unreadable{count}: {reason}");
         }
     }
     for s in meta.skipped_roots {
@@ -296,7 +297,9 @@ pub fn json(meta: &Meta<'_>, sections: &[Section]) -> String {
             json!({"agent": r.agent.name(), "root": meta.root(r), "files": r.files,
                    "unreadable": r.unreadable, "lines_skipped": r.bad_lines,
                    "compressed_skipped": r.compressed,
-                   "unreadable_reason": r.unreadable_reason})
+                   "unreadable_reasons": r.unreadable_reasons.iter()
+                       .map(|(reason, n)| json!({"reason": reason, "count": n}))
+                       .collect::<Vec<_>>()})
         })
         .collect();
     let mut detectors = Map::new();
