@@ -1,4 +1,5 @@
-//! Commands repeated within a session, with or without a file edit in between.
+//! Commands repeated within a session, with or without a file edit in between, and
+//! what each verb class's results added to context.
 
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
@@ -54,11 +55,23 @@ impl Counts {
     }
 }
 
+/// Commands of one verb class and their results.
+#[derive(Default)]
+struct Results {
+    commands: u64,
+    results: u64,
+    chars: u64,
+    /// The part of `chars` a priced model read.
+    priced: Priced,
+}
+
 /// A run whose result has not been read yet.
 struct Awaited {
     command: String,
-    /// The verb class, when the run is a poll counted in the window.
-    poll: Option<String>,
+    /// The verb class, when the run is in the window.
+    class: Option<String>,
+    /// Whether the run is a poll counted in the window.
+    poll: bool,
     /// The run's number in the scan.
     run: u64,
 }
@@ -90,6 +103,10 @@ pub struct Polls {
     unread: Vec<(Agent, &'static str, String, u64)>,
     totals: BTreeMap<(Agent, &'static str), Counts>,
     verbs: BTreeMap<(Agent, String), Counts>,
+    /// By agent and verb class, the commands in the window and their results.
+    results: BTreeMap<(Agent, String), Results>,
+    /// Result characters of this file that no model has read yet, with their rows.
+    unread_results: Vec<(Agent, String, u64)>,
     programs: Rc<Programs>,
 }
 
@@ -111,6 +128,7 @@ impl Detector for Polls {
         self.claude.clear();
         self.latest.clear();
         self.unread.clear();
+        self.unread_results.clear();
     }
 
     fn end(&mut self, _s: &Session) {
@@ -122,6 +140,10 @@ impl Detector for Polls {
             let add = |c: &mut Counts| c.poll_priced.add(n, usd_per_mtok);
             add(self.totals.entry((agent, scope)).or_default());
             add(self.verbs.entry((agent, class)).or_default());
+        }
+        for (agent, class, n) in self.unread_results.drain(..) {
+            let r = self.results.entry((agent, class)).or_default();
+            r.priced.add(n, usd_per_mtok);
         }
     }
 
@@ -199,19 +221,63 @@ impl Detector for Polls {
                     json!(self.codex.unpaired_commands),
                 ),
             ],
-            tables: vec![totals, table],
-            notes: vec![
-                "A poll repeats a command with no file edit since its last run; a rerun follows an edit.".to_owned(),
-                "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
-                "Polls after failure repeat a command whose previous run's result was read before the repeat and marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results, for Codex only of what the exec cell printed of them. A Codex command's result is the CommandExecution record Codex wrote as it ended, tied to the command by its text; a command no record ties takes the result its exec cell printed in its place only when the cell printed one result per command and has one command, Codex wrote no such record whilst the cell ran, or it is the one command left untied and each tied command's result is printed whole in its own place; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the calls in the window whose results could not all be paired: a function_call, whose output is not read, or an exec cell that had no call id, whose call id another exec cell in the session had, whose output never came or with a command neither tied nor paired. Codex commands not paired counts those commands, whose results were not judged.".to_owned(),
-                EST_NOTE.to_owned(),
-                prices::NOTE.to_owned(),
-            ],
+            tables: vec![totals, table, self.results_table(opts)],
+            notes: notes(),
         }
     }
 }
 
+/// The section's notes.
+fn notes() -> Vec<String> {
+    vec![
+        "A poll repeats a command with no file edit since its last run; a rerun follows an edit.".to_owned(),
+        "Edits made through shell commands are not seen, so some polls may be reruns.".to_owned(),
+        "Command results count every command in the window by verb class, polled or not: results are those read, and result chars their characters of text, for Codex only what the exec cell printed of them, which is what reached the model.".to_owned(),
+        "Polls after failure repeat a command whose previous run's result was read before the repeat and marked as an error, which a hook's denial also is; poll chars are the characters of text in polls' results, for Codex only of what the exec cell printed of them. A Codex command's result is the CommandExecution record Codex wrote as it ended, tied to the command by its text; a command no record ties takes the result its exec cell printed in its place only when the cell printed one result per command and has one command, Codex wrote no such record whilst the cell ran, or it is the one command left untied and each tied command's result is printed whole in its own place; Codex marks a failure by a non-zero exit code. Codex outputs not paired counts the calls in the window whose results could not all be paired: a function_call, whose output is not read, or an exec cell that had no call id, whose call id another exec cell in the session had, whose output never came or with a command neither tied nor paired. Codex commands not paired counts those commands, whose results were not judged.".to_owned(),
+        EST_NOTE.to_owned(),
+        prices::NOTE.to_owned(),
+    ]
+}
+
 impl Polls {
+    /// The table of command results by agent and verb class, largest first.
+    fn results_table(&self, opts: &Opts) -> Table {
+        let mut results: Vec<(u64, Vec<Value>)> = self
+            .results
+            .iter()
+            .map(|((agent, verb), r)| {
+                let row = vec![
+                    json!(agent.name()),
+                    json!(verb),
+                    json!(r.commands),
+                    json!(r.results),
+                    json!(r.chars),
+                    json!(est_tokens(r.chars)),
+                    json!(r.priced.usd()),
+                    json!(r.priced.unpriced_tokens(r.chars)),
+                ];
+                (r.chars, row)
+            })
+            .collect();
+        results.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
+        let mut by_result = Table::new(
+            "Command results by verb class, largest first",
+            vec![
+                "agent",
+                "verb",
+                "commands",
+                "results",
+                "result_chars",
+                "result_tokens_est",
+                "result_usd_est",
+                "unpriced_tokens_est",
+            ],
+        );
+        by_result.rows = results.into_iter().map(|(_, r)| r).collect();
+        by_result.truncate(opts.limit);
+        by_result
+    }
+
     pub(super) fn new(programs: Rc<Programs>) -> Self {
         Self {
             programs,
@@ -242,12 +308,16 @@ impl Polls {
             return None;
         }
         let previous = self.last_seen.insert(key.to_owned(), self.edits);
-        let mut poll = None;
-        if in_window {
+        let mut poll = false;
+        let class = in_window.then(|| verb_class(key, &mut |w| self.programs.has(w)));
+        if let Some(verb) = &class {
+            self.results
+                .entry((s.agent, verb.clone()))
+                .or_default()
+                .commands += 1;
             let total = self.totals.entry((s.agent, s.scope())).or_default();
             if let Some(prev_edits) = previous {
-                let class = verb_class(key, &mut |w| self.programs.has(w));
-                let verb = self.verbs.entry((s.agent, class.clone())).or_default();
+                let verb = self.verbs.entry((s.agent, verb.clone())).or_default();
                 if prev_edits == self.edits {
                     total.polls += 1;
                     verb.polls += 1;
@@ -255,7 +325,7 @@ impl Polls {
                         total.polls_after_failure += 1;
                         verb.polls_after_failure += 1;
                     }
-                    poll = Some(class);
+                    poll = true;
                 } else {
                     total.reruns_after_edit += 1;
                     verb.reruns_after_edit += 1;
@@ -271,6 +341,7 @@ impl Polls {
             .insert(key.to_owned(), Latest::Awaited(self.runs));
         Some(Awaited {
             command: key.to_owned(),
+            class,
             poll,
             run: self.runs,
         })
@@ -300,20 +371,27 @@ impl Polls {
         }
     }
 
-    /// Reads the result of an awaited run: its size when the run was a counted poll,
-    /// and, when it is still its command's latest run, whether it failed.
+    /// Reads the result of an awaited run: its size when the run was in the window, also
+    /// as poll characters when it was a counted poll, and, when it is still its command's
+    /// latest run, whether it failed.
     fn result(&mut self, s: &Session, run: Awaited, failed: bool, size: impl FnOnce() -> u64) {
-        if let Some(class) = run.poll {
+        if let Some(class) = run.class {
             let n = size();
-            self.totals
-                .entry((s.agent, s.scope()))
-                .or_default()
-                .poll_chars += n;
-            self.verbs
-                .entry((s.agent, class.clone()))
-                .or_default()
-                .poll_chars += n;
-            self.unread.push((s.agent, s.scope(), class, n));
+            let r = self.results.entry((s.agent, class.clone())).or_default();
+            r.results += 1;
+            r.chars += n;
+            self.unread_results.push((s.agent, class.clone(), n));
+            if run.poll {
+                self.totals
+                    .entry((s.agent, s.scope()))
+                    .or_default()
+                    .poll_chars += n;
+                self.verbs
+                    .entry((s.agent, class.clone()))
+                    .or_default()
+                    .poll_chars += n;
+                self.unread.push((s.agent, s.scope(), class, n));
+            }
         }
         if self.latest.get(&run.command) != Some(&Latest::Awaited(run.run)) {
             return;
@@ -412,5 +490,34 @@ mod tests {
             call("toolu_b"),
         ]);
         assert_eq!((c.polls, c.polls_after_failure), (2, 0));
+    }
+
+    #[test]
+    fn command_results_count_every_run_in_the_window_by_verb_class() {
+        let bash = |id: &str, cmd: &str| {
+            crate::detectors::claude_tool_use(id, "Bash", &json!({"command": cmd}))
+        };
+        let result = crate::detectors::claude_tool_result;
+        let lines = [
+            (false, bash("toolu_c", "cargo build")),
+            (false, result("toolu_c", "1234567")),
+            (true, bash("toolu_a", "git status")),
+            (true, result("toolu_a", "0123456789")),
+            (true, bash("toolu_b", "git status")),
+            (true, result("toolu_b", "abcde")),
+            (true, bash("toolu_d", "ls")),
+        ];
+        let mut d = Polls::default();
+        crate::detectors::replay(&mut d, &CLAUDE, &lines);
+        let r = |verb: &str| {
+            d.results
+                .get(&(Agent::Claude, verb.to_owned()))
+                .map(|r| (r.commands, r.results, r.chars))
+        };
+        // A run before the window counts nowhere; a run whose result never comes counts
+        // as a command only.
+        assert_eq!(r("git"), Some((2, 2, 15)));
+        assert_eq!(r("ls"), Some((1, 0, 0)));
+        assert_eq!(r("cargo"), None);
     }
 }

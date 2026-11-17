@@ -79,7 +79,7 @@ pub enum Command {
     All,
     /// What loads before the first non-synthetic reply of each main session (Claude)
     Startup,
-    /// Tool schemas loaded against tools called (Claude)
+    /// Tool schemas loaded against tools called, and skills listed against skills used (Claude)
     Schemas,
     /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex, pi)
     Pipes,
