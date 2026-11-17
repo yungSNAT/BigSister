@@ -3142,22 +3142,18 @@ fn a_date_is_midnight_in_the_local_zone() {
 }
 
 /// Havana's clocks went back from 01:00 to midnight on 4 November 2018, so that midnight
-/// came twice: the first is taken. On 11 March 2018 they went forward from midnight to
-/// 01:00, so that midnight never came, and the date is refused.
+/// came twice: the later one (05:00 UTC) is taken. On 11 March 2018 they went forward from
+/// midnight to 01:00, so that midnight never came: the date starts when the clocks resumed.
 #[cfg(unix)]
 #[test]
-fn a_repeated_local_midnight_takes_the_first_and_a_skipped_one_is_refused() {
+fn a_repeated_local_midnight_is_the_later_and_a_skipped_one_is_when_clocks_resume() {
     let havana: &[(&str, &Path)] = &[("TZ", Path::new("America/Havana"))];
-    assert_eq!(
-        since_json("2018-11-04", havana),
-        json!("2018-11-04T04:00:00+00:00")
-    );
-    let (code, stdout, stderr) = since_run("2018-03-11", true, havana);
-    assert_eq!(code, 1, "stdout: {stdout}");
-    assert!(
-        stderr.contains(
-            "--since: expected 7d, 24h, YYYY-MM-DD or an RFC 3339 time, got '2018-03-11'"
-        ),
-        "{stderr}"
-    );
+    for (date, start) in [
+        ("2018-11-03", "2018-11-03T04:00:00+00:00"),
+        ("2018-11-04", "2018-11-04T05:00:00+00:00"),
+        ("2018-03-11", "2018-03-11T05:00:00+00:00"),
+        ("2018-03-12", "2018-03-12T04:00:00+00:00"),
+    ] {
+        assert_eq!(since_json(date, havana), json!(start), "{date}");
+    }
 }
