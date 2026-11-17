@@ -407,6 +407,28 @@ fn models_rank_subagents_against_the_parent_s_top_priced_model() {
 }
 
 #[test]
+fn models_rank_subagents_at_a_price_file_s_prices() {
+    // Fable 5.2 at US$2 under Opus 5.5 at US$4 puts the Fable subagent below its parent's
+    // top, and Sonnet 5.5 at US$8 puts the Sonnet one on top: its 1,000,000 cache reads at
+    // 0.05 times US$8 per million are US$0.40.
+    let file = price_file(
+        "prices-models.json",
+        r#"{"claude-fable-5-2": {"input_cost_per_token": 2e-06},
+            "claude-opus-5-5": {"input_cost_per_token": 4e-06},
+            "claude-sonnet-5-5": {"input_cost_per_token": 8e-06}}"#,
+    );
+    let doc = models_report(&["--prices", file.to_str().expect("UTF-8 path")]);
+    let s = &doc["detectors"]["models"]["summary"];
+    let keys = [
+        "subagent_sessions_on_top_model",
+        "subagent_sessions_below_top_model",
+        "subagent_sessions_indeterminate",
+        "on_top_input_usd_est",
+    ];
+    assert_eq!(cells(s, &keys), json!([1, 1, 2, 0.4]));
+}
+
+#[test]
 fn cache_dollars_take_a_price_file_and_name_it() {
     // Opus 5.5 at US$8 instead of US$4 doubles the first reply's 5-minute writes.
     let file = price_file(

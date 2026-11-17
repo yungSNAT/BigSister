@@ -11,23 +11,15 @@ use crate::report::{Opts, Section, Table};
 use crate::scan::{Agent, Detector, Record, Session};
 
 /// Cache reads as a multiple of the uncached input price, by the exact model id, from
-/// <https://platform.claude.com/docs/en/about-claude/pricing> as read on 16 November 2026;
-/// any other model's is [`READ_DEFAULT`].
-const READ_MULTIPLIERS: [(&str, f64); 6] = [
-    ("claude-fable-5-2", 0.025),
-    ("claude-mythos-5-2", 0.025),
-    ("claude-fable-5-1", 0.025),
-    ("claude-mythos-5-1", 0.025),
-    ("claude-opus-5-5", 0.05),
-    ("claude-sonnet-5-5", 0.05),
-];
-const READ_DEFAULT: f64 = 0.1;
-
+/// <https://platform.claude.com/docs/en/about-claude/pricing> as read on 16 November 2026.
 fn read_multiplier(model: &str) -> f64 {
-    READ_MULTIPLIERS
-        .iter()
-        .find(|(id, _)| *id == model)
-        .map_or(READ_DEFAULT, |&(_, m)| m)
+    match model {
+        "claude-fable-5-2" | "claude-mythos-5-2" | "claude-fable-5-1" | "claude-mythos-5-1" => {
+            0.025
+        }
+        "claude-opus-5-5" | "claude-sonnet-5-5" => 0.05,
+        _ => 0.1,
+    }
 }
 
 /// Printed for a field a reply does not record, which [`printed`] never gives.
@@ -70,9 +62,9 @@ struct Group {
 struct Sub {
     /// The id of the main session it ran for, from its records' `sessionId`.
     parent: Option<String>,
-    /// The lowest input price of its replies, and whether one had no price.
+    /// The lowest input price of its replies, and whether one had no price or was skipped.
     lowest: Option<f64>,
-    unpriced: bool,
+    unsure: bool,
     cost: Cost,
 }
 
@@ -92,10 +84,15 @@ pub struct Models {
     price: Option<f64>,
     /// The file's, when it is a subagent's with a reply in the window.
     sub: Option<Sub>,
+    /// The main session ids the file's replies in the window carry, and whether one of
+    /// its replies in the window was skipped.
+    here: HashSet<String>,
+    skipped_here: bool,
     groups: BTreeMap<(&'static str, String, String, String), Group>,
-    /// By main session id, the highest input price of its replies in the window, if any
-    /// had one.
-    parents: HashMap<String, Option<f64>>,
+    /// By main session id, the highest input price of its priced replies in the window.
+    parents: HashMap<String, f64>,
+    /// Main sessions with a reply in the window skipped, which may have been dearer.
+    unsure: HashSet<String>,
     subs: Vec<Sub>,
     /// A reply that did not read since the previous reply, by its message id if it has
     /// one, and whether it is in the window: unless a later block of the same reply reads,
@@ -162,10 +159,20 @@ impl Detector for Models {
         self.ids.clear();
         self.price = None;
         self.sub = None;
+        self.here.clear();
+        self.skipped_here = false;
     }
 
-    fn end(&mut self, _s: &Session) {
+    fn end(&mut self, s: &Session) {
         self.skip();
+        // A skipped reply leaves its session's lowest or highest price unknown.
+        if self.skipped_here {
+            if s.subagent {
+                self.sub.get_or_insert_with(Sub::default).unsure = true;
+            } else {
+                self.unsure.extend(self.here.drain());
+            }
+        }
         self.subs.extend(self.sub.take());
     }
 
@@ -269,9 +276,9 @@ fn cents(usd: f64) -> f64 {
 fn notes(opts: &Opts) -> Vec<String> {
     let price = input_price(opts);
     vec![
-        format!("Each reply counts once (the first record of its message.id); synthetic replies are left out, and a reply none of whose records has a model name and token counts that are non-negative integers summing within 64 bits counts as skipped (replies skipped) and adds to no total, so with any skipped the totals are a floor. Effort is the reasoning effort the reply records and agent type the subagent type Claude Code records (attributionAgent); {NONE} marks a reply that records neither."),
+        format!("Each reply counts once (the first record of its message.id); synthetic replies are left out, and a reply none of whose records reads whole (a message with an id, a model and usage counts that are integers from 0 to 2^40, a session id, and effort and agent type as text when recorded) counts as skipped (replies skipped) and adds to no total, so with any skipped the totals are a floor. Effort is the reasoning effort the reply records and agent type the subagent type Claude Code records (attributionAgent); {NONE} marks a reply that records neither."),
         format!("Input usd est is an input-side estimate, not spend: uncached input at the input price, cache writes at 1.25 times it (5-minute) or 2 times (1-hour), as the reply records (1.25 times for replies without split, which record none), and cache reads at the model's cache read price, 0.025, 0.05 or 0.1 times the input price as Anthropic's pricing page gave on 16 November 2026, where the input price is {price}. Output tokens are counted but not priced, as shaphan reads input prices only; output costs several times as much as input per token. Input usd share is each row's part of all rows' input usd est. Unpriced replies are those of a model without a price. An illustration, not a bill."),
-        "A subagent session is on its parent's top model when every reply of it in the window is on a model whose input price is at least the highest of its parent session's replies in the window; below when one is cheaper; indeterminate when the parent session (the main session whose id its records carry) was not read or had no priced reply in the window, or the subagent had an unpriced reply. Prices compared are the bundled ones, or the price file's with --prices, whatever --usd-per-mtok gives; on top input usd est sums those sessions' input usd est.".to_owned(),
+        "A subagent session is on its parent's top model when every reply of it in the window is on a model whose input price is at least the highest of its parent session's replies in the window; below when one is cheaper; indeterminate when the parent session (the main session whose id its records carry) was not read, had no priced reply in the window or had a reply skipped there, or the subagent had an unpriced or skipped reply, as a skipped reply's model is unknown. Prices compared are the bundled ones, or the price file's with --prices, whatever --usd-per-mtok gives; on top input usd est sums those sessions' input usd est.".to_owned(),
     ]
 }
 
@@ -289,6 +296,7 @@ impl Models {
         if let Some((id, in_window)) = self.unreadable.take() {
             self.ids.extend(id);
             self.skipped += u64::from(in_window);
+            self.skipped_here |= in_window;
         }
     }
 
@@ -322,12 +330,15 @@ impl Models {
             sub.cost.add(weighted, price);
             match price {
                 Some(p) => sub.lowest = Some(sub.lowest.map_or(p, |l| l.min(p))),
-                None => sub.unpriced = true,
+                None => sub.unsure = true,
             }
         } else {
-            let top = self.parents.entry(session.to_owned()).or_default();
+            if !self.here.contains(session) {
+                self.here.insert(session.to_owned());
+            }
             if let Some(p) = price {
-                *top = Some(top.map_or(p, |t| t.max(p)));
+                let top = self.parents.entry(session.to_owned()).or_insert(p);
+                *top = top.max(p);
             }
         }
     }
@@ -336,11 +347,10 @@ impl Models {
         let top = sub
             .parent
             .as_ref()
-            .and_then(|p| self.parents.get(p))
-            .copied()
-            .flatten();
+            .filter(|p| !self.unsure.contains(*p))
+            .and_then(|p| self.parents.get(p));
         match (top, sub.lowest) {
-            (Some(top), Some(low)) if !sub.unpriced => {
+            (Some(&top), Some(low)) if !sub.unsure => {
                 if low >= top {
                     Rank::OnTop
                 } else {
@@ -572,5 +582,49 @@ mod tests {
         ]);
         assert_eq!(m.skipped, 2);
         assert!(m.groups.is_empty());
+    }
+
+    /// Feeds one main or subagent file of `records`, each in the window at its price.
+    fn file(m: &mut Models, subagent: bool, records: &[(Value, Option<f64>)]) {
+        let s = Session {
+            agent: Agent::Claude,
+            subagent,
+        };
+        m.begin(&s);
+        for (v, price) in records {
+            m.read_by(&s, *price);
+            let r = Record {
+                value: v,
+                in_window: true,
+            };
+            m.record(&s, &r);
+        }
+        m.end(&s);
+    }
+
+    #[test]
+    fn a_skipped_reply_leaves_its_subagent_session_indeterminate() {
+        let (good, bad) = (json!(10), json!("x"));
+        let ranks = |parent: &[(Value, Option<f64>)], sub: &[(Value, Option<f64>)]| {
+            let mut m = Models::default();
+            file(&mut m, false, parent);
+            file(&mut m, true, sub);
+            let rank = |sub| match m.rank(sub) {
+                Rank::OnTop => "on top",
+                Rank::Below => "below",
+                Rank::Unknown => "indeterminate",
+            };
+            m.subs.iter().map(rank).collect::<Vec<_>>()
+        };
+        let top = || (reply("p", &good), Some(5.0));
+        let on = || (reply("a", &good), Some(5.0));
+        let skipped = |id| (reply(id, &bad), Some(9.0));
+        assert_eq!(ranks(&[top()], &[on()]), ["on top"]);
+        // The subagent's skipped reply may have been on a cheaper model.
+        assert_eq!(ranks(&[top()], &[on(), skipped("b")]), ["indeterminate"]);
+        // A subagent session whose every reply is skipped is still a session.
+        assert_eq!(ranks(&[top()], &[skipped("b")]), ["indeterminate"]);
+        // The parent's skipped reply may have been on a dearer model.
+        assert_eq!(ranks(&[top(), skipped("q")], &[on()]), ["indeterminate"]);
     }
 }
