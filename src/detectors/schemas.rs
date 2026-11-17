@@ -75,6 +75,10 @@ pub struct Schemas {
     /// `sessions_called` those that used it, `calls` its uses.
     skills: BTreeMap<(&'static str, String), Group>,
     sessions: BTreeMap<&'static str, u64>,
+    /// Skill listings in the window without a `names` array, which list no skill.
+    listings_skipped: u64,
+    /// `Skill` calls in the window without a string skill, which use no skill.
+    calls_skipped: u64,
 }
 
 /// A built-in tool's own name, or `mcp__<server>__*` for an MCP tool.
@@ -128,6 +132,9 @@ impl Detector for Schemas {
                     .value
                     .get("attachment")
                     .filter(|a| a.get("type").and_then(Value::as_str) == Some("skill_listing"));
+                if listing.is_some_and(|l| l.get("names").and_then(Value::as_array).is_none()) {
+                    self.listings_skipped += 1;
+                }
                 for (name, n) in listing.map(listed_skills).unwrap_or_default() {
                     let e = cur.listed.entry(name.to_owned()).or_default();
                     *e = (*e).max(n);
@@ -142,10 +149,11 @@ impl Detector for Schemas {
         }
         for b in tool_uses(r) {
             *cur.called.entry(name_of(b).to_owned()).or_default() += 1;
-            if name_of(b) == "Skill"
-                && let Some(skill) = input_str(b, "skill")
-            {
-                *cur.used.entry(skill.to_owned()).or_default() += 1;
+            if name_of(b) == "Skill" {
+                match input_str(b, "skill") {
+                    Some(skill) => *cur.used.entry(skill.to_owned()).or_default() += 1,
+                    None => self.calls_skipped += 1,
+                }
             }
         }
     }
@@ -219,11 +227,13 @@ impl Detector for Schemas {
             summary: vec![
                 ("main_sessions".to_owned(), json!(self.sessions.get("main").copied().unwrap_or(0))),
                 ("subagent_sessions".to_owned(), json!(self.sessions.get("subagent").copied().unwrap_or(0))),
+                ("skill_listings_skipped".to_owned(), json!(self.listings_skipped)),
+                ("skill_calls_skipped".to_owned(), json!(self.calls_skipped)),
             ],
             tables: vec![table, self.skill_table(opts)],
             notes: vec![
                 "Idle characters are schema characters loaded in sessions that never called the tool.".to_owned(),
-                "A skill is listed when a skill listing in the window names it, which costs its listing characters: its line and the lines after it up to the next skill's, each with a newline. It is used when a Skill call names it or a slash command runs it. Its idle characters are those listed in sessions that never used it.".to_owned(),
+                "A skill is listed when a skill listing in the window names it, which costs its listing characters: its line and the lines after it up to the next skill's, each with a newline. It is used when a Skill call names it or a slash command runs it. Its idle characters are those listed in sessions that never used it. A listing without a names array and a Skill call without a string skill are counted as skipped.".to_owned(),
                 EST_NOTE.to_owned(),
                 "Idle characters, of schemas and skills alike, are priced at the model of the session's replies, and stay unpriced when its replies' models differ in price.".to_owned(),
                 prices::NOTE.to_owned(),
