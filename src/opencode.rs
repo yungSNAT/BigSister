@@ -5,9 +5,9 @@
 //! its data folder: a `session` table, a `message` table and a `part` table whose `data`
 //! columns hold JSON (`packages/schema/src/v1/session.ts`). The same database holds
 //! account tokens and credentials, so only those 3 tables are queried, with fixed SQL,
-//! and SQLite refuses a read of any other. The file is copied into memory with ordinary
-//! reads and checked, and the copy is queried, so that no lock is taken and no file
-//! beside it is opened, written or created.
+//! and SQLite refuses a read of any other. The file is copied into memory whilst no
+//! other program can write to it, and the copy is queried, so that no file beside it is
+//! written or created.
 //!
 //! An assistant message holds one or more steps, each a model call: a `step-start` part,
 //! its `tool` parts and a `step-finish` part with the call's token usage. Each step
@@ -19,13 +19,11 @@
 //! without its state, counts as a skipped line.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::Path;
-use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
-use rusqlite::{Connection, MAIN_DB, params};
+use rusqlite::{Connection, OpenFlags, params};
 use serde_json::{Map, Value, json};
 
 /// One OpenCode session, as Claude Code records.
@@ -97,118 +95,35 @@ fn sessions(conn: &Connection, since: DateTime<Utc>) -> rusqlite::Result<Vec<Ses
     Ok(out)
 }
 
-/// What the database file and the files beside it were before it was copied.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Stamp {
-    len: u64,
-    modified: SystemTime,
-    /// The write-ahead log's length, if there is one.
-    wal: Option<u64>,
-    /// The rollback journal's length, if there is one.
-    journal: Option<u64>,
-    shm: bool,
-}
-
-impl Stamp {
-    fn of(db: &Path) -> Option<Self> {
-        let m = std::fs::metadata(db).ok()?;
-        let beside = |suffix: &str| {
-            let mut name = db.as_os_str().to_owned();
-            name.push(suffix);
-            std::fs::metadata(Path::new(&name))
-        };
-        Some(Self {
-            len: m.len(),
-            modified: m.modified().ok()?,
-            wal: beside("-wal").ok().map(|w| w.len()),
-            journal: beside("-journal").ok().map(|j| j.len()),
-            shm: beside("-shm").is_ok(),
-        })
-    }
-}
-
-/// Copies database `db` into memory and opens the copy read-only, with reads of tables
-/// other than `TABLES` refused.
-///
-/// No lock is taken and no file beside the database is opened, so another program,
-/// OpenCode included, opens, writes and checkpoints as it would were `shaphan` not
-/// running. SQLite's own read-only reader is not used, because SQLite 3.54.1 creates the
-/// write-ahead log (`-wal`) when it is missing, and on Windows the log's index (`-shm`)
-/// too (`sqlite3WalOpen` and `winHandleOpen` in `sqlite3.c`). Instead the file is read
-/// twice with ordinary reads, sharing it fully, and the copy counts only if both reads
-/// match, the file's size and time, the log's and the journal's lengths and whether the
-/// index exists are unchanged, and SQLite's quick check passes on the copy. The queries
-/// then read the copy, which nothing else changes. A log holding records, which only a
-/// connection sharing its index can read, fails, so committed records still in the log
-/// are not read: the database is read once OpenCode has checkpointed them, as it does
-/// when it stops. A journal holding a write under way or cut short fails too.
-///
-/// shortcut: consistency is detected, not enforced. A write that starts within the file
-/// clock's resolution of the previous one and stalls across both reads could give a copy
-/// holding pages from 2 states that passes every check. The upgrade is SQLite's own
-/// read-only reader once it can open without creating a file. The whole database is also
-/// held in memory, twice whilst the copy is opened (OpenCode's on this machine is 1.1 MB,
-/// November 2026); copying and checking it a page at a time would be the upgrade there.
+/// Opens database `db` with SQLite's own read-only reader, which shares the log's
+/// index read-only (`readonly_shm`), and begins one read transaction, with reads of
+/// tables other than `TABLES` refused.
 fn open(db: &Path) -> Result<Connection, String> {
     open_with(db, || {})
 }
 
-/// `open`, running `during` between the 2 reads of the file, as a test's other program
-/// does.
+/// `open`, running `during` once the read transaction has begun.
 fn open_with(db: &Path, during: impl FnOnce()) -> Result<Connection, String> {
-    let stamp = Stamp::of(db).ok_or("the database's size and time cannot be read")?;
-    if stamp.wal.is_some_and(|len| len > 0) {
-        return Err("OpenCode's write-ahead log holds records, so OpenCode is running or did not stop cleanly".to_owned());
-    }
-    if stamp.journal.is_some_and(|len| len > 0) {
-        return Err("the database's rollback journal is not empty, so a write is under way or was cut short".to_owned());
-    }
-    let mut copy = std::fs::read(db).map_err(|e| e.to_string())?;
+    let path = db.to_str().ok_or("the database's path is not UTF-8")?;
+    let path = path
+        .replace('%', "%25")
+        .replace('#', "%23")
+        .replace('?', "%3f");
+    let mut conn = Connection::open_with_flags(
+        format!("file:{path}?mode=ro&readonly_shm=1"),
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| e.to_string())?;
+    conn.execute_batch("BEGIN").map_err(|e| e.to_string())?;
+    let _: i64 = conn
+        .query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))
+        .map_err(|e| e.to_string())?;
     during();
-    if !holds(db, &copy) || Stamp::of(db) != Some(stamp) {
-        return Err("the database changed whilst it was copied".to_owned());
-    }
-    // Bytes 18 and 19 of the header say whether the database uses a write-ahead log
-    // (2) or not (1). A copy in memory cannot use one and this log is empty, so the
-    // copy says not.
-    if let Some(versions) = copy.get_mut(18..20) {
-        versions.fill(1);
-    }
-    let mut conn = Connection::open_in_memory().map_err(|e| e.to_string())?;
-    let len = copy.len();
-    conn.deserialize_read_exact(MAIN_DB, copy.as_slice(), len, true)
-        .map_err(|e| e.to_string())?;
-    let check: String = conn
-        .query_row("PRAGMA quick_check(1)", [], |r| r.get(0))
-        .map_err(|e| e.to_string())?;
-    if check != "ok" {
-        return Err("the copy fails SQLite's quick check".to_owned());
-    }
     conn.authorizer(Some(only_tables))
         .map_err(|e| e.to_string())?;
     Ok(conn)
-}
-
-/// Whether file `db` holds exactly `copy`, read again a piece at a time.
-fn holds(db: &Path, copy: &[u8]) -> bool {
-    let Ok(mut file) = std::fs::File::open(db) else {
-        return false;
-    };
-    let mut piece = vec![0; 1 << 16];
-    let mut at = 0;
-    loop {
-        match file.read(&mut piece) {
-            Ok(0) => return at == copy.len(),
-            Ok(n) => {
-                if copy.get(at..at + n) != Some(&piece[..n]) {
-                    return false;
-                }
-                at += n;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => return false,
-        }
-    }
 }
 
 /// Allows a query to read only `TABLES`.
@@ -417,11 +332,12 @@ fn usage(tokens: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::MAIN_DB;
     use std::collections::BTreeSet;
     use std::io::{BufRead, BufReader, Write};
     use std::path::PathBuf;
     use std::process::{Child, ChildStdout, Command, Stdio};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     fn part(id: &str, data: &Value) -> Part {
         Part::new(id.to_owned(), 0, &data.to_string())
@@ -501,15 +417,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("shaphan-opencode-w-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("folder");
         let db = dir.join("opencode.db");
-        let writer = Connection::open(&db).expect("database");
-        writer
+        Connection::open(&db)
+            .expect("database")
             .execute_batch(
                 "PRAGMA journal_mode = WAL; CREATE TABLE session (id text);
-                 INSERT INTO session VALUES ('before');
-                 PRAGMA wal_checkpoint(TRUNCATE);",
+                 INSERT INTO session VALUES ('before');",
             )
             .expect("table");
         let conn = open(&db).expect("open");
+        let writer = Connection::open(&db).expect("writer");
         // The write reaches the database file itself.
         writer
             .execute_batch("UPDATE session SET id = 'after'; PRAGMA wal_checkpoint(TRUNCATE);")
@@ -519,30 +435,6 @@ mod tests {
             .expect("query");
         assert_eq!(id, "before");
         drop((conn, writer));
-        std::fs::remove_dir_all(&dir).expect("clean up");
-    }
-
-    /// A file that changed after it was copied, in a byte or in length, no longer holds
-    /// the copy.
-    #[test]
-    fn a_file_changed_after_its_copy_does_not_hold_it() {
-        let dir = std::env::temp_dir().join(format!("shaphan-opencode-h-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("folder");
-        let file = dir.join("f");
-        let copy = vec![7u8; 70_000];
-        std::fs::write(&file, &copy).expect("file");
-        assert!(holds(&file, &copy));
-        let mut changed = copy.clone();
-        changed[69_999] = 8;
-        std::fs::write(&file, &changed).expect("file");
-        assert!(!holds(&file, &copy));
-        std::fs::write(&file, &copy[..69_999]).expect("file");
-        assert!(!holds(&file, &copy));
-        changed = copy.clone();
-        changed.push(7);
-        std::fs::write(&file, &changed).expect("file");
-        assert!(!holds(&file, &copy));
-        assert!(!holds(&dir.join("missing"), &copy));
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
 
@@ -581,15 +473,17 @@ mod tests {
         PathBuf::from(name)
     }
 
-    /// The files in `dir`, by name, with their bytes and modification times.
-    fn files(dir: &Path) -> Vec<(PathBuf, Vec<u8>, SystemTime)> {
+    /// The files in `dir`, by name, with their lengths, modification times and bytes. A
+    /// file part of which another program has locked, as SQLite on Windows locks the
+    /// log's index whilst a connection is open, has no bytes.
+    fn files(dir: &Path) -> Vec<(PathBuf, u64, SystemTime, Option<Vec<u8>>)> {
         let mut out: Vec<_> = std::fs::read_dir(dir)
             .expect("folder")
             .map(|e| e.expect("entry").path())
             .map(|p| {
-                let modified = std::fs::metadata(&p).and_then(|m| m.modified());
-                let bytes = std::fs::read(&p).expect("read");
-                (p, bytes, modified.expect("time"))
+                let m = std::fs::metadata(&p).expect("metadata");
+                let bytes = std::fs::read(&p).ok();
+                (p, m.len(), m.modified().expect("time"), bytes)
             })
             .collect();
         out.sort();
@@ -810,7 +704,7 @@ mod tests {
             let result = read(&db, since);
             let after = files(&dir);
             if after != before {
-                let names: Vec<_> = after.iter().map(|f| (&f.0, f.1.len())).collect();
+                let names: Vec<_> = after.iter().map(|f| (&f.0, f.1)).collect();
                 wrong.push(format!("{case}: the folder changed to {names:?}"));
             }
             if result.is_ok() == (case == "journal") {
