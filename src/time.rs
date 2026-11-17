@@ -1,7 +1,7 @@
 //! Parsing `--since` and record timestamps.
 
-use jiff::civil::Date;
-use jiff::tz::{AmbiguousOffset, TimeZone};
+use jiff::civil::{Date, Time};
+use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 
 /// Parses `--since`: `7d`, `24h`, a date (local midnight) or an RFC 3339 time.
@@ -15,13 +15,12 @@ pub fn parse_since(s: &str, now: Timestamp) -> Result<Timestamp, String> {
     let since = if let Some(delta) = relative(t) {
         now.checked_sub(delta).map_err(|_| before_1970())?
     } else if let Ok(date) = Date::strptime("%Y-%m-%d", t) {
-        // A skipped midnight is refused; a repeated one is the first.
-        let midnight = TimeZone::system()
-            .to_ambiguous_zoned_datetime(date.to_datetime(jiff::civil::Time::midnight()));
-        if let AmbiguousOffset::Gap { .. } = midnight.offset() {
-            return Err(bad());
-        }
-        midnight.earlier().map_err(|_| bad())?.timestamp()
+        // A repeated midnight is the later one; a skipped one is when the clocks resume.
+        TimeZone::system()
+            .to_ambiguous_zoned_datetime(date.to_datetime(Time::midnight()))
+            .later()
+            .map_err(|_| bad())?
+            .timestamp()
     } else {
         parse_ts(t).ok_or_else(bad)?
     };
@@ -47,7 +46,45 @@ fn relative(t: &str) -> Option<SignedDuration> {
 /// Parses an RFC 3339 timestamp, as both agents write them.
 #[must_use]
 pub fn parse_ts(s: &str) -> Option<Timestamp> {
-    s.parse().ok()
+    rfc3339(s.as_bytes()).then(|| s.parse().ok()).flatten()
+}
+
+/// Whether `b` has RFC 3339's layout: `YYYY-MM-DDTHH:MM:SS` (`T`, `t` or a space), an
+/// optional fraction, then `Z`, `z` or an offset `+HH:MM` or `-HH:MM` under 24 hours.
+/// jiff's parser alone also takes other ISO 8601 forms, such as no seconds or `+0000`.
+fn rfc3339(b: &[u8]) -> bool {
+    let digits =
+        |r: std::ops::Range<usize>| b.get(r).is_some_and(|d| d.iter().all(u8::is_ascii_digit));
+    let at = |i: usize, c: &[u8]| b.get(i).is_some_and(|x| c.contains(x));
+    let layout = digits(0..4)
+        && at(4, b"-")
+        && digits(5..7)
+        && at(7, b"-")
+        && digits(8..10)
+        && at(10, b"Tt ")
+        && digits(11..13)
+        && at(13, b":")
+        && digits(14..16)
+        && at(16, b":")
+        && digits(17..19);
+    if !layout {
+        return false;
+    }
+    let mut rest = &b[19..];
+    if let Some(fraction) = rest.strip_prefix(b".") {
+        let n = fraction.iter().take_while(|c| c.is_ascii_digit()).count();
+        if n == 0 {
+            return false;
+        }
+        rest = &fraction[n..];
+    }
+    match rest {
+        b"Z" | b"z" => true,
+        [b'+' | b'-', h1, h2, b':', m1, m2] => {
+            [h1, h2, m1, m2].iter().all(|c| c.is_ascii_digit()) && [*h1, *h2] < *b"24" && *m1 < b'6'
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -123,6 +160,10 @@ mod tests {
             "2026-11-08T00:00:00Z ",
             "2026-11-08T00:00:00Z[UTC]",
             "2026-11-08T00:00:00,5Z",
+            "2026-11-08T00:00:00+0000",
+            "2026-11-08T00:00:00+00",
+            "2026-11-08T00:00:00+00:00:30",
+            "+002026-11-08T00:00:00Z",
         ] {
             assert_eq!(parse_ts(s), None, "{s}");
         }
