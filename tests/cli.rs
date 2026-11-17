@@ -1155,6 +1155,35 @@ fn a_copy_of_part_of_a_session_counts_once_whichever_path_sorts_first() {
 }
 
 #[test]
+fn a_copied_reply_becomes_cache_s_previous_reply_but_adds_no_writes_or_dollars() {
+    // s-second resumes s-first: copies of s-first's prompt and reply (1,000,000 written),
+    // then its own reply 2 minutes later, which reads nothing and writes 1,200,000.
+    let doc = claude_all("resumed-cache");
+    let r = rows(&doc, "cache", 0);
+    let row = |cause: &str| {
+        let row = find(r, &[("scope", json!("main")), ("cause", json!(cause))]);
+        (
+            row["replies"].clone(),
+            row["write_tokens"].clone(),
+            row["write_usd_est"].clone(),
+        )
+    };
+    // Only s-first's reply is a first reply; the copy adds nothing. At 1.25 times
+    // Opus 5.5's US$4 input price, a 5-minute write costs US$5 a million.
+    assert_eq!(row("first reply"), (json!(1), json!(1_000_000), json!(5.0)));
+    // s-second's reply rebuilds what the copied reply left cached, inside its lifetime.
+    assert_eq!(
+        row("rebuilt otherwise"),
+        (json!(1), json!(1_000_000), json!(5.0))
+    );
+    assert_eq!(row("new context"), (json!(1), json!(200_000), json!(1.0)));
+    assert_eq!(r.len(), 3, "{r:?}");
+    let s = &doc["detectors"]["cache"]["summary"];
+    assert_eq!(s["sessions"], 2);
+    assert_eq!(s["write_tokens"], 2_200_000);
+}
+
+#[test]
 fn startup_skips_copied_records_after_a_resumed_session_starts() {
     // s-b resumes s-a: a new hook runs, then come copies of s-a's hook and reply, then
     // s-b's own first reply, which records no tokens.
