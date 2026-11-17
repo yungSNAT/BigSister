@@ -278,8 +278,8 @@ fn held_elsewhere(file: &File, at: i64) -> Option<bool> {
     use std::os::fd::AsRawFd;
     let mut l = lock(libc::F_WRLCK as libc::c_short, at, 1);
     // SAFETY: the descriptor is open for the call and `l` is a valid `flock` to fill.
-    (unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &raw mut l) } == 0)
-        .then(|| l.l_type != libc::F_UNLCK as libc::c_short)
+    let told = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETLK, &raw mut l) } == 0;
+    told.then_some(l.l_type != libc::F_UNLCK as libc::c_short)
 }
 
 /// Allows a query to read only `TABLES`.
