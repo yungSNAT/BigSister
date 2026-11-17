@@ -71,7 +71,7 @@ cargo install --locked --path .
 shaphan all
 ```
 
-This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions` and `~/.codex/archived_sessions` and prints one section per detector. If neither `~/.claude/projects` nor `~/.codex/sessions` exists, it exits 1 and names each folder it looked for. Run one detector by name, for example `shaphan hooks --since 24h`.
+This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/archived_sessions` and `~/.pi/agent/sessions` and prints one section per detector. If none of them exists, it exits 1 and names each folder it looked for. Run one detector by name, for example `shaphan hooks --since 24h`.
 
 From a clone, this runs it on the synthetic test transcripts:
 
