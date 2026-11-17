@@ -2568,7 +2568,14 @@ fn pi_sessions_feed_pipes_polls_and_rereads_once_despite_a_fork() {
 fn pi_command_results_count_each_non_blank_command_by_verb_class() {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pi-blank");
     let (code, stdout, stderr) = run(&[
-        "polls", "--agent", "pi", "--pi-root", root, "--since", SINCE, "--json",
+        "polls",
+        "--agent",
+        "pi",
+        "--pi-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
     ]);
     assert_eq!(code, 0, "stderr: {stderr}");
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
@@ -2579,7 +2586,11 @@ fn pi_command_results_count_each_non_blank_command_by_verb_class() {
     for (verb, expected) in [("git", [1, 1, 10]), ("cargo", [1, 1, 7])] {
         let r = find(results, &[("agent", json!("pi")), ("verb", json!(verb))]);
         assert_eq!(
-            [r["commands"].clone(), r["results"].clone(), r["result_chars"].clone()],
+            [
+                r["commands"].clone(),
+                r["results"].clone(),
+                r["result_chars"].clone()
+            ],
             expected.map(|n| json!(n)),
             "{verb}"
         );
