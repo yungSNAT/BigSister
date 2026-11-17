@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 /// Find where your coding agent's tokens go, from its own transcripts.
 ///
-/// Reads Claude Code, Codex and pi transcripts on this machine and prints names,
+/// Reads Claude Code, Codex, pi and OpenCode transcripts on this machine and prints names,
 /// counts and sizes. Never prints message text, tool inputs or tool outputs.
 #[derive(Parser, Debug)]
 #[command(name = "shaphan", version)]
@@ -33,6 +33,10 @@ pub struct Cli {
     /// pi session folder [default: ~/.pi/agent/sessions]
     #[arg(long, global = true, value_name = "DIR")]
     pub pi_root: Option<PathBuf>,
+
+    /// OpenCode data folder, holding opencode.db [default: ~/.local/share/opencode]
+    #[arg(long, global = true, value_name = "DIR")]
+    pub opencode_root: Option<PathBuf>,
 
     /// Print one JSON object instead of tables
     #[arg(long, global = true)]
@@ -81,13 +85,13 @@ pub enum Command {
     Startup,
     /// Tool schemas loaded against tools called, and skills listed against skills used (Claude)
     Schemas,
-    /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex, pi)
+    /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex, pi, OpenCode)
     Pipes,
-    /// Commands repeated with no edit in between (Claude, Codex, pi)
+    /// Commands repeated with no edit in between (Claude, Codex, pi, OpenCode)
     Polls,
-    /// Files read again after a context compaction (Claude, Codex, pi)
+    /// Files read again after a context compaction (Claude, Codex, pi, OpenCode)
     Rereads,
-    /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi)
+    /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi, OpenCode)
     Tools,
     /// Cache writes by cause: new context, or rebuilds after an idle gap, a model switch or otherwise (Claude)
     Cache,
@@ -103,5 +107,6 @@ pub enum AgentChoice {
     Claude,
     Codex,
     Pi,
+    Opencode,
     All,
 }

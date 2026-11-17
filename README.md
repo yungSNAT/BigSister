@@ -15,7 +15,7 @@
 
 </div>
 
-`shaphan` reads the transcripts that Claude Code, Codex and [pi](https://github.com/earendil-works/pi) save on your machine and reports where tokens and checks are wasted: context loaded before the first non-synthetic reply, tool schemas loaded but never called, skills listed but never used, test output piped past its exit status, repeated polling, files re-read after a compaction, the prompt cache rebuilt after an idle gap, input cost by model, reasoning effort and subagent type, and slow hooks.
+`shaphan` reads the transcripts that Claude Code, Codex, [pi](https://github.com/earendil-works/pi) and [OpenCode](https://github.com/anomalyco/opencode) save on your machine and reports where tokens and checks are wasted: context loaded before the first non-synthetic reply, tool schemas loaded but never called, skills listed but never used, test output piped past its exit status, repeated polling, files re-read after a compaction, the prompt cache rebuilt after an idle gap, input cost by model, reasoning effort and subagent type, and slow hooks.
 
 It prints names, paths, counts, sizes and times, as listed under [Privacy](#privacy). It never prints message text, tool inputs or tool outputs, and it makes no network calls.
 
@@ -71,7 +71,7 @@ cargo install --locked --path .
 shaphan all
 ```
 
-This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/archived_sessions` and `~/.pi/agent/sessions` and prints one section per detector. If none of them exists, it exits 1 and names each missing folder but `~/.codex/archived_sessions`, which need not exist. Run one detector by name, for example `shaphan hooks --since 24h`.
+This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.pi/agent/sessions` and `~/.local/share/opencode` and prints one section per detector. If none of them exists, it exits 1 and names each missing folder but `~/.codex/archived_sessions`, which need not exist. Run one detector by name, for example `shaphan hooks --since 24h`.
 
 From a clone, this runs it on the synthetic test transcripts:
 
@@ -86,7 +86,7 @@ shaphan 0.1.0: records since 2026-11-01 00:00 +11:00
 claude: 3 files under tests/fixtures/claude (unreadable files or folders: 0, lines skipped: 1, compressed files skipped: 0)
 codex: 2 files under tests/fixtures/codex (unreadable files or folders: 0, lines skipped: 0, compressed files skipped: 0)
 
-== pipes: test runs piped into tail or head (Claude Bash, Codex commands, pi bash and powershell) ==
+== pipes: test runs piped into tail or head (Claude and OpenCode Bash, Codex commands, pi bash and powershell) ==
 test runs: 5
 piped into tail or head: 5
 over ssh not judged: 1
@@ -118,10 +118,10 @@ By hook name and command, most cancellations first
 |---|---|---|
 | `startup` | Claude | Characters loaded before the first non-synthetic reply of each main session, by source: instruction files, hook output, listings, tool schemas and MCP instructions; also the input tokens recorded for that first reply |
 | `schemas` | Claude | Per tool or MCP server: sessions that loaded its schema, sessions that called it, and the characters loaded in sessions that never called it; the same for each skill listed against the skills used |
-| `pipes` | Claude, Codex, pi | Test runs piped into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many printed a failure whilst the call reported success, in total and by agent |
-| `polls` | Claude, Codex, pi | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit, the polls of a command whose previous run's result was an error and the characters polls returned; also, by verb class, the characters every command's results returned |
-| `rereads` | Claude, Codex, pi | Files read again after a context compaction that had been read before it, and the characters those re-reads returned |
-| `tools` | Claude, pi | Per tool: calls, the characters their results returned, errors, and image and document blocks; also runs of 3 or more errors in a row (cascades) and calls repeated with the same input after erring twice (retry churn) |
+| `pipes` | Claude, Codex, pi, OpenCode | Test runs piped into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many printed a failure whilst the call reported success, in total and by agent |
+| `polls` | Claude, Codex, pi, OpenCode | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit, the polls of a command whose previous run's result was an error and the characters polls returned; also, by verb class, the characters every command's results returned |
+| `rereads` | Claude, Codex, pi, OpenCode | Files read again after a context compaction that had been read before it, and the characters those re-reads returned |
+| `tools` | Claude, pi, OpenCode | Per tool: calls, the characters their results returned, errors, and image and document blocks; also runs of 3 or more errors in a row (cascades) and calls repeated with the same input after erring twice (retry churn) |
 | `cache` | Claude | Cache write tokens split into new context and context cached again (rebuilt) after an idle gap longer than the cache's lifetime, after a model switch or otherwise, with their dollars at the cache write price |
 | `models` | Claude | Input-side cost by scope, model, reasoning effort and subagent type, and how many subagent sessions ran on their parent session's top-priced model |
 | `hooks` | Claude | Hook runs, cancellations, timeouts and durations, by event, matcher and hook |
@@ -129,10 +129,11 @@ By hook name and command, most cancellations first
 | Option | Default | Meaning |
 |---|---|---|
 | `--since` | `7d` | Start of the window: `Nd`, `Nh`, a date (local midnight) or an RFC 3339 time |
-| `--agent` | `all` | `claude`, `codex`, `pi` or `all` |
+| `--agent` | `all` | `claude`, `codex`, `pi`, `opencode` or `all` |
 | `--claude-root DIR` | `~/.claude/projects` | Claude Code transcript folder |
 | `--codex-root DIR` | `~/.codex/sessions` and `~/.codex/archived_sessions` | Codex transcript folder; a given folder replaces both |
 | `--pi-root DIR` | `~/.pi/agent/sessions` | pi session folder |
+| `--opencode-root DIR` | `~/.local/share/opencode` | OpenCode data folder, holding `opencode.db` |
 | `--json` | off | Print one JSON object with `schema_version` 2 |
 | `--csv` | off | Print the report's sections as one CSV table, one value a record; not with `--json` |
 | `--limit N` | 20 | Rows per table |
@@ -159,7 +160,7 @@ Exit codes: 0 success, 1 a runtime error such as a missing transcript folder or 
 
 ## Privacy
 
-Output holds tool, skill and MCP server names, model ids, reasoning effort labels, subagent types, instruction file paths, hook names and labels, attachment types, entry points, command verb classes, the scanned folders, counts, sizes and times. Paths under your home folder start with `~`. Re-read file paths appear only with `--paths`. A tool or skill name, model id, effort label or subagent type that is not letters, digits and `_`, `-`, `.` or `:` prints as `(other)`. A verb class or hook label prints only the name of a program found on your machine (a common command, a common PowerShell cmdlet, a program on `PATH` or an existing script); anything else prints as `(other)`, so labels can differ between machines. A script written as a network share path, such as `\\host\share\run.ps1`, is never looked up on disk, because the lookup would contact that host; only its file name is checked. A path your system maps to a network location, such as a drive letter mapped to a share or an automounted folder, is looked up like a local path. Read the output before you share it.
+Output holds tool, skill and MCP server names, model ids, reasoning effort labels, subagent types, instruction file paths, hook names and labels, attachment types, entry points, command verb classes, the scanned folders, counts, sizes and times. Paths under your home folder start with `~`. Re-read file paths appear only with `--paths`. OpenCode's database also holds account tokens and credentials: `shaphan` reads a copy of it in memory, SQLite refuses it a read of any table but `session`, `message` and `part`, and it takes no lock and opens, writes and creates no file beside the database. From OpenCode's first write after it starts until its write-ahead log is emptied, as on a clean stop, the log holds records and the database counts as unreadable: the report says why beside the count, and the remedy is to quit OpenCode and run again. A killed OpenCode leaves the database unreadable until it next starts and stops cleanly. A tool or skill name, model id, effort label or subagent type that is not letters, digits and `_`, `-`, `.` or `:` prints as `(other)`. A verb class or hook label prints only the name of a program found on your machine (a common command, a common PowerShell cmdlet, a program on `PATH` or an existing script); anything else prints as `(other)`, so labels can differ between machines. A script written as a network share path, such as `\\host\share\run.ps1`, is never looked up on disk, because the lookup would contact that host; only its file name is checked. A path your system maps to a network location, such as a drive letter mapped to a share or an automounted folder, is looked up like a local path. Read the output before you share it.
 
 The tests run on synthetic fixtures. They plant sentinel strings in message text, tool inputs, tool outputs and hook commands, and in a probe of each way found so far that input text could reach a verb class, hook label or path, then check that none reaches the output in any letter case.
 

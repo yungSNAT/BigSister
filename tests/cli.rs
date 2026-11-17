@@ -1570,7 +1570,7 @@ fn help_says_pipes_reads_codex_commands_too() {
     assert_eq!(code, 0);
     let help = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        help.contains("a pipe into tail or head hides (Claude, Codex, pi)"),
+        help.contains("a pipe into tail or head hides (Claude, Codex, pi, OpenCode)"),
         "{stdout}"
     );
 }
@@ -2602,7 +2602,7 @@ fn a_missing_pi_folder_is_an_error_when_asked_for_and_noted_otherwise() {
         stderr.contains("pi transcript folder not found"),
         "{stderr}"
     );
-    // Under --agent all, a missing default pi folder is noted, as a missing default Claude
+    // Under --agent all, a missing default pi or OpenCode folder is noted, as a missing default Claude
     // or Codex folder is, and the others are read.
     let (code, stdout, stderr) = run(&[
         "polls",
@@ -2618,7 +2618,10 @@ fn a_missing_pi_folder_is_an_error_when_asked_for_and_noted_otherwise() {
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(
         doc["skipped_roots"],
-        json!(["pi transcript folder not found: ~/.pi/agent/sessions"])
+        json!([
+            "pi transcript folder not found: ~/.pi/agent/sessions",
+            "opencode transcript folder not found: ~/.local/share/opencode"
+        ])
     );
     assert_eq!(doc["roots"].as_array().expect("roots").len(), 2, "{doc}");
 }

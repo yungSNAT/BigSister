@@ -207,6 +207,9 @@ pub fn text(meta: &Meta<'_>, sections: &[Section]) -> String {
             r.bad_lines,
             r.compressed
         );
+        if let Some(reason) = &r.unreadable_reason {
+            let _ = writeln!(out, "  unreadable: {reason}");
+        }
     }
     for s in meta.skipped_roots {
         let _ = writeln!(out, "{s}");
@@ -292,7 +295,8 @@ pub fn json(meta: &Meta<'_>, sections: &[Section]) -> String {
         .map(|r| {
             json!({"agent": r.agent.name(), "root": meta.root(r), "files": r.files,
                    "unreadable": r.unreadable, "lines_skipped": r.bad_lines,
-                   "compressed_skipped": r.compressed})
+                   "compressed_skipped": r.compressed,
+                   "unreadable_reason": r.unreadable_reason})
         })
         .collect();
     let mut detectors = Map::new();

@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod detectors;
+pub mod opencode;
 pub mod pi;
 pub mod prices;
 pub mod programs;
@@ -100,19 +101,23 @@ type Roots = (Vec<(Agent, PathBuf)>, Vec<String>);
 /// The transcript folders to scan for agents that `--agent` allows and the chosen
 /// detectors read, and notes on default folders that are missing.
 fn resolve_roots(cli: &Cli, read: &[Agent], home: Option<&str>) -> Result<Roots, String> {
-    let wanted = |a: Agent| {
-        read.contains(&a)
-            && match cli.agent {
-                AgentChoice::All => true,
-                AgentChoice::Claude => a == Agent::Claude,
-                AgentChoice::Codex => a == Agent::Codex,
-                AgentChoice::Pi => a == Agent::Pi,
-            }
+    let chosen = match cli.agent {
+        AgentChoice::All => None,
+        AgentChoice::Claude => Some(Agent::Claude),
+        AgentChoice::Codex => Some(Agent::Codex),
+        AgentChoice::Pi => Some(Agent::Pi),
+        AgentChoice::Opencode => Some(Agent::OpenCode),
     };
+    let wanted = |a: Agent| read.contains(&a) && chosen.is_none_or(|c| c == a);
     let candidates = [
         (Agent::Claude, cli.claude_root.clone(), ".claude/projects"),
         (Agent::Codex, cli.codex_root.clone(), ".codex/sessions"),
         (Agent::Pi, cli.pi_root.clone(), ".pi/agent/sessions"),
+        (
+            Agent::OpenCode,
+            cli.opencode_root.clone(),
+            ".local/share/opencode",
+        ),
     ];
     let mut roots = Vec::new();
     let mut skipped = Vec::new();
