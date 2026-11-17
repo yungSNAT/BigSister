@@ -754,37 +754,13 @@ mod tests {
         };
         let conn = Connection::open(&db).expect("database");
         conn.busy_timeout(Duration::ZERO).expect("no waiting");
-        match mode.to_str().expect("mode") {
-            // Reads, and stops without closing, leaving the log and its index, as
-            // OpenCode does when it is stopped.
-            "leave" => {
-                let _: i64 = conn
-                    .query_row("SELECT count(*) FROM session", [], |r| r.get(0))
-                    .expect("read");
-                say("left");
-                std::process::exit(0);
-            }
-            // Commits a change that stays in the log, and stops without closing.
-            "frames" => {
-                conn.execute_batch(
-                    "PRAGMA wal_autocheckpoint = 0;
-                     UPDATE session SET id = '1-' || hex(randomblob(3000));",
-                )
-                .expect("frames");
-                say("left");
-                std::process::exit(0);
-            }
-            // Changes more pages than its cache holds, so some reach the database file,
-            // and stops before committing, leaving a hot journal.
-            "cut" => {
-                conn.execute_batch(
-                    "PRAGMA cache_size = 1; BEGIN;
-                     UPDATE session SET id = '1-' || hex(randomblob(3000));",
-                )
-                .expect("write");
-                say("left");
-                std::process::exit(0);
-            }
+        let mode = mode.to_str().expect("mode");
+        if let Some(sql) = cut_short(mode) {
+            conn.execute_batch(sql).expect("cut short");
+            say("left");
+            std::process::exit(0);
+        }
+        match mode {
             // Holds a write open until told to go on, then commits it.
             "hold" => {
                 conn.execute_batch(
@@ -805,22 +781,47 @@ mod tests {
                 wait();
                 say(&write(&conn));
             }
-            // Writes a new generation of every session, a transaction and a checkpoint
-            // each, for 2 seconds.
             "churn" => {
                 say("churning");
-                let end = Instant::now() + Duration::from_secs(2);
-                for k in 1.. {
-                    if Instant::now() > end {
-                        break;
-                    }
-                    let _ = conn.execute_batch(&format!(
-                        "UPDATE session SET id = '{k}-' || hex(randomblob(3000));
-                         PRAGMA wal_checkpoint(TRUNCATE);"
-                    ));
-                }
+                churn(&conn);
             }
             unknown => panic!("no mode {unknown}"),
+        }
+    }
+
+    /// What the other program runs, in a mode in which it then stops without closing
+    /// the database, leaving the files beside it as they stand.
+    fn cut_short(mode: &str) -> Option<&'static str> {
+        match mode {
+            // A read, leaving the log and its index, as OpenCode does when it is stopped.
+            "leave" => Some("SELECT count(*) FROM session;"),
+            // A committed change that stays in the log.
+            "frames" => Some(
+                "PRAGMA wal_autocheckpoint = 0;
+                 UPDATE session SET id = '1-' || hex(randomblob(3000));",
+            ),
+            // A change to more pages than the cache holds, so that some reach the
+            // database file, left uncommitted: a hot journal.
+            "cut" => Some(
+                "PRAGMA cache_size = 1; BEGIN;
+                 UPDATE session SET id = '1-' || hex(randomblob(3000));",
+            ),
+            _ => None,
+        }
+    }
+
+    /// Writes a new generation of every session, a transaction and a checkpoint each,
+    /// for 2 seconds.
+    fn churn(conn: &Connection) {
+        let end = Instant::now() + Duration::from_secs(2);
+        for k in 1.. {
+            if Instant::now() > end {
+                break;
+            }
+            let _ = conn.execute_batch(&format!(
+                "UPDATE session SET id = '{k}-' || hex(randomblob(3000));
+                 PRAGMA wal_checkpoint(TRUNCATE);"
+            ));
         }
     }
 
@@ -831,6 +832,7 @@ mod tests {
     #[test]
     fn a_read_creates_or_changes_no_file_beside_the_database() {
         let since = DateTime::from_timestamp(0, 0).expect("1970");
+        let mut wrong = Vec::new();
         for case in ["none", "both", "log", "journal", "live"] {
             let (dir, db) = database(&format!("a-{case}"), case != "journal");
             let mut live = None;
@@ -853,19 +855,21 @@ mod tests {
             }
             let before = files(&dir);
             let result = read(&db, since);
-            assert!(files(&dir) == before, "{case}: the folder changed");
-            assert_eq!(
-                result.is_ok(),
-                case != "journal",
-                "{case}: {:?}",
-                result.as_ref().err()
-            );
+            let after = files(&dir);
+            if after != before {
+                let names: Vec<_> = after.iter().map(|f| (&f.0, f.1.len())).collect();
+                wrong.push(format!("{case}: the folder changed to {names:?}"));
+            }
+            if result.is_ok() == (case == "journal") {
+                wrong.push(format!("{case}: {:?}", result.as_ref().err()));
+            }
             if let Some(mut other) = live {
                 assert_eq!(other.go(), "Ok(())");
                 other.end();
             }
             std::fs::remove_dir_all(&dir).expect("clean up");
         }
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     /// Another program opens, writes and checkpoints before, during and after a read,
