@@ -153,11 +153,14 @@ impl Stamp {
 /// refuse with their own reason.
 ///
 /// shortcut: consistency is detected, not enforced. For OpenCode's database, which uses
-/// the log, a copy holding pages from 2 states passes every check only if a `TRUNCATE`
-/// checkpoint rewrites pages in place, stalls across both reads and empties the log
+/// the log, a copy holding pages from 2 states passes every check only if a checkpoint
+/// rewrites pages in place, stalls across both reads and empties or removes the log
 /// before the second stamp without moving the file's time: within the file clock's
 /// resolution, or on Windows, which need not move the time whilst a writer holds the
-/// file open. A writer with no journal on disk (`journal_mode` `OFF` or `MEMORY`) that
+/// file open. OpenCode asks only for `PASSIVE` checkpoints and sets no
+/// `journal_size_limit` (its `packages/core/src/database/database.ts` at v1.19.6), and
+/// SQLite's automatic checkpoints leave the log's length alone, so the one checkpoint
+/// that does this is SQLite's last on a clean close, which then deletes the log. A writer with no journal on disk (`journal_mode` `OFF` or `MEMORY`) that
 /// stalls across both reads passes too. The upgrade is SQLite's own read-only reader
 /// once it can open without creating a file. The whole database is also held in memory,
 /// twice whilst the copy is opened (OpenCode's on this machine is 1.1 MB, November
