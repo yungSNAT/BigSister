@@ -1332,6 +1332,14 @@ fn codex_counts_every_compressed_rollout_it_cannot_decode() {
         root_counts(&doc),
         [&json!(7), &json!(7), &json!(0), &json!(2)]
     );
+    // A decoder's message can quote the data, so it is named only as such.
+    assert_eq!(
+        doc["roots"][0]["unreadable_reasons"],
+        json!([
+            {"reason": "its zstd data cannot be decoded (damaged, cut short or more than one frame)", "count": 4},
+            {"reason": "its zstd frame header cannot be read", "count": 3},
+        ])
+    );
 }
 
 #[cfg(unix)]
@@ -1529,6 +1537,75 @@ fn a_transcript_that_cannot_be_opened_counts_as_unreadable() {
     assert_eq!(code, 0, "stderr: {stderr}");
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(doc["roots"][0]["unreadable"], 1);
+}
+
+/// Runs `hooks --claude-root dir` as JSON and as text.
+#[cfg(unix)]
+fn claude_root_report(dir: &Path) -> (Value, String) {
+    let root = dir.to_str().expect("UTF-8 path");
+    let args = ["hooks", "--claude-root", root, "--since", SINCE];
+    let (code, text, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let (code, stdout, stderr) = run(&[&args[..], &["--json"]].concat());
+    assert_eq!(code, 0, "stderr: {stderr}");
+    (serde_json::from_str(&stdout).expect("valid JSON"), text)
+}
+
+#[cfg(unix)]
+#[test]
+fn each_reason_a_transcript_is_unreadable_prints_with_its_count() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("unreadable-reasons");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("folder");
+    for name in ["a.jsonl", "b.jsonl"] {
+        std::os::unix::fs::symlink(dir.join("missing"), dir.join(name)).expect("symlink");
+    }
+    // A link to a folder opens, but reading from it fails.
+    std::os::unix::fs::symlink(env!("CARGO_TARGET_TMPDIR"), dir.join("c.jsonl")).expect("link");
+    let (doc, text) = claude_root_report(&dir);
+    let opened = "a file cannot be opened: No such file or directory (os error 2)";
+    let read = "a file cannot be read: Is a directory (os error 21)";
+    assert_eq!(
+        root_counts(&doc),
+        [&json!(3), &json!(3), &json!(0), &json!(0)]
+    );
+    assert_eq!(
+        doc["roots"][0]["unreadable_reasons"],
+        json!([{"reason": opened, "count": 2}, {"reason": read, "count": 1}])
+    );
+    assert!(
+        text.contains(&format!(
+            "\n  unreadable (2): {opened}\n  unreadable: {read}\n"
+        )),
+        "{text}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_folder_that_cannot_be_listed_prints_its_reason() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("unreadable-folder");
+    let locked = dir.join("locked");
+    let _ = std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&locked).expect("folder");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("mode");
+    if std::fs::read_dir(&locked).is_ok() {
+        // Run as root, which reads any folder: there is nothing to test.
+        return;
+    }
+    let (doc, text) = claude_root_report(&dir);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    let reason = "a folder cannot be listed: Permission denied (os error 13)";
+    assert_eq!(
+        doc["roots"][0]["unreadable_reasons"],
+        json!([{"reason": reason, "count": 1}])
+    );
+    assert!(
+        text.contains(&format!("\n  unreadable: {reason}\n")),
+        "{text}"
+    );
 }
 
 #[test]
