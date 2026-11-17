@@ -675,8 +675,14 @@ fn schemas_count_skill_listings_and_calls_they_cannot_read() {
     assert!(text.contains("\nskill listings skipped: 1\n"), "{text}");
     assert!(text.contains("\nskill calls skipped: 2\n"), "{text}");
     let csv = out("--csv");
-    assert!(csv.contains("schemas,summary,,,skill_listings_skipped,1"), "{csv}");
-    assert!(csv.contains("schemas,summary,,,skill_calls_skipped,2"), "{csv}");
+    assert!(
+        csv.contains("schemas,summary,,,skill_listings_skipped,1"),
+        "{csv}"
+    );
+    assert!(
+        csv.contains("schemas,summary,,,skill_calls_skipped,2"),
+        "{csv}"
+    );
 }
 
 #[test]
