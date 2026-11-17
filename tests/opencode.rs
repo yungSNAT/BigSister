@@ -647,7 +647,7 @@ fn a_late_unreadable_row_leaves_no_partial_report() {
     );
     assert_eq!(
         doc["roots"][0]["unreadable_reason"],
-        json!("a row of OpenCode's tables cannot be read as OpenCode writes it")
+        json!("OpenCode's tables cannot be read as OpenCode writes them")
     );
     assert_eq!(doc["detectors"]["polls"]["tables"][0]["rows"], json!([]));
 }
