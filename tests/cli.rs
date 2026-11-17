@@ -1124,13 +1124,20 @@ fn a_copied_reply_becomes_cache_s_previous_reply_but_adds_no_writes_or_dollars()
     let r = rows(&doc, "cache", 0);
     let row = |cause: &str| {
         let row = find(r, &[("scope", json!("main")), ("cause", json!(cause))]);
-        (row["replies"].clone(), row["write_tokens"].clone(), row["write_usd_est"].clone())
+        (
+            row["replies"].clone(),
+            row["write_tokens"].clone(),
+            row["write_usd_est"].clone(),
+        )
     };
     // Only s-first's reply is a first reply; the copy adds nothing. At 1.25 times
     // Opus 5.5's US$4 input price, a 5-minute write costs US$5 a million.
     assert_eq!(row("first reply"), (json!(1), json!(1_000_000), json!(5.0)));
     // s-second's reply rebuilds what the copied reply left cached, inside its lifetime.
-    assert_eq!(row("rebuilt otherwise"), (json!(1), json!(1_000_000), json!(5.0)));
+    assert_eq!(
+        row("rebuilt otherwise"),
+        (json!(1), json!(1_000_000), json!(5.0))
+    );
     assert_eq!(row("new context"), (json!(1), json!(200_000), json!(1.0)));
     assert_eq!(r.len(), 3, "{r:?}");
     let s = &doc["detectors"]["cache"]["summary"];
