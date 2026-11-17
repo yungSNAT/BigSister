@@ -16,8 +16,8 @@ pub fn parse_since(s: &str, now: Timestamp) -> Result<Timestamp, String> {
         now.checked_sub(delta).map_err(|_| before_1970())?
     } else if let Ok(date) = Date::strptime("%Y-%m-%d", t) {
         // A skipped midnight is refused; a repeated one is the first.
-        let midnight =
-            TimeZone::system().to_ambiguous_zoned(date.to_datetime(jiff::civil::Time::midnight()));
+        let midnight = TimeZone::system()
+            .to_ambiguous_zoned_datetime(date.to_datetime(jiff::civil::Time::midnight()));
         if let AmbiguousOffset::Gap { .. } = midnight.offset() {
             return Err(bad());
         }
@@ -80,7 +80,7 @@ mod tests {
     fn date_is_local_midnight() {
         let t = parse_since("2026-11-01", now()).unwrap();
         assert_eq!(
-            t.to_zoned(TimeZone::system())
+            t.to_zoned_datetime(TimeZone::system())
                 .strftime("%Y-%m-%d %H:%M")
                 .to_string(),
             "2026-11-01 00:00"

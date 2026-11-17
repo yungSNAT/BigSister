@@ -176,7 +176,7 @@ pub fn display_path(path: &str, home: Option<&str>) -> String {
 }
 
 fn local(t: Timestamp) -> String {
-    t.to_zoned(TimeZone::system())
+    t.to_zoned_datetime(TimeZone::system())
         .strftime("%Y-%m-%d %H:%M %:z")
         .to_string()
 }
