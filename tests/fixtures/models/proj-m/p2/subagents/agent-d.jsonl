@@ -1,0 +1,2 @@
+{"type":"user","uuid":"m17","timestamp":"2026-11-08T01:00:10Z","sessionId":"p2","message":{"role":"user","content":"sentinel prompt"}}
+{"type":"assistant","uuid":"m18","timestamp":"2026-11-08T01:00:20Z","sessionId":"p2","message":{"model":"claude-opus-5-5","id":"msg_m18","role":"assistant","content":[{"type":"text","text":"sentinel reply"}],"usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":100000,"output_tokens":3}},"effort":"high","attributionAgent":"worker"}

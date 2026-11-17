@@ -90,6 +90,13 @@ impl Prices {
         Some(tier.map_or(price.usd_per_mtok, |&(_, usd)| usd))
     }
 
+    /// The price of `model`'s uncached input for the shortest prompt, if it has one: a
+    /// price that does not move with prompt size, to compare models by.
+    #[must_use]
+    pub fn base_usd_per_mtok(&self, model: &str) -> Option<f64> {
+        self.models.get(model).map(|p| p.usd_per_mtok)
+    }
+
     /// The price file as the report shows it, when one was given.
     #[must_use]
     pub fn file(&self) -> Option<&str> {
