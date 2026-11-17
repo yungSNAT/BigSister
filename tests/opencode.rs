@@ -234,7 +234,7 @@ fn opencode_sessions_feed_polls() {
     let doc = counts("opencode-polls");
     assert_eq!(doc["roots"][0]["files"], json!(2), "{}", doc["roots"]);
     assert_eq!(doc["roots"][0]["unreadable"], json!(0), "{}", doc["roots"]);
-    assert_eq!(doc["roots"][0]["unreadable_reason"], Value::Null);
+    assert_eq!(doc["roots"][0]["unreadable_reasons"], json!([]));
     let polls = row(&doc, "polls", &[("agent", "opencode"), ("scope", "main")]);
     assert_eq!(
         [
@@ -461,9 +461,9 @@ fn a_log_holding_records_counts_as_unreadable_and_is_left_alone() {
         "{}",
         doc["roots"]
     );
-    let reason = doc["roots"][0]["unreadable_reason"]
-        .as_str()
-        .unwrap_or_default();
+    let reasons = &doc["roots"][0]["unreadable_reasons"];
+    assert_eq!(reasons[0]["count"], json!(1), "{reasons}");
+    let reason = reasons[0]["reason"].as_str().unwrap_or_default();
     assert!(
         reason.starts_with("OpenCode's write-ahead log holds records")
             && reason.contains("quit OpenCode"),
@@ -646,8 +646,8 @@ fn a_late_unreadable_row_leaves_no_partial_report() {
         doc["roots"]
     );
     assert_eq!(
-        doc["roots"][0]["unreadable_reason"],
-        json!("OpenCode's tables cannot be read as OpenCode writes them")
+        doc["roots"][0]["unreadable_reasons"],
+        json!([{"reason": "OpenCode's tables cannot be read as OpenCode writes them", "count": 1}])
     );
     assert_eq!(doc["detectors"]["polls"]["tables"][0]["rows"], json!([]));
 }
