@@ -488,6 +488,11 @@ fn usage(tokens: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+    use std::io::{BufRead, BufReader, Write};
+    use std::path::PathBuf;
+    use std::process::{Child, ChildStdout, Command, Stdio};
+    use std::time::{Duration, Instant};
 
     fn part(id: &str, data: &Value) -> Part {
         Part::new(id.to_owned(), 0, &data.to_string())
@@ -588,105 +593,384 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
 
-    /// What a child process running `writer_child` in `mode` printed: `WROTE` or
-    /// `REFUSED`.
-    fn child(db: &Path, mode: &str) -> String {
-        let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
-            .args([
-                "--exact",
-                "opencode::tests::writer_child",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env("SHAPHAN_TEST_DB", db)
-            .env("SHAPHAN_TEST_MODE", mode)
-            .output()
-            .expect("child");
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        stdout
-            .lines()
-            .find(|l| matches!(*l, "WROTE" | "REFUSED"))
-            .unwrap_or("NONE")
-            .to_owned()
+    /// OpenCode's tables, an `account` table, and 20 sessions of generation 0, each
+    /// spanning 2 pages.
+    const SCHEMA: &str = "
+        CREATE TABLE session (id TEXT, parent_id TEXT, time_created INTEGER,
+                              time_updated INTEGER);
+        CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+        CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER,
+                           data TEXT);
+        CREATE TABLE account (token TEXT);
+        INSERT INTO account VALUES ('secret');
+        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20)
+        INSERT INTO session SELECT '0-' || hex(randomblob(3000)), NULL, i, i FROM n;";
+
+    /// A new folder `name` holding `opencode.db`, in WAL mode or not, with `SCHEMA`,
+    /// closed, so that no file is beside it.
+    fn database(name: &str, wal: bool) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("shaphan-oc-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("folder");
+        let db = dir.join("opencode.db");
+        let mode = if wal { "WAL" } else { "DELETE" };
+        Connection::open(&db)
+            .expect("database")
+            .execute_batch(&format!("PRAGMA journal_mode = {mode}; {SCHEMA}"))
+            .expect("tables");
+        (dir, db)
     }
 
-    /// Another program, as OpenCode is to `shaphan`, run as a child process by
-    /// `a_writer_in_another_process_cannot_change_an_accepted_copy`. In mode `leave` it
-    /// reads the database and stops without closing it, leaving the write-ahead log and
-    /// its index behind, as OpenCode does when it is stopped. In mode `write` it writes
-    /// a row spanning many pages, changes another and checkpoints the log into the file,
-    /// without waiting for a lock.
+    /// The file named as `db` with `suffix` added, such as its log.
+    fn beside(db: &Path, suffix: &str) -> PathBuf {
+        let mut name = db.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    }
+
+    /// The files in `dir`, by name, with their bytes and modification times.
+    fn files(dir: &Path) -> Vec<(PathBuf, Vec<u8>, SystemTime)> {
+        let mut out: Vec<_> = std::fs::read_dir(dir)
+            .expect("folder")
+            .map(|e| e.expect("entry").path())
+            .map(|p| {
+                let modified = std::fs::metadata(&p).and_then(|m| m.modified());
+                let bytes = std::fs::read(&p).expect("read");
+                (p, bytes, modified.expect("time"))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The generation of each session read through `conn`: its id up to the first `-`.
+    fn generations(conn: &Connection) -> BTreeSet<String> {
+        let mut query = conn.prepare("SELECT id FROM session").expect("query");
+        query
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("rows")
+            .map(|id| {
+                let id = id.expect("id");
+                id.split('-').next().unwrap_or_default().to_owned()
+            })
+            .collect()
+    }
+
+    /// What a write by another program gave: whether its connection is read-only, then
+    /// the results of a write spanning many pages, a checkpoint and an integrity check.
+    fn write(conn: &Connection) -> String {
+        let readonly = conn.is_readonly(MAIN_DB);
+        let wrote =
+            conn.execute_batch("INSERT INTO session (id) VALUES ('w-' || hex(randomblob(10000)));");
+        let busy = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            r.get::<_, i64>(0)
+        });
+        let check = conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0));
+        format!("readonly={readonly:?} write={wrote:?} busy={busy:?} integrity={check:?}")
+    }
+
+    /// `write`'s report when the other program kept a read-write connection, wrote,
+    /// checkpointed the whole log and found its database sound.
+    const SOUND: &str = r#"readonly=Ok(false) write=Ok(()) busy=Ok(0) integrity=Ok("ok")"#;
+
+    /// Another program, as OpenCode is to `shaphan`: the test binary running `other` in a
+    /// child process, which reports in lines starting `@`.
+    struct Other {
+        child: Child,
+        out: BufReader<ChildStdout>,
+    }
+
+    impl Other {
+        fn start(db: &Path, mode: &str) -> Self {
+            let mut child = Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "opencode::tests::other",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("SHAPHAN_TEST_DB", db)
+                .env("SHAPHAN_TEST_MODE", mode)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("child");
+            let out = BufReader::new(child.stdout.take().expect("output"));
+            Self { child, out }
+        }
+
+        /// Its next report.
+        fn report(&mut self) -> String {
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let read = self.out.read_line(&mut line).expect("line");
+                assert_ne!(read, 0, "the other program stopped without reporting");
+                if let Some(report) = line.strip_prefix('@') {
+                    return report.trim_end().to_owned();
+                }
+            }
+        }
+
+        /// Tells it to go on, and gives its next report.
+        fn go(&mut self) -> String {
+            let input = self.child.stdin.as_mut().expect("input");
+            writeln!(input, "go").expect("go");
+            self.report()
+        }
+
+        /// Waits for it to end, its connection closed.
+        fn end(mut self) {
+            drop(self.child.stdin.take());
+            self.child.wait().expect("end");
+        }
+    }
+
+    /// Runs another program in `mode` to its end, and gives its first report.
+    fn run(db: &Path, mode: &str) -> String {
+        let mut other = Other::start(db, mode);
+        let report = other.report();
+        other.end();
+        report
+    }
+
+    /// The other program's side of `Other`, in the mode the test names.
     #[test]
-    #[ignore = "run as a child process by another test"]
-    fn writer_child() {
+    #[ignore = "run as a child process by other tests"]
+    fn other() {
         let (Some(db), Some(mode)) = (
             std::env::var_os("SHAPHAN_TEST_DB"),
             std::env::var_os("SHAPHAN_TEST_MODE"),
         ) else {
             return;
         };
+        let say = |report: &str| {
+            println!("@{report}");
+            std::io::stdout().flush().expect("flush");
+        };
+        let wait = || {
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+        };
         let conn = Connection::open(&db).expect("database");
-        if mode == "leave" {
-            let _: i64 = conn
-                .query_row("SELECT count(*) FROM session", [], |r| r.get(0))
-                .expect("read");
-            std::process::exit(0);
+        conn.busy_timeout(Duration::ZERO).expect("no waiting");
+        match mode.to_str().expect("mode") {
+            // Reads, and stops without closing, leaving the log and its index, as
+            // OpenCode does when it is stopped.
+            "leave" => {
+                let _: i64 = conn
+                    .query_row("SELECT count(*) FROM session", [], |r| r.get(0))
+                    .expect("read");
+                say("left");
+                std::process::exit(0);
+            }
+            // Commits a change that stays in the log, and stops without closing.
+            "frames" => {
+                conn.execute_batch(
+                    "PRAGMA wal_autocheckpoint = 0;
+                     UPDATE session SET id = '1-' || hex(randomblob(3000));",
+                )
+                .expect("frames");
+                say("left");
+                std::process::exit(0);
+            }
+            // Changes more pages than its cache holds, so some reach the database file,
+            // and stops before committing, leaving a hot journal.
+            "cut" => {
+                conn.execute_batch(
+                    "PRAGMA cache_size = 1; BEGIN;
+                     UPDATE session SET id = '1-' || hex(randomblob(3000));",
+                )
+                .expect("write");
+                say("left");
+                std::process::exit(0);
+            }
+            // Holds a write open until told to go on, then commits it.
+            "hold" => {
+                conn.execute_batch(
+                    "BEGIN IMMEDIATE;
+                     INSERT INTO session (id) VALUES ('w-' || hex(randomblob(10000)));",
+                )
+                .expect("write");
+                say("holding");
+                wait();
+                say(&format!("{:?}", conn.execute_batch("COMMIT")));
+            }
+            "write" => say(&write(&conn)),
+            // Opens the database, then writes when told to go on.
+            "open" => {
+                let tables: rusqlite::Result<i64> =
+                    conn.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0));
+                say(&format!("open {tables:?}"));
+                wait();
+                say(&write(&conn));
+            }
+            // Writes a new generation of every session, a transaction and a checkpoint
+            // each, for 2 seconds.
+            "churn" => {
+                say("churning");
+                let end = Instant::now() + Duration::from_secs(2);
+                for k in 1.. {
+                    if Instant::now() > end {
+                        break;
+                    }
+                    let _ = conn.execute_batch(&format!(
+                        "UPDATE session SET id = '{k}-' || hex(randomblob(3000));
+                         PRAGMA wal_checkpoint(TRUNCATE);"
+                    ));
+                }
+            }
+            unknown => panic!("no mode {unknown}"),
         }
-        let wrote = conn.busy_timeout(std::time::Duration::ZERO).and_then(|()| {
-            conn.execute_batch(
-                "INSERT INTO session VALUES (hex(randomblob(20000)));
-                     UPDATE session SET id = 'after' WHERE id = 'before';
-                     PRAGMA wal_checkpoint(TRUNCATE);",
-            )
-        });
-        println!("{}", if wrote.is_ok() { "WROTE" } else { "REFUSED" });
     }
 
-    /// Whilst the copy is taken, another process cannot change it. With the log and its
-    /// index left behind, as OpenCode leaves them, the process is refused a write and the
-    /// copy holds the database as it was. With neither, the log and index the process
-    /// creates (on Unix it can then write to the new log; on Windows SQLite opens the
-    /// database read-only for it) make the copy refused.
+    /// Reading the database creates, removes and changes no file beside it: with none
+    /// beside it, with the log and its index left by a program that stopped, with the
+    /// log alone, with a hot journal, which is refused, and whilst another program holds
+    /// a write open.
     #[test]
-    fn a_writer_in_another_process_cannot_change_an_accepted_copy() {
-        for leave in [true, false] {
-            let dir = std::env::temp_dir().join(format!(
-                "shaphan-opencode-x{}-{}",
-                u8::from(leave),
-                std::process::id()
-            ));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).expect("folder");
-            let db = dir.join("opencode.db");
-            Connection::open(&db)
-                .expect("database")
-                .execute_batch(
-                    "PRAGMA journal_mode = WAL; CREATE TABLE session (id text);
-                     INSERT INTO session VALUES ('before');",
-                )
-                .expect("table");
-            if leave {
-                child(&db, "leave");
-                assert!(dir.join("opencode.db-shm").exists(), "no index left");
+    fn a_read_creates_or_changes_no_file_beside_the_database() {
+        let since = DateTime::from_timestamp(0, 0).expect("1970");
+        for case in ["none", "both", "log", "journal", "live"] {
+            let (dir, db) = database(&format!("a-{case}"), case != "journal");
+            let mut live = None;
+            match case {
+                "both" | "log" => assert_eq!(run(&db, "leave"), "left"),
+                "journal" => assert_eq!(run(&db, "cut"), "left"),
+                "live" => {
+                    let mut other = Other::start(&db, "hold");
+                    assert_eq!(other.report(), "holding");
+                    live = Some(other);
+                }
+                _ => {}
             }
-            let mut seen = String::new();
-            let copy = open_with(&db, || seen = child(&db, "write"));
-            if leave {
-                assert_eq!(seen, "REFUSED");
-                let id: String = copy
-                    .expect("a copy")
-                    .query_row("SELECT id FROM session WHERE id = 'before'", [], |r| {
-                        r.get(0)
-                    })
-                    .expect("the row as it was");
-                assert_eq!(id, "before");
-            } else {
-                assert!(
-                    copy.is_err(),
-                    "a copy taken whilst another process opened the database: {seen}"
-                );
+            if case == "log" {
+                std::fs::remove_file(beside(&db, "-shm")).expect("no index");
+            }
+            if case == "journal" {
+                let journal = std::fs::metadata(beside(&db, "-journal")).expect("a journal");
+                assert!(journal.len() > 0, "an empty journal");
+            }
+            let before = files(&dir);
+            let result = read(&db, since);
+            assert!(files(&dir) == before, "{case}: the folder changed");
+            assert_eq!(
+                result.is_ok(),
+                case != "journal",
+                "{case}: {:?}",
+                result.as_ref().err()
+            );
+            if let Some(mut other) = live {
+                assert_eq!(other.go(), "Ok(())");
+                other.end();
             }
             std::fs::remove_dir_all(&dir).expect("clean up");
         }
+    }
+
+    /// Another program opens, writes and checkpoints before, during and after a read,
+    /// with a read-write connection, and its database stays sound: with no file beside
+    /// the database, and with the log and its index left by a program that stopped.
+    #[test]
+    fn another_program_writes_before_during_and_after_a_read() {
+        for left in [false, true] {
+            let (dir, db) = database(&format!("b{}", u8::from(left)), true);
+            let leave = || {
+                if left {
+                    assert_eq!(run(&db, "leave"), "left");
+                }
+            };
+            leave();
+            assert_eq!(run(&db, "write"), SOUND, "before");
+            leave();
+            let mut during = String::new();
+            let _ = open_with(&db, || during = run(&db, "write"));
+            assert_eq!(during, SOUND, "during");
+            leave();
+            let _ = open(&db);
+            assert_eq!(run(&db, "write"), SOUND, "after");
+            std::fs::remove_dir_all(&dir).expect("clean up");
+        }
+    }
+
+    /// The sequence that corrupted another program's database whilst a lock was held on
+    /// the log's index: a program stops leaving records in the log, the log is lost, and
+    /// another program opens during a read and writes and checkpoints after it. Its
+    /// database stays sound.
+    #[test]
+    fn a_program_opening_during_a_read_over_a_stale_index_keeps_its_database_sound() {
+        let (dir, db) = database("stale", true);
+        assert_eq!(run(&db, "frames"), "left");
+        std::fs::remove_file(beside(&db, "-wal")).expect("lose the log");
+        let mut opened = None;
+        let _ = open_with(&db, || {
+            let mut other = Other::start(&db, "open");
+            let report = other.report();
+            assert!(report.starts_with("open Ok"), "{report}");
+            opened = Some(other);
+        });
+        let mut other = opened.expect("the other program");
+        assert_eq!(other.go(), SOUND);
+        other.end();
+        let check: String = Connection::open(&db)
+            .expect("database")
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .expect("check");
+        assert_eq!(check, "ok");
+        std::fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    /// Whilst another program writes a new generation of every session again and again,
+    /// in WAL mode with a checkpoint after each and in rollback mode, each copy read
+    /// holds one generation.
+    #[test]
+    fn under_a_writer_each_copy_read_is_one_committed_state() {
+        for wal in [true, false] {
+            let (dir, db) = database(&format!("c{}", u8::from(wal)), wal);
+            let mut churn = Other::start(&db, "churn");
+            assert_eq!(churn.report(), "churning");
+            let (mut copies, mut refused) = (0, 0);
+            let end = Instant::now() + Duration::from_millis(1500);
+            while Instant::now() < end {
+                if let Ok(conn) = open(&db) {
+                    let seen = generations(&conn);
+                    assert_eq!(seen.len(), 1, "WAL {wal}: generations {seen:?} in one copy");
+                    copies += 1;
+                } else {
+                    refused += 1;
+                }
+            }
+            churn.end();
+            eprintln!("WAL {wal}: {copies} copies read, {refused} refused");
+            std::fs::remove_dir_all(&dir).expect("clean up");
+        }
+    }
+
+    /// A database whose pages do not fit together is refused whole, even when the
+    /// sessions themselves read: here a page of another table is damaged.
+    #[test]
+    fn a_database_failing_the_quick_check_is_refused() {
+        let (dir, db) = database("d", false);
+        let (root, size): (i64, i64) = {
+            let conn = Connection::open(&db).expect("database");
+            let root = conn
+                .query_row(
+                    "SELECT rootpage FROM sqlite_master WHERE name = 'account'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("root page");
+            let size = conn
+                .query_row("PRAGMA page_size", [], |r| r.get(0))
+                .expect("page size");
+            (root, size)
+        };
+        let mut bytes = std::fs::read(&db).expect("file");
+        // The page's type: no page of a table holds 0 there.
+        bytes[usize::try_from((root - 1) * size).expect("offset")] = 0;
+        std::fs::write(&db, bytes).expect("damage");
+        let since = DateTime::from_timestamp(0, 0).expect("1970");
+        assert!(read(&db, since).is_err(), "a damaged database was read");
+        std::fs::remove_dir_all(&dir).expect("clean up");
     }
 }
