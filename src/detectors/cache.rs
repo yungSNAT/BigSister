@@ -16,7 +16,7 @@ enum Cause {
     /// The session's first reply, which has no earlier cache.
     First,
     /// Context the previous reply had not cached: the new turn, or all of a reply's writes
-    /// after a compaction or a reply with no readable usage.
+    /// after a compaction or a reply that does not read.
     New,
     /// Rebuilt after a gap longer than the cache's lifetime.
     Idle,
@@ -76,7 +76,7 @@ struct Previous {
     read: u64,
     write: u64,
     model: String,
-    at: Option<DateTime<Utc>>,
+    at: DateTime<Utc>,
 }
 
 /// The cache's lifetimes: 5 minutes by default, an hour once a reply writes at that
@@ -94,9 +94,9 @@ pub struct Cache {
     /// Whether a reply of the session so far wrote at the 1-hour lifetime.
     one_hour: bool,
     /// Whether the next reply's writes are all new context: a compaction came after the
-    /// previous reply, or a reply's usage could not be read.
+    /// previous reply, or a reply did not read.
     fresh: bool,
-    /// A reply whose usage could not be read since the previous reply, by its message id
+    /// A reply that did not read since the previous reply, by its message id
     /// if it has one, and whether it is in the window: unless a later block of the same
     /// reply is readable, the chain breaks and the reply counts as skipped.
     unreadable: Option<(Option<String>, bool)>,
@@ -110,11 +110,11 @@ pub struct Cache {
     writes: BTreeMap<(&'static str, Cause), Writes>,
     sessions: BTreeMap<&'static str, u64>,
     sessions_idle: u64,
-    /// Replies in the window none of whose records has a model name and readable usage.
+    /// Replies in the window none of whose records reads as a [`Reply`].
     skipped: u64,
 }
 
-/// A reply's usage, as far as the cache goes.
+/// A reply's cache usage.
 struct Usage {
     read: u64,
     write: u64,
@@ -123,31 +123,76 @@ struct Usage {
     one_hour: bool,
 }
 
+/// A Claude reply as this section reads it. Every field is required: a reply whose record
+/// lacks one, or holds null or another type, is skipped.
+struct Reply<'a> {
+    /// `message.id`: Claude Code writes a record for each block of a reply.
+    id: &'a str,
+    /// `message.model`.
+    model: &'a str,
+    /// `timestamp`, which measures the gap since the previous reply.
+    at: DateTime<Utc>,
+    /// `message.usage`: `cache_read_input_tokens`, `cache_creation_input_tokens`, and
+    /// `cache_creation`'s `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`,
+    /// each an integer from 0 to [`MAX_COUNT`].
+    usage: Usage,
+}
+
+/// A record as this section reads it.
+enum Entry<'a> {
+    /// A `system` record of subtype `compact_boundary`.
+    Compaction,
+    Reply(Reply<'a>),
+    /// A reply that does not read as a [`Reply`], with its `message.id` if that is a string.
+    Skipped(Option<&'a str>),
+    /// Any other record, including a synthetic reply.
+    Other,
+}
+
 /// The largest token count read, 2^40: far more than any context holds, and small
 /// enough that token sums stay exact.
 const MAX_COUNT: u64 = 1 << 40;
 
-/// A count in `usage`: a missing or null field is 0; any other value that is not an
-/// integer from 0 to [`MAX_COUNT`] makes the usage unreadable.
-fn count(usage: &Value, key: &str) -> Option<u64> {
-    match usage.get(key) {
-        None | Some(Value::Null) => Some(0),
-        Some(v) => v.as_u64().filter(|&n| n <= MAX_COUNT),
+/// Reads a record: the one place this section reads transcript JSON.
+fn read<'a>(r: &Record<'a>) -> Entry<'a> {
+    let v = r.value;
+    let model = v.pointer("/message/model").and_then(Value::as_str);
+    match r.kind() {
+        "system" if v.get("subtype").and_then(Value::as_str) == Some("compact_boundary") => {
+            Entry::Compaction
+        }
+        "assistant" if model != Some("<synthetic>") => read_reply(v).map_or_else(
+            |_| Entry::Skipped(v.pointer("/message/id").and_then(Value::as_str)),
+            Entry::Reply,
+        ),
+        _ => Entry::Other,
     }
 }
 
-fn usage(reply: &Value) -> Option<Usage> {
-    let u = reply.pointer("/message/usage").filter(|u| u.is_object())?;
-    let write = count(u, "cache_creation_input_tokens")?;
-    // A missing or null split records none; any other value that is not an object is
-    // unreadable.
-    let split = match u.get("cache_creation") {
-        None => &Value::Null,
-        Some(s) if s.is_null() || s.is_object() => s,
-        Some(_) => return None,
-    };
-    let five = count(split, "ephemeral_5m_input_tokens")?;
-    let hour = count(split, "ephemeral_1h_input_tokens")?;
+/// `object`'s `key`, which `read` must accept; else the key, naming the field.
+fn field<'a, T>(
+    object: &'a Value,
+    key: &'static str,
+    read: impl FnOnce(&'a Value) -> Option<T>,
+) -> Result<T, &'static str> {
+    object.get(key).and_then(read).ok_or(key)
+}
+
+fn object(v: &Value) -> Option<&Value> {
+    v.is_object().then_some(v)
+}
+
+fn count(v: &Value) -> Option<u64> {
+    v.as_u64().filter(|&n| n <= MAX_COUNT)
+}
+
+/// A reply record read as a [`Reply`], or the name of a field that does not read.
+fn read_reply(v: &Value) -> Result<Reply<'_>, &'static str> {
+    let message = field(v, "message", object)?;
+    let usage = field(message, "usage", object)?;
+    let split = field(usage, "cache_creation", object)?;
+    let five = field(split, "ephemeral_5m_input_tokens", count)?;
+    let hour = field(split, "ephemeral_1h_input_tokens", count)?;
     let both = five + hour;
     #[expect(
         clippy::cast_precision_loss,
@@ -158,11 +203,16 @@ fn usage(reply: &Value) -> Option<Usage> {
     } else {
         WRITE_5M
     };
-    Some(Usage {
-        read: count(u, "cache_read_input_tokens")?,
-        write,
-        multiplier,
-        one_hour: hour > 0,
+    Ok(Reply {
+        id: field(message, "id", Value::as_str)?,
+        model: field(message, "model", Value::as_str)?,
+        at: field(v, "timestamp", |t| t.as_str().and_then(parse_ts))?,
+        usage: Usage {
+            read: field(usage, "cache_read_input_tokens", count)?,
+            write: field(usage, "cache_creation_input_tokens", count)?,
+            multiplier,
+            one_hour: hour > 0,
+        },
     })
 }
 
@@ -203,40 +253,35 @@ impl Detector for Cache {
     fn record(&mut self, s: &Session, r: &Record<'_>) {
         // The scan gives a reply's price just before the reply, and none for a copy.
         let price = self.price.take();
-        let v = r.value;
-        if r.kind() == "system"
-            && v.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
-        {
-            self.fresh = true;
-            return;
-        }
-        let model = v.pointer("/message/model");
-        if r.kind() != "assistant" || model.and_then(Value::as_str) == Some("<synthetic>") {
-            return;
-        }
-        // Claude Code writes a record for each block of a reply, each with its usage.
-        let id = v.pointer("/message/id").and_then(Value::as_str);
-        if id.is_some_and(|id| self.ids.contains(id)) {
-            return;
-        }
-        let (Some(model), Some(u)) = (model.and_then(Value::as_str), usage(v)) else {
-            self.unreadable(id, r.in_window);
-            return;
+        let reply = match read(r) {
+            Entry::Compaction => {
+                self.fresh = true;
+                return;
+            }
+            Entry::Other => return,
+            Entry::Skipped(id) => {
+                // A later block of a reply already counted or skipped adds nothing.
+                if !id.is_some_and(|id| self.ids.contains(id)) {
+                    self.unreadable(id, r.in_window);
+                }
+                return;
+            }
+            Entry::Reply(reply) => reply,
         };
-        self.readable(id);
-        let at = v
-            .get("timestamp")
-            .and_then(Value::as_str)
-            .and_then(parse_ts);
-        let (cause, rebuilt) = self.cause(model, at, &u);
+        if self.ids.contains(reply.id) {
+            return;
+        }
+        self.readable(reply.id);
+        let (cause, rebuilt) = self.cause(&reply);
+        let u = &reply.usage;
         if r.in_window {
             self.counted = true;
             let scope = s.scope();
             if cause == Cause::First {
-                self.add(scope, Cause::First, u.write, &u, price);
+                self.add(scope, Cause::First, u.write, u, price);
             } else {
-                self.add(scope, Cause::New, u.write - rebuilt, &u, price);
-                self.add(scope, cause, rebuilt, &u, price);
+                self.add(scope, Cause::New, u.write - rebuilt, u, price);
+                self.add(scope, cause, rebuilt, u, price);
                 self.idle |= cause == Cause::Idle && rebuilt > 0;
             }
         }
@@ -245,8 +290,8 @@ impl Detector for Cache {
         self.previous = Some(Previous {
             read: u.read,
             write: u.write,
-            model: model.to_owned(),
-            at,
+            model: reply.model.to_owned(),
+            at: reply.at,
         });
     }
 
@@ -310,16 +355,16 @@ pub(super) fn input_price(opts: &Opts) -> String {
 fn notes(opts: &Opts) -> Vec<String> {
     let price = input_price(opts);
     vec![
-        "Each reply's cache writes (cache_creation_input_tokens) are measured. Rebuilt tokens are an estimate of what was cached again: of the tokens the previous reply in the session left cached (its cache reads and writes), those this reply did not read, up to what it wrote. They assume each reply extends the previous one's prompt, as Claude Code's replies in one file do; the rest of a reply's writes are new context, and a reply after a compaction, or after a reply none of whose records has a model name and readable usage, writes new context only. Such replies count as skipped (replies skipped) and add to no total, so with any skipped the totals are a floor.".to_owned(),
+        "Each reply's cache writes (cache_creation_input_tokens) are measured. Rebuilt tokens are an estimate of what was cached again: of the tokens the previous reply in the session left cached (its cache reads and writes), those this reply did not read, up to what it wrote. They assume each reply extends the previous one's prompt, as Claude Code's replies in one file do; the rest of a reply's writes are new context, and a reply after a compaction, or after a reply none of whose records holds every field this section reads, writes new context only. Such replies count as skipped (replies skipped) and add to no total, so with any skipped the totals are a floor.".to_owned(),
         "A rebuild follows an idle gap when the time between the 2 replies exceeds the cache's lifetime: 1 hour once a reply of the session has written 1-hour cache, otherwise 5 minutes. Otherwise it follows a model switch when the model changed, and is rebuilt otherwise when neither holds, as after a rewind or a changed prefix.".to_owned(),
-        format!("Dollars (write usd est) estimate what the writes cost, not what could have been saved: the tokens at the cache write price, 1.25 times the input price for 5-minute writes and 2 times for 1-hour writes, split as the reply records (1.25 times when it does not), where the input price is {price}. A warm cache would have read rebuilt tokens at a fraction of the input price: a tenth or less, by model. Unpriced tokens are those of a model without a price. An illustration, not a bill."),
+        format!("Dollars (write usd est) estimate what the writes cost, not what could have been saved: the tokens at the cache write price, 1.25 times the input price for 5-minute writes and 2 times for 1-hour writes, split as the reply records (1.25 times when its split is 0 at both lifetimes), where the input price is {price}. A warm cache would have read rebuilt tokens at a fraction of the input price: a tenth or less, by model. Unpriced tokens are those of a model without a price. An illustration, not a bill."),
     ]
 }
 
 impl Cache {
-    /// Why a reply on `model`, recorded `at`, wrote to the cache, and how many of its
-    /// writes rebuilt what the previous reply had cached.
-    fn cause(&self, model: &str, at: Option<DateTime<Utc>>, u: &Usage) -> (Cause, u64) {
+    /// Why `reply` wrote to the cache, and how many of its writes rebuilt what the
+    /// previous reply had cached.
+    fn cause(&self, reply: &Reply<'_>) -> (Cause, u64) {
         if self.fresh {
             return (Cause::New, 0);
         }
@@ -331,12 +376,10 @@ impl Cache {
         } else {
             FIVE_MINUTES
         };
-        let cause = if at
-            .zip(p.at)
-            .is_some_and(|(now, then)| now - then > TimeDelta::seconds(ttl))
-        {
+        let u = &reply.usage;
+        let cause = if reply.at - p.at > TimeDelta::seconds(ttl) {
             Cause::Idle
-        } else if p.model != model {
+        } else if p.model != reply.model {
             Cause::Switch
         } else {
             Cause::Other
@@ -368,8 +411,8 @@ impl Cache {
         true
     }
 
-    /// Notes a reply with message id `id` whose usage cannot be read. After an earlier
-    /// unreadable reply other than this one, the chain is broken whatever follows.
+    /// Notes a reply with message id `id`, if it has one, that does not read. After an
+    /// earlier such reply other than this one, the chain is broken whatever follows.
     fn unreadable(&mut self, id: Option<&str>, in_window: bool) {
         if self.pending(id) {
             return;
@@ -380,18 +423,16 @@ impl Cache {
         self.unreadable = Some((id.map(str::to_owned), in_window));
     }
 
-    /// Notes a readable reply with message id `id`. After an unreadable reply other than
+    /// Notes a reply with message id `id` that reads. After an unreadable reply other than
     /// this one, what the previous reply left cached is unknown, so nothing counts as
     /// rebuilt.
-    fn readable(&mut self, id: Option<&str>) {
-        if self.pending(id) {
+    fn readable(&mut self, id: &str) {
+        if self.pending(Some(id)) {
             self.unreadable = None;
         } else if self.skip() {
             self.fresh = true;
         }
-        if let Some(id) = id {
-            self.ids.insert(id.to_owned());
-        }
+        self.ids.insert(id.to_owned());
     }
 
     /// The table by scope and cause, with dollars at the bundled prices or the given rate.
@@ -452,9 +493,17 @@ impl Cache {
 mod tests {
     use super::*;
 
+    /// A reply on model `m` whose usage is `usage` over zero counts and a zero split; a
+    /// `usage` that is not an object replaces it whole.
     fn reply(id: &str, at: &str, usage: &Value) -> Value {
+        let mut full = json!({"cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+            "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}});
+        match (full.as_object_mut(), usage.as_object()) {
+            (Some(full), Some(given)) => full.extend(given.clone()),
+            _ => full = usage.clone(),
+        }
         json!({"type": "assistant", "timestamp": at,
-               "message": {"model": "m", "id": id, "usage": usage}})
+               "message": {"model": "m", "id": id, "usage": full}})
     }
 
     #[test]
@@ -467,10 +516,29 @@ mod tests {
                 "ephemeral_5m_input_tokens": five, "ephemeral_1h_input_tokens": hour}}),
             )
         };
-        let u = usage(&split(1000, 1000)).expect("usage");
+        let u = read_reply(&split(1000, 1000)).expect("a reply").usage;
         assert!((u.multiplier - 1.625).abs() < 1e-12, "{}", u.multiplier);
         assert!(u.one_hour);
-        assert!(usage(&split(u64::MAX, 1)).is_none());
+        assert!(read_reply(&split(u64::MAX, 1)).is_err());
+    }
+
+    fn time(at: &str) -> DateTime<Utc> {
+        parse_ts(at).expect("a time")
+    }
+
+    /// A reply on model `m` at `at` that read and wrote so many tokens, for `cause`.
+    fn read_and_wrote(at: &str, read: u64, write: u64) -> Reply<'static> {
+        Reply {
+            id: "b",
+            model: "m",
+            at: time(at),
+            usage: Usage {
+                read,
+                write,
+                multiplier: WRITE_5M,
+                one_hour: false,
+            },
+        }
     }
 
     #[test]
@@ -480,17 +548,11 @@ mod tests {
                 read: 0,
                 write: 100,
                 model: "m".to_owned(),
-                at: parse_ts("2026-11-08T01:00:00.000Z"),
+                at: time("2026-11-08T01:00:00.000Z"),
             }),
             ..Cache::default()
         };
-        let u = Usage {
-            read: 0,
-            write: 100,
-            multiplier: WRITE_5M,
-            one_hour: false,
-        };
-        let cause = |at: &str| c.cause("m", parse_ts(at), &u).0;
+        let cause = |at: &str| c.cause(&read_and_wrote(at, 0, 100)).0;
         assert!(cause("2026-11-08T01:05:00.001Z") == Cause::Idle);
         assert!(cause("2026-11-08T01:05:00.000Z") == Cause::Other);
     }
@@ -559,6 +621,93 @@ mod tests {
             // c's writes are new context, not a rebuild of what a cached.
             assert_eq!(causes(&records), [Some(100), Some(100), None], "{model:?}");
         }
+    }
+
+    /// Each field a reply must have, as its path from the record, and a value of another
+    /// type.
+    fn fields() -> [(&'static [&'static str], Value); 10] {
+        [
+            (&["message"], json!("m")),
+            (&["message", "id"], json!(7)),
+            (&["message", "model"], json!(7)),
+            (&["message", "usage"], json!(7)),
+            (
+                &["message", "usage", "cache_creation_input_tokens"],
+                json!(-1),
+            ),
+            (&["message", "usage", "cache_read_input_tokens"], json!(1.5)),
+            (&["message", "usage", "cache_creation"], json!([])),
+            (
+                &[
+                    "message",
+                    "usage",
+                    "cache_creation",
+                    "ephemeral_5m_input_tokens",
+                ],
+                json!("1"),
+            ),
+            (
+                &[
+                    "message",
+                    "usage",
+                    "cache_creation",
+                    "ephemeral_1h_input_tokens",
+                ],
+                json!(true),
+            ),
+            (&["timestamp"], json!("yesterday")),
+        ]
+    }
+
+    /// `record` with the field at `path` removed (`None`) or set to `value`.
+    fn with(record: &Value, path: &[&str], value: Option<&Value>) -> Value {
+        let mut record = record.clone();
+        let (key, parents) = path.split_last().expect("a path");
+        let parent = parents.iter().fold(&mut record, |v, k| &mut v[*k]);
+        let parent = parent.as_object_mut().expect("an object");
+        match value {
+            Some(v) => parent.insert((*key).to_owned(), v.clone()),
+            None => parent.remove(*key),
+        };
+        record
+    }
+
+    #[test]
+    fn a_reply_with_a_field_missing_null_or_mistyped_is_skipped_and_breaks_the_chain() {
+        let write = json!({"cache_creation_input_tokens": 100});
+        let a = reply("a", "2026-11-08T01:00:00Z", &write);
+        let b = reply("b", "2026-11-08T01:00:30Z", &write);
+        let c = reply("c", "2026-11-08T01:01:00Z", &write);
+        for (path, wrong) in fields() {
+            for value in [None, Some(&Value::Null), Some(&wrong)] {
+                let records = [a.clone(), with(&b, path, value), c.clone()];
+                let case = format!("{path:?} {value:?}");
+                assert_eq!(
+                    read_reply(&records[1]).err(),
+                    path.last().copied(),
+                    "{case}"
+                );
+                let run = run(&records);
+                assert_eq!(run.skipped, 1, "{case}");
+                // b adds nothing, and c's writes are new context, not a rebuild.
+                let total = run.writes.values().map(|w| w.tokens).sum::<u64>();
+                assert_eq!(total, 200, "{case}");
+                assert_eq!(causes(&records), [Some(100), Some(100), None], "{case}");
+            }
+        }
+    }
+
+    #[test]
+    fn blocks_without_a_message_id_are_each_skipped() {
+        let write = json!({"cache_creation_input_tokens": 100});
+        let block = with(
+            &reply("a", "2026-11-08T01:00:00Z", &write),
+            &["message", "id"],
+            None,
+        );
+        let c = run(&[block.clone(), block]);
+        assert_eq!(c.skipped, 2);
+        assert!(c.writes.is_empty());
     }
 
     #[test]
@@ -645,22 +794,20 @@ mod tests {
                 &json!({"cache_creation_input_tokens": n}),
             )
         };
-        assert_eq!(usage(&writes(1 << 40)).map(|u| u.write), Some(1 << 40));
-        assert!(usage(&writes((1 << 40) + 1)).is_none());
+        let write = |n| read_reply(&writes(n)).map(|r| r.usage.write);
+        assert_eq!(write(1 << 40), Ok(1 << 40));
+        assert_eq!(write((1 << 40) + 1), Err("cache_creation_input_tokens"));
     }
 
     #[test]
-    fn usage_or_a_split_that_is_not_an_object_is_unreadable() {
+    fn usage_or_a_split_that_is_not_an_object_is_skipped() {
         let at = "2026-11-08T01:00:00Z";
         for bad in [json!(null), json!(7), json!([1])] {
-            assert!(usage(&reply("a", at, &bad)).is_none(), "usage {bad}");
+            let usage = read_reply(&reply("a", at, &bad)).err();
+            assert_eq!(usage, Some("usage"), "usage {bad}");
             let split = json!({"cache_creation_input_tokens": 100, "cache_creation": bad});
-            let unread = bad.is_null().then_some(100);
-            assert_eq!(
-                usage(&reply("a", at, &split)).map(|u| u.write),
-                unread,
-                "split {bad}"
-            );
+            let split = read_reply(&reply("a", at, &split)).err();
+            assert_eq!(split, Some("cache_creation"), "split {bad}");
         }
     }
 
@@ -678,16 +825,11 @@ mod tests {
                 read: u64::MAX,
                 write: 1,
                 model: "m".to_owned(),
-                at: None,
+                at: time("2026-11-08T01:00:00Z"),
             }),
             ..Cache::default()
         };
-        let u = Usage {
-            read: u64::MAX,
-            write: 5,
-            multiplier: WRITE_5M,
-            one_hour: false,
-        };
-        assert_eq!(c.cause("m", None, &u), (Cause::Other, 1));
+        let reply = read_and_wrote("2026-11-08T01:00:00Z", u64::MAX, 5);
+        assert_eq!(c.cause(&reply), (Cause::Other, 1));
     }
 }
