@@ -1158,6 +1158,7 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[0]["lines_skipped"], 1);
     assert_eq!(roots[1]["files"], 2);
     assert_eq!(doc["schema_version"], 2);
+    assert_eq!(doc["tool"], "bigsister");
     assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(9));
 }
 
@@ -1735,12 +1736,12 @@ fn a_detector_without_its_agent_says_so() {
 fn help_and_version_exit_zero() {
     let (code, stdout, _) = run(&["--help"]);
     assert_eq!(code, 0);
-    assert!(stdout.contains("Usage: shaphan"));
+    assert!(stdout.contains("Usage: bigsister"));
     let (code, stdout, _) = run(&["--version"]);
     assert_eq!(code, 0);
     assert_eq!(
         stdout.trim(),
-        format!("shaphan {}", env!("CARGO_PKG_VERSION"))
+        format!("bigsister {}", env!("CARGO_PKG_VERSION"))
     );
 }
 
@@ -3132,7 +3133,10 @@ fn a_date_is_midnight_in_the_local_zone() {
     let (code, stdout, stderr) = since_run("2026-11-01", false, sydney);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(
-        stdout.contains(": records since 2026-11-01 00:00 +11:00\n"),
+        stdout.starts_with(&format!(
+            "bigsister {}: records since 2026-11-01 00:00 +11:00\n",
+            env!("CARGO_PKG_VERSION")
+        )),
         "{stdout}"
     );
     let (_, stdout, _) = since_run("2026-07-01T00:00:00Z", false, sydney);
