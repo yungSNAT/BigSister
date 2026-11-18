@@ -3143,15 +3143,16 @@ fn a_date_is_midnight_in_the_local_zone() {
 }
 
 /// Havana's clocks went back from 01:00 to midnight on 4 November 2018, so that midnight
-/// came twice: the later one (05:00 UTC) is taken. On 11 March 2018 they went forward from
-/// midnight to 01:00, so that midnight never came: the date starts when the clocks resumed.
+/// came twice: the first (04:00 UTC) is taken, so no record of that day is left out. On
+/// 11 March 2018 they went forward from midnight to 01:00, so that midnight never came: the
+/// date starts when the clocks resumed.
 #[cfg(unix)]
 #[test]
-fn a_repeated_local_midnight_is_the_later_and_a_skipped_one_is_when_clocks_resume() {
+fn a_repeated_local_midnight_is_the_first_and_a_skipped_one_is_when_clocks_resume() {
     let havana: &[(&str, &Path)] = &[("TZ", Path::new("America/Havana"))];
     for (date, start) in [
         ("2018-11-03", "2018-11-03T04:00:00+00:00"),
-        ("2018-11-04", "2018-11-04T05:00:00+00:00"),
+        ("2018-11-04", "2018-11-04T04:00:00+00:00"),
         ("2018-03-11", "2018-03-11T05:00:00+00:00"),
         ("2018-03-12", "2018-03-12T04:00:00+00:00"),
     ] {

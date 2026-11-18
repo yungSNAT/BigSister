@@ -412,6 +412,22 @@ fn csv_field(field: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The fewest of 0, 3, 6 or 9 fractional digits that keep the time exact.
+    #[test]
+    fn rfc3339_prints_whole_groups_of_digits() {
+        for (ns, printed) in [
+            (0, "2026-11-01T00:00:00+00:00"),
+            (1, "2026-11-01T00:00:00.000000001+00:00"),
+            (1_000, "2026-11-01T00:00:00.000001+00:00"),
+            (1_000_000, "2026-11-01T00:00:00.001+00:00"),
+            (120_000_000, "2026-11-01T00:00:00.120+00:00"),
+            (123_456_789, "2026-11-01T00:00:00.123456789+00:00"),
+        ] {
+            let t = Timestamp::new(1_793_491_200, ns).expect("a time");
+            assert_eq!(rfc3339(t), printed, "{ns}");
+        }
+    }
+
     #[test]
     fn percentile_nearest_rank() {
         let v = [5, 1, 4, 2, 3];
