@@ -48,6 +48,8 @@ jobs:
             cargo llvm-cov --locked --lcov --output-path coverage.lcov
             # cargo llvm-cov leaves out doctests.
             cargo test --doc --locked
+            # The fuzz target runs only on a schedule; check that it still builds.
+            cargo check --locked --manifest-path fuzz/Cargo.toml
           else
             cargo test --locked
           fi
