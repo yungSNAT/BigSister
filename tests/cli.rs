@@ -3159,3 +3159,15 @@ fn a_repeated_local_midnight_is_the_first_and_a_skipped_one_is_when_clocks_resum
         assert_eq!(since_json(date, havana), json!(start), "{date}");
     }
 }
+
+/// The last date there is, at midnight in UTC, lies past the last instant the window can
+/// start at: it still parses, and finds nothing.
+#[cfg(unix)]
+#[test]
+fn the_last_date_at_utc_midnight_finds_nothing() {
+    let utc: &[(&str, &Path)] = &[("TZ", Path::new("UTC"))];
+    let (code, stdout, stderr) = since_run("9999-12-31", true, utc);
+    assert_eq!(code, 0, "{stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(doc["roots"][0]["files"], 0);
+}
