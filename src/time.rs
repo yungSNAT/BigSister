@@ -15,10 +15,13 @@ pub fn parse_since(s: &str, now: Timestamp) -> Result<Timestamp, String> {
     let since = if let Some(delta) = relative(t) {
         now.checked_sub(delta).map_err(|_| before_1970())?
     } else if let Ok(date) = Date::strptime("%Y-%m-%d", t) {
-        // A repeated midnight is the first; a skipped one is when the clocks resume.
-        date.to_zoned_datetime(TimeZone::system())
-            .map_err(|_| bad())?
-            .timestamp()
+        // A repeated midnight is the first; a skipped one is when the clocks resume. A
+        // midnight past the last instant jiff holds (9999-12-30T22:00Z) is that instant.
+        match date.to_zoned_datetime(TimeZone::system()) {
+            Ok(midnight) => midnight.timestamp(),
+            Err(_) if date.year() > 1970 => Timestamp::MAX,
+            Err(_) => return Err(before_1970()),
+        }
     } else {
         parse_ts(t).ok_or_else(bad)?
     };
