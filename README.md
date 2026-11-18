@@ -9,7 +9,7 @@
 
 <div align="center">
 
-[![CI](https://img.shields.io/github/actions/workflow/status/yungSNAT/ShaphansAudit/ci.yml?branch=main&style=flat&label=CI&labelColor=000000)](https://github.com/yungSNAT/ShaphansAudit/actions/workflows/ci.yml?query=branch%3Amain) [![coverage](https://img.shields.io/codecov/c/github/yungSNAT/ShaphansAudit?branch=main&style=flat&label=coverage&labelColor=000000)](https://app.codecov.io/gh/yungSNAT/ShaphansAudit) [![licence: FSL-1.1-ALv2](.github/assets/badges/licence.svg)](#licence)
+[![CI](https://img.shields.io/github/actions/workflow/status/yungSNAT/ShaphansAudit/ci.yml?branch=main&style=flat&label=CI&labelColor=000000)](https://github.com/yungSNAT/ShaphansAudit/actions/workflows/ci.yml?query=branch%3Amain) [![coverage](https://img.shields.io/codecov/c/github/yungSNAT/ShaphansAudit?branch=main&style=flat&label=coverage&labelColor=000000)](https://app.codecov.io/gh/yungSNAT/ShaphansAudit) [![licence: Apache-2.0](.github/assets/badges/licence.svg)](#licence)
 
 [Install](#install) · [Use](#use) · [Privacy](#privacy) · [Limits](#limits) · [Development](#development) · [Credits](#credits) · [Licence](#licence)
 
@@ -192,7 +192,9 @@ The banner's lettering uses Cascadia Mono and Besley glyphs (SIL OFL 1.1); its c
 
 ## Licence
 
-Licensed under the Functional Source License, Version 1.1, ALv2 Future License (FSL-1.1-ALv2). You may use, modify and redistribute it for any purpose except a Competing Use as defined in [LICENSE](LICENSE), and each version becomes available under Apache-2.0 2 years after it is made available.
+Apache-2.0; see [LICENSE](LICENSE). If you redistribute this work or build on it, keep the attribution in [NOTICE](NOTICE).
+
+Earlier versions, including the 0.1.0 release, stay under the licence they were released with, FSL-1.1-ALv2; each becomes available under Apache-2.0 2 years after it was made available.
 
 ---
 
