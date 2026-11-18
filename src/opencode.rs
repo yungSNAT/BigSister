@@ -48,7 +48,7 @@ const TABLES: [&str; 3] = ["session", "message", "part"];
 /// columns used. The reason, with what to do where the user can act, holds no table
 /// content: an error other than SQLite's own message is named only as such, since a
 /// conversion error can quote a row's value.
-pub fn read(db: &Path, since: Timestamp) -> Result<Vec<Session>, String> {
+pub fn read(db: &Path, since: Option<Timestamp>) -> Result<Vec<Session>, String> {
     let conn = open(db)?;
     sessions(&conn, since).map_err(|e| match e {
         rusqlite::Error::SqliteFailure(_, Some(message)) => message,
@@ -56,15 +56,18 @@ pub fn read(db: &Path, since: Timestamp) -> Result<Vec<Session>, String> {
     })
 }
 
-fn sessions(conn: &Connection, since: Timestamp) -> rusqlite::Result<Vec<Session>> {
+fn sessions(conn: &Connection, since: Option<Timestamp>) -> rusqlite::Result<Vec<Session>> {
+    // With no `since`, only a session updated past the last instant a timestamp holds.
+    let since = since.map_or(
+        Timestamp::MAX.as_millisecond() + 1,
+        Timestamp::as_millisecond,
+    );
     let sessions: Vec<(String, bool)> = conn
         .prepare(
             "SELECT id, parent_id IS NOT NULL FROM session WHERE time_updated >= ?1 \
              ORDER BY time_created, id",
         )?
-        .query_map(params![since.as_millisecond()], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?
+        .query_map(params![since], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let mut messages = conn.prepare(
         "SELECT id, time_created, data FROM message WHERE session_id = ?1 \
@@ -819,7 +822,7 @@ mod tests {
     /// a write open.
     #[test]
     fn a_read_creates_or_changes_no_file_beside_the_database() {
-        let since = Timestamp::UNIX_EPOCH;
+        let since = Some(Timestamp::UNIX_EPOCH);
         let mut wrong = Vec::new();
         for case in ["none", "both", "log", "journal", "live"] {
             let (dir, db) = database(&format!("a-{case}"), case != "journal");
@@ -997,7 +1000,7 @@ mod tests {
         // The page's type: no page of a table holds 0 there.
         bytes[usize::try_from((root - 1) * size).expect("offset")] = 0;
         std::fs::write(&db, bytes).expect("damage");
-        let since = Timestamp::UNIX_EPOCH;
+        let since = Some(Timestamp::UNIX_EPOCH);
         assert!(read(&db, since).is_err(), "a damaged database was read");
         std::fs::remove_dir_all(&dir).expect("clean up");
     }

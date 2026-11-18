@@ -129,15 +129,17 @@ const CLAUDE_SKIP_PREFIX: &str = "{\"type\":\"api-request-blob\"";
 
 /// Scans every transcript under each root that a chosen detector reads and that
 /// was modified at or after `since`, pricing what each model reads at `prices`. With no
-/// `since`, the window starts after every instant and nothing is read.
+/// `since`, the window starts after every instant: no record is in it, but what cannot
+/// be read is still counted.
 pub fn scan(
     roots: &[(Agent, PathBuf)],
     since: Option<Timestamp>,
     prices: &Prices,
     dets: &mut [Box<dyn Detector>],
 ) -> Vec<RootStats> {
-    let window = since.map(|since| Window { since, prices });
-    let cutoff = u64::try_from(since.unwrap_or(Timestamp::UNIX_EPOCH).as_second())
+    let window = Window { since, prices };
+    let cutoff = since.map_or(Timestamp::MAX.as_second() + 1, Timestamp::as_second);
+    let cutoff = u64::try_from(cutoff)
         .ok()
         .and_then(|s| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(s)))
         .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -159,12 +161,8 @@ pub fn scan(
             compressed: 0,
             unreadable_reasons: BTreeMap::new(),
         };
-        let Some(window) = &window else {
-            out.push(st);
-            continue;
-        };
         if *agent == Agent::OpenCode {
-            scan_opencode(root, window, dets, &active, &mut st, &mut earlier);
+            scan_opencode(root, &window, dets, &active, &mut st, &mut earlier);
             out.push(st);
             continue;
         }
@@ -175,7 +173,7 @@ pub fn scan(
             // fork's header is written when it is made, after the entries it copies.
             files.sort_by_cached_key(|p| first_time(p));
         }
-        scan_files(files, window, dets, &active, &mut st, &mut earlier);
+        scan_files(files, &window, dets, &active, &mut st, &mut earlier);
         out.push(st);
     }
     out
@@ -443,7 +441,8 @@ impl Lines {
 
 /// What every transcript of a scan is read against.
 struct Window<'a> {
-    since: Timestamp,
+    /// `None` starts the window after every instant.
+    since: Option<Timestamp>,
     prices: &'a Prices,
 }
 
@@ -562,7 +561,7 @@ fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
 
 struct Feed<'a> {
     session: Session,
-    since: Timestamp,
+    since: Option<Timestamp>,
     prices: &'a Prices,
     last_time: Option<Timestamp>,
     /// The model the latest Codex `turn_context` names, if any.
@@ -653,7 +652,7 @@ impl Feed<'_> {
         }
         let rec = Record {
             value: &value,
-            in_window: !copied && self.last_time.is_some_and(|t| t >= self.since),
+            in_window: !copied && self.since.zip(self.last_time).is_some_and(|(s, t)| t >= s),
         };
         for i in wanting {
             self.dets[i].record(&self.session, &rec);
@@ -851,7 +850,7 @@ mod tests {
                 reader,
                 path,
                 &Window {
-                    since: Timestamp::MIN,
+                    since: Some(Timestamp::MIN),
                     prices: &Prices::bundled(),
                 },
                 &mut dets,
