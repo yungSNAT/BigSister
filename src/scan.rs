@@ -7,7 +7,7 @@ use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
 use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
 use serde_json::Value;
@@ -128,15 +128,18 @@ impl RootStats {
 const CLAUDE_SKIP_PREFIX: &str = "{\"type\":\"api-request-blob\"";
 
 /// Scans every transcript under each root that a chosen detector reads and that
-/// was modified at or after `since`, pricing what each model reads at `prices`.
+/// was modified at or after `since`, pricing what each model reads at `prices`. With no
+/// `since`, the window starts after every instant: no record is in it, but what cannot
+/// be read is still counted.
 pub fn scan(
     roots: &[(Agent, PathBuf)],
-    since: DateTime<Utc>,
+    since: Option<Timestamp>,
     prices: &Prices,
     dets: &mut [Box<dyn Detector>],
 ) -> Vec<RootStats> {
     let window = Window { since, prices };
-    let cutoff = u64::try_from(since.timestamp())
+    let cutoff = since.map_or(Timestamp::MAX.as_second() + 1, Timestamp::as_second);
+    let cutoff = u64::try_from(cutoff)
         .ok()
         .and_then(|s| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(s)))
         .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -289,7 +292,7 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
 
 /// The top-level `timestamp` of a transcript's first record that has one, or `None`
 /// when no record has one or the file cannot be read.
-fn first_time(path: &Path) -> Option<DateTime<Utc>> {
+fn first_time(path: &Path) -> Option<Timestamp> {
     let mut lines = Lines::new(open(path).ok()?);
     while let Ok(Some(line)) = lines.next_line() {
         let value = serde_json::from_str::<Value>(line.trim_end()).ok();
@@ -438,7 +441,8 @@ impl Lines {
 
 /// What every transcript of a scan is read against.
 struct Window<'a> {
-    since: DateTime<Utc>,
+    /// `None` starts the window after every instant.
+    since: Option<Timestamp>,
     prices: &'a Prices,
 }
 
@@ -557,9 +561,9 @@ fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
 
 struct Feed<'a> {
     session: Session,
-    since: DateTime<Utc>,
+    since: Option<Timestamp>,
     prices: &'a Prices,
-    last_time: Option<DateTime<Utc>>,
+    last_time: Option<Timestamp>,
     /// The model the latest Codex `turn_context` names, if any.
     codex_model: Option<String>,
     /// The `uuid` of each Claude record parsed so far in the file.
@@ -648,7 +652,7 @@ impl Feed<'_> {
         }
         let rec = Record {
             value: &value,
-            in_window: !copied && self.last_time.is_some_and(|t| t >= self.since),
+            in_window: !copied && self.since.zip(self.last_time).is_some_and(|(s, t)| t >= s),
         };
         for i in wanting {
             self.dets[i].record(&self.session, &rec);
@@ -784,7 +788,7 @@ fn prompt_tokens(line: &str) -> Option<u64> {
 /// shortcut: in a Claude line, a nested object after the top-level key that has its
 /// own `timestamp` is read instead. Only records without a timestamp of their own
 /// take this time; parsing every line would be exact but slower.
-fn raw_timestamp(line: &str) -> Option<DateTime<Utc>> {
+fn raw_timestamp(line: &str) -> Option<Timestamp> {
     const KEY: &str = "\"timestamp\":\"";
     let at = if line.strip_prefix('{').is_some_and(|r| r.starts_with(KEY)) {
         1
@@ -846,7 +850,7 @@ mod tests {
                 reader,
                 path,
                 &Window {
-                    since: DateTime::<Utc>::MIN_UTC,
+                    since: Some(Timestamp::MIN),
                     prices: &Prices::bundled(),
                 },
                 &mut dets,

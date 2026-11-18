@@ -532,8 +532,8 @@ const T: i64 = 1_762_560_000_000;
 /// An `exec` call recorded at `ms`.
 fn exec_at(id: &str, input: &str, ms: i64) -> String {
     let mut v: Value = serde_json::from_str(&exec(id, input)).expect("record");
-    let at = chrono::DateTime::from_timestamp_millis(ms).expect("time");
-    v["timestamp"] = json!(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+    let at = jiff::Timestamp::from_millisecond(ms).expect("time");
+    v["timestamp"] = json!(format!("{at:.3}"));
     v.to_string()
 }
 

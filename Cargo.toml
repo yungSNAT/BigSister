@@ -12,8 +12,8 @@ name = "shaphan"
 path = "src/main.rs"
 
 [dependencies]
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
+jiff = { version = "1.0.0", default-features = false, features = ["std", "tz-system", "tzdb-bundle-platform", "tzdb-zoneinfo"] }
 regex = "1"
 ruzstd = "0.9"
 rusqlite = { version = "0.41.1", features = ["bundled", "hooks", "serialize"] }

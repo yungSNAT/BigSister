@@ -3075,3 +3075,114 @@ fn a_pi_line_in_another_agent_s_shape_counts_nowhere() {
     assert_eq!(row["commands"], json!(1), "{row}");
     assert_eq!(row["polls"], json!(0), "{row}");
 }
+
+/// `polls` over the fixtures from `since`, with extra environment variables.
+fn since_run(since: &str, json: bool, env: &[(&str, &Path)]) -> (i32, String, String) {
+    let mut args = vec![
+        "polls",
+        "--claude-root",
+        CLAUDE,
+        "--codex-root",
+        CODEX,
+        "--since",
+        since,
+    ];
+    if json {
+        args.push("--json");
+    }
+    run_env(&args, env)
+}
+
+/// The window's start as JSON prints it.
+fn since_json(since: &str, env: &[(&str, &Path)]) -> Value {
+    let (code, stdout, stderr) = since_run(since, true, env);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    doc["since"].clone()
+}
+
+#[test]
+fn json_prints_the_window_start_in_rfc_3339_with_an_offset() {
+    for (since, printed) in [
+        ("2026-11-01T00:00:00Z", "2026-11-01T00:00:00+00:00"),
+        ("2026-11-01T11:00:00+11:00", "2026-11-01T00:00:00+00:00"),
+        ("2026-11-01T00:00:00.5Z", "2026-11-01T00:00:00.500+00:00"),
+        (
+            "2026-11-01T00:00:00.123456Z",
+            "2026-11-01T00:00:00.123456+00:00",
+        ),
+        (
+            "2026-11-01T00:00:00.1234567Z",
+            "2026-11-01T00:00:00.123456700+00:00",
+        ),
+    ] {
+        assert_eq!(since_json(since, &[]), json!(printed), "{since}");
+    }
+}
+
+/// A date is midnight where the machine is; text prints the start there, with its offset.
+#[cfg(unix)]
+#[test]
+fn a_date_is_midnight_in_the_local_zone() {
+    let sydney: &[(&str, &Path)] = &[("TZ", Path::new("Australia/Sydney"))];
+    assert_eq!(
+        since_json("2026-11-01", sydney),
+        json!("2026-10-31T13:00:00+00:00")
+    );
+    let (code, stdout, stderr) = since_run("2026-11-01", false, sydney);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains(": records since 2026-11-01 00:00 +11:00\n"),
+        "{stdout}"
+    );
+    let (_, stdout, _) = since_run("2026-07-01T00:00:00Z", false, sydney);
+    assert!(
+        stdout.contains(": records since 2026-07-01 10:00 +10:00\n"),
+        "{stdout}"
+    );
+}
+
+/// Havana's clocks went back from 01:00 to midnight on 4 November 2018, so that midnight
+/// came twice: the first (04:00 UTC) is taken, so no record of that day is left out. On
+/// 11 March 2018 they went forward from midnight to 01:00, so that midnight never came: the
+/// date starts when the clocks resumed.
+#[cfg(unix)]
+#[test]
+fn a_repeated_local_midnight_is_the_first_and_a_skipped_one_is_when_clocks_resume() {
+    let havana: &[(&str, &Path)] = &[("TZ", Path::new("America/Havana"))];
+    for (date, start) in [
+        ("2018-11-03", "2018-11-03T04:00:00+00:00"),
+        ("2018-11-04", "2018-11-04T04:00:00+00:00"),
+        ("2018-03-11", "2018-03-11T05:00:00+00:00"),
+        ("2018-03-12", "2018-03-12T04:00:00+00:00"),
+    ] {
+        assert_eq!(since_json(date, havana), json!(start), "{date}");
+    }
+}
+
+/// The last date there is, at midnight in UTC, lies past the last instant the window can
+/// start at: it still parses, and finds nothing.
+#[cfg(unix)]
+#[test]
+fn the_last_date_at_utc_midnight_finds_nothing() {
+    let utc: &[(&str, &Path)] = &[("TZ", Path::new("UTC"))];
+    let (code, stdout, stderr) = since_run("9999-12-31", true, utc);
+    assert_eq!(code, 0, "{stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(doc["roots"][0]["files"], 0);
+    assert_eq!(doc["since"], json!("9999-12-30T22:00:00.999999999+00:00"));
+}
+
+/// The last date's midnight at +02:00 is the first instant past the last one a window can
+/// start at; at +01:00 it lies past that instant, and the window holds nothing.
+#[cfg(unix)]
+#[test]
+fn the_last_date_starts_a_window_only_from_plus_two_hours() {
+    for (zone, start) in [
+        ("Africa/Johannesburg", "9999-12-30T22:00:00+00:00"),
+        ("Europe/Paris", "9999-12-30T22:00:00.999999999+00:00"),
+    ] {
+        let tz: &[(&str, &Path)] = &[("TZ", Path::new(zone))];
+        assert_eq!(since_json("9999-12-31", tz), json!(start), "{zone}");
+    }
+}
