@@ -787,7 +787,7 @@ fn item_result(item: &Value) -> Option<CommandResult> {
 /// When a record was written, in milliseconds since the epoch.
 fn record_ms(r: &Record<'_>) -> Option<i64> {
     let t = r.value.get("timestamp")?.as_str()?;
-    Some(crate::time::parse_ts(t)?.timestamp_millis())
+    Some(crate::time::parse_ts(t)?.as_millisecond())
 }
 
 /// A command's text as it is matched with Codex's record of what ran: trimmed, and

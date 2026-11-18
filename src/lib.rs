@@ -22,7 +22,7 @@ use scan::Agent;
 /// # Errors
 /// Returns a message when `--since` is invalid or no transcript folder can be read.
 pub fn run(cli: &Cli) -> Result<String, String> {
-    let since = time::parse_since(&cli.since, chrono::Utc::now())?;
+    let since = time::parse_since(&cli.since, jiff::Timestamp::now())?;
     let home = std::env::home_dir().map(|h| report::display_path(&h.display().to_string(), None));
     let prices = std::rc::Rc::new(read_prices(cli, home.as_deref())?);
     let mut dets = detectors::build(
@@ -60,7 +60,7 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         })
         .collect();
     let meta = Meta {
-        since,
+        since: since.unwrap_or(jiff::Timestamp::MAX),
         roots: &stats,
         skipped_roots: &skipped,
         home: home.as_deref(),

@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use chrono::DateTime;
+use jiff::Timestamp;
 use libfuzzer_sys::fuzz_target;
 use shaphansaudit::cli::Command;
 use shaphansaudit::detectors::build;
@@ -36,8 +36,8 @@ fuzz_target!(|data: &[u8]| {
         (Agent::Codex, dir.clone()),
         (Agent::Pi, dir),
     ];
-    let since = DateTime::UNIX_EPOCH;
-    let stats = scan(&roots, since, &prices, &mut dets);
+    let since = Timestamp::UNIX_EPOCH;
+    let stats = scan(&roots, Some(since), &prices, &mut dets);
     // Each root lists both files, the compressed one counted as read or skipped.
     for st in &stats {
         assert_eq!(st.files + st.compressed, 2, "{st:?}");
