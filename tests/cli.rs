@@ -3170,4 +3170,5 @@ fn the_last_date_at_utc_midnight_finds_nothing() {
     assert_eq!(code, 0, "{stderr}");
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(doc["roots"][0]["files"], 0);
+    assert_eq!(doc["since"], json!("9999-12-30T22:00:00.999999999+00:00"));
 }
