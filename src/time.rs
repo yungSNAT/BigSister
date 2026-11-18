@@ -1,6 +1,6 @@
 //! Parsing `--since` and record timestamps.
 
-use jiff::civil::{Date, Time};
+use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 
@@ -15,10 +15,8 @@ pub fn parse_since(s: &str, now: Timestamp) -> Result<Timestamp, String> {
     let since = if let Some(delta) = relative(t) {
         now.checked_sub(delta).map_err(|_| before_1970())?
     } else if let Ok(date) = Date::strptime("%Y-%m-%d", t) {
-        // A repeated midnight is the later one; a skipped one is when the clocks resume.
-        TimeZone::system()
-            .to_ambiguous_zoned_datetime(date.to_datetime(Time::midnight()))
-            .later()
+        // A repeated midnight is the first; a skipped one is when the clocks resume.
+        date.to_zoned_datetime(TimeZone::system())
             .map_err(|_| bad())?
             .timestamp()
     } else {
