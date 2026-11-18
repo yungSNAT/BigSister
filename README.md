@@ -23,7 +23,7 @@ It prints names, paths, counts, sizes and times, as listed under [Privacy](#priv
 
 Each [release](https://github.com/yungSNAT/BigSister/releases) carries the executable for Windows (x86_64) and Linux (x86_64, statically linked), with a `SHA256SUMS` file and signed build provenance. There is no macOS build yet; install from source there.
 
-BigSister was called ShaphansAudit until 19 November 2026. The only release so far, v0.1.0, came out under that name: its archives are named `shaphansaudit-0.1.0-*` and its executable is `shaphan`, so use that name in the commands below. From the next release the executable is `bigsister`; until then, [install from source](#from-source) to get it. [RELEASE_NOTES.md](RELEASE_NOTES.md) lists what changes for a v0.1.0 install.
+BigSister was called ShaphansAudit until 19 November 2026. The only release so far, v0.1.0, came out under that name: its archives are named `shaphansaudit-0.1.0-*` and its executable is `shaphan`, which the commands below install; with it, run `shaphan` wherever this README says `bigsister`. From the next release the executable is `bigsister`; until then, [install from source](#from-source) to get it. [RELEASE_NOTES.md](RELEASE_NOTES.md) lists what changes for a v0.1.0 install.
 
 On Linux, this downloads v0.1.0, stops if the file does not match `SHA256SUMS`, and installs to `~/.local/bin`, which must be on your `PATH`:
 
@@ -73,7 +73,7 @@ cargo install --locked --path .
 bigsister all
 ```
 
-This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.pi/agent/sessions` and `~/.local/share/opencode` and prints one section per detector. If none of them exists, it exits 1 and names each missing folder but `~/.codex/archived_sessions`, which need not exist. Run one detector by name, for example `bigsister hooks --since 24h`.
+This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.pi/agent/sessions` and `~/.local/share/opencode` and prints one section per detector. If none of them exists, it exits 1 and names each missing folder but `~/.codex/archived_sessions`, which need not exist. Run one detector by name, for example `bigsister hooks --since 24h`. The v0.1.0 release's executable takes these commands as `shaphan`.
 
 From a clone, this runs it on the synthetic test transcripts:
 
