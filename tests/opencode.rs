@@ -1,4 +1,4 @@
-//! Runs `shaphan` over OpenCode databases the tests build, in OpenCode's layout.
+//! Runs `bigsister` over OpenCode databases the tests build, in OpenCode's layout.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -10,17 +10,17 @@ const SINCE: &str = "2026-11-01T00:00:00Z";
 /// 9 November 2026 at 05:00 UTC, in milliseconds.
 const T0: i64 = 1_794_200_400_000;
 
-/// Runs `shaphan` with an empty home folder, so that no folder of the machine running
+/// Runs `bigsister` with an empty home folder, so that no folder of the machine running
 /// the tests is read.
 fn run(args: &[&str]) -> (i32, String, String) {
     let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("home-empty-opencode");
     std::fs::create_dir_all(&home).expect("home folder");
-    let out = Command::new(env!("CARGO_BIN_EXE_shaphan"))
+    let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
         .args(args)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .output()
-        .expect("run shaphan");
+        .expect("run bigsister");
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -29,7 +29,7 @@ fn run(args: &[&str]) -> (i32, String, String) {
 }
 
 /// OpenCode's tables as its database holds them (OpenCode 1.18), reduced to the columns
-/// shaphan reads and those holding secrets, which carry sentinels.
+/// bigsister reads and those holding secrets, which carry sentinels.
 const SCHEMA: &str = "
 CREATE TABLE session (id text PRIMARY KEY, project_id text NOT NULL, parent_id text,
   slug text NOT NULL, directory text NOT NULL, title text NOT NULL,
@@ -369,7 +369,7 @@ fn an_empty_log_and_its_index_are_left_alone() {
 }
 
 /// A message or part whose data is not JSON, a part whose message cannot be read and a
-/// tool part with no state each count as a skipped line; a part of a type shaphan does
+/// tool part with no state each count as a skipped line; a part of a type bigsister does
 /// not know is passed over; none of their text prints.
 #[test]
 fn malformed_rows_count_as_skipped_lines_and_print_nothing() {
@@ -656,7 +656,7 @@ fn a_late_unreadable_row_leaves_no_partial_report() {
 #[cfg(unix)]
 fn utc_roots(dir: &Path, since: &str) -> Value {
     let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("home-empty-opencode");
-    let out = Command::new(env!("CARGO_BIN_EXE_shaphan"))
+    let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
         .args(["all", "--agent", "opencode", "--opencode-root"])
         .arg(dir)
         .args(["--since", since, "--json"])
@@ -664,7 +664,7 @@ fn utc_roots(dir: &Path, since: &str) -> Value {
         .env("USERPROFILE", &home)
         .env("TZ", "UTC")
         .output()
-        .expect("run shaphan");
+        .expect("run bigsister");
     assert!(
         out.status.success(),
         "{}",

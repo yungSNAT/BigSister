@@ -1,15 +1,11 @@
 [package]
-name = "shaphansaudit"
-version = "0.1.0"
+name = "bigsister"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.99"
 description = "Find where your coding agent's tokens go, from its own transcripts."
 license = "Apache-2.0"
 publish = false
-
-[[bin]]
-name = "shaphan"
-path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }

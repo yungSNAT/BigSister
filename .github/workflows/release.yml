@@ -1,6 +1,6 @@
 name: Release
 
-# A v* tag on main's head publishes shaphan through release-policy's binary
+# A v* tag on main's head publishes bigsister through release-policy's binary
 # family: Linux (x86_64, static) and Windows (x86_64) executables, source
 # archives, SBOMs, SHA256SUMS and signed provenance in one release. The family
 # builds no macOS target yet. VERSION, Cargo.toml and the first line of
@@ -30,8 +30,8 @@ jobs:
       id-token: write # Obtain the OIDC identity required to sign attestations.
     uses: ryanduguid/release-policy/.github/workflows/release-binary.yml@ca5492bd09693be9e1fd47d980e2740ef8daf023 # canaries.json current pin
     with:
-      artifact-stem: shaphansaudit
-      binary: shaphan
+      artifact-stem: bigsister
+      binary: bigsister
       # The ci.yml jobs that must have passed on main for the tagged commit.
       required-checks: |
         .github/workflows/ci.yml: check (ubuntu-latest)

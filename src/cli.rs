@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 /// Reads Claude Code, Codex, pi and OpenCode transcripts on this machine and prints names,
 /// counts and sizes. Never prints message text, tool inputs or tool outputs.
 #[derive(Parser, Debug)]
-#[command(name = "shaphan", version)]
+#[command(name = "bigsister", version)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,

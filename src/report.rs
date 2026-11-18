@@ -206,7 +206,7 @@ fn cell(v: &Value) -> String {
 #[must_use]
 pub fn text(meta: &Meta<'_>, sections: &[Section]) -> String {
     let mut out = format!(
-        "shaphan {}: records since {}\n",
+        "bigsister {}: records since {}\n",
         env!("CARGO_PKG_VERSION"),
         local(meta.since)
     );
@@ -324,7 +324,7 @@ pub fn json(meta: &Meta<'_>, sections: &[Section]) -> String {
     }
     let doc = json!({
         "schema_version": 2,
-        "tool": "shaphan",
+        "tool": "bigsister",
         "version": env!("CARGO_PKG_VERSION"),
         "since": rfc3339(meta.since),
         "roots": roots,

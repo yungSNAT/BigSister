@@ -1,4 +1,4 @@
-//! Runs the `shaphan` binary over the synthetic fixtures in `tests/fixtures`.
+//! Runs the `bigsister` binary over the synthetic fixtures in `tests/fixtures`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -35,7 +35,7 @@ fn stubs() -> &'static Path {
     })
 }
 
-/// Runs `shaphan` from the crate folder, where fixture hook commands name scripts in
+/// Runs `bigsister` from the crate folder, where fixture hook commands name scripts in
 /// `tests/fixtures/hooks`, with the stub programs first on `PATH`.
 fn run(args: &[&str]) -> (i32, String, String) {
     run_env(args, &[])
@@ -52,7 +52,7 @@ fn run_env(args: &[&str], env: &[(&str, &Path)]) -> (i32, String, String) {
     // is read; a test can give its own.
     let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("home-empty");
     std::fs::create_dir_all(&home).expect("home folder");
-    let out = Command::new(env!("CARGO_BIN_EXE_shaphan"))
+    let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
         .args(args)
         .env("PATH", path)
         .env("HOME", &home)
@@ -1162,7 +1162,7 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(9));
 }
 
-/// `shaphan all` over the Claude transcripts in a fixture folder, which must hold 2.
+/// `bigsister all` over the Claude transcripts in a fixture folder, which must hold 2.
 fn claude_all(fixture: &str) -> Value {
     let root = format!("{}/tests/fixtures/{fixture}", env!("CARGO_MANIFEST_DIR"));
     let (code, stdout, stderr) = run(&[
@@ -1851,7 +1851,7 @@ fn hooks_without_output_show_null() {
 #[test]
 fn paths_under_home_start_with_a_tilde() {
     let home = concat!(env!("CARGO_MANIFEST_DIR"), "/tests");
-    let out = Command::new(env!("CARGO_BIN_EXE_shaphan"))
+    let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
         .args([
             "hooks",
             "--agent",
@@ -1873,7 +1873,7 @@ fn paths_under_home_start_with_a_tilde() {
 
 #[test]
 fn files_modified_before_the_window_are_not_read() {
-    let dir = std::env::temp_dir().join(format!("shaphan-mtime-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("bigsister-mtime-{}", std::process::id()));
     let file = dir.join("proj").join("s.jsonl");
     std::fs::create_dir_all(file.parent().expect("parent")).expect("temp folder");
     std::fs::copy(format!("{CLAUDE}/proj-a/s-main.jsonl"), &file).expect("copy fixture");
@@ -1975,7 +1975,7 @@ const PRICED_MIXED: &str = concat!(
     "/tests/fixtures/priced-mixed/claude"
 );
 
-/// `shaphan all --json` over the priced Codex fixtures and `claude`, with `extra` options.
+/// `bigsister all --json` over the priced Codex fixtures and `claude`, with `extra` options.
 fn priced(claude: &str, extra: &[&str]) -> Value {
     let mut args = vec![
         "all",
@@ -2186,7 +2186,7 @@ fn tool_call_records(
             i % 30 * 2
         );
         // Written as text: Claude Code puts `model` first in a reply's message, and
-        // shaphan finds a reply by that.
+        // bigsister finds a reply by that.
         let use_block = json!({"type": "tool_use", "id": format!("{tag}t{i}"), "name": tool,
                                "input": input});
         let result = json!({"type": "user", "uuid": format!("{tag}u{i}"), "timestamp": time,
@@ -2347,7 +2347,7 @@ fn polls_read_by(name: &str, readers: &[(&str, Option<Value>)]) -> PathBuf {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("proj")).expect("folder");
-    // Written as text: Claude Code puts `model` first in a reply's message, and shaphan
+    // Written as text: Claude Code puts `model` first in a reply's message, and bigsister
     // finds a reply by that.
     let reply = |minute: usize, model: &str, usage: Option<&Value>| {
         let usage = usage.map_or(String::new(), |u| format!(",\"usage\":{u}"));
@@ -2640,7 +2640,7 @@ fn price_file(name: &str, text: &str) -> PathBuf {
 
 #[test]
 fn a_price_file_replaces_the_bundled_prices() {
-    // LiteLLM's names, with fields shaphan ignores. Claude Fable 5.2 repriced to US$20 per
+    // LiteLLM's names, with fields bigsister ignores. Claude Fable 5.2 repriced to US$20 per
     // million, a model the bundle lacks priced at US$40 and another at US$10, and GPT-6.1
     // Sol left out, so unpriced.
     let file = price_file(
@@ -2716,7 +2716,7 @@ fn a_bad_price_file_fails_the_run() {
 
 const PI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pi");
 
-/// `shaphan all --agent pi --json` over the pi fixtures: a session and a fork of it,
+/// `bigsister all --agent pi --json` over the pi fixtures: a session and a fork of it,
 /// which pi writes as a copy of every entry.
 fn pi_report(extra: &[&str]) -> Value {
     let mut args = vec![
@@ -2906,7 +2906,7 @@ fn pi_sessions(name: &str, sessions: &[(Option<&str>, Vec<String>)]) -> PathBuf 
     dir
 }
 
-/// `shaphan <command> --agent pi --json` over the pi sessions in `dir`.
+/// `bigsister <command> --agent pi --json` over the pi sessions in `dir`.
 fn pi_run(command: &str, dir: &Path) -> Value {
     let (code, stdout, stderr) = run(&[
         command,

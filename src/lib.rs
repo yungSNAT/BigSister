@@ -1,4 +1,4 @@
-//! Shaphan's audit: where a coding agent's tokens and checks go, from its own transcripts.
+//! BigSister: where a coding agent's tokens and checks go, from its own transcripts.
 
 pub mod cli;
 pub mod detectors;
