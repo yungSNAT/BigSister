@@ -676,7 +676,11 @@ fn a_window_past_the_last_instant_reads_no_session() {
         .env("TZ", "UTC")
         .output()
         .expect("run shaphan");
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let doc: Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
     assert_eq!(doc["roots"][0]["files"], json!(0), "{}", doc["roots"]);
 }
