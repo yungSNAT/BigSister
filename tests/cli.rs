@@ -3172,3 +3172,17 @@ fn the_last_date_at_utc_midnight_finds_nothing() {
     assert_eq!(doc["roots"][0]["files"], 0);
     assert_eq!(doc["since"], json!("9999-12-30T22:00:00.999999999+00:00"));
 }
+
+/// The last date's midnight at +02:00 is the first instant past the last one a window can
+/// start at; at +01:00 it lies past that instant, and the window holds nothing.
+#[cfg(unix)]
+#[test]
+fn the_last_date_starts_a_window_only_from_plus_two_hours() {
+    for (zone, start) in [
+        ("Africa/Johannesburg", "9999-12-30T22:00:00+00:00"),
+        ("Europe/Paris", "9999-12-30T22:00:00.999999999+00:00"),
+    ] {
+        let tz: &[(&str, &Path)] = &[("TZ", Path::new(zone))];
+        assert_eq!(since_json("9999-12-31", tz), json!(start), "{zone}");
+    }
+}

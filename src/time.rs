@@ -110,6 +110,14 @@ mod tests {
     }
 
     #[test]
+    fn the_last_instant_written_out_is_a_window_start() {
+        assert_eq!(
+            parse_since("9999-12-30T22:00:00.999999999Z", now()),
+            Ok(Some(Timestamp::MAX))
+        );
+    }
+
+    #[test]
     fn rfc3339_with_offset() {
         let t = parse_since("2026-11-08T10:00:00+11:00", now());
         assert_eq!(t, Ok(parse_ts("2026-11-07T23:00:00Z")));

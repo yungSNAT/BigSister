@@ -652,6 +652,28 @@ fn a_late_unreadable_row_leaves_no_partial_report() {
     assert_eq!(doc["detectors"]["polls"]["tables"][0]["rows"], json!([]));
 }
 
+/// The root's counts as JSON, with `--since` read in UTC.
+#[cfg(unix)]
+fn utc_roots(dir: &Path, since: &str) -> Value {
+    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("home-empty-opencode");
+    let out = Command::new(env!("CARGO_BIN_EXE_shaphan"))
+        .args(["all", "--agent", "opencode", "--opencode-root"])
+        .arg(dir)
+        .args(["--since", since, "--json"])
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
+        .env("TZ", "UTC")
+        .output()
+        .expect("run shaphan");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+    doc["roots"][0].clone()
+}
+
 /// The last date there is, at midnight in UTC, lies past every instant a session can be
 /// updated at, so a session updated at the last of them is not read.
 #[cfg(unix)]
@@ -666,21 +688,25 @@ fn a_window_past_the_last_instant_reads_no_session() {
         )
         .expect("session");
     drop(writer);
-    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("home-empty-opencode");
-    let out = Command::new(env!("CARGO_BIN_EXE_shaphan"))
-        .args(["all", "--agent", "opencode", "--opencode-root"])
-        .arg(&dir)
-        .args(["--since", "9999-12-31", "--json"])
-        .env("HOME", &home)
-        .env("USERPROFILE", &home)
-        .env("TZ", "UTC")
-        .output()
-        .expect("run shaphan");
-    assert!(
-        out.status.success(),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let doc: Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
-    assert_eq!(doc["roots"][0]["files"], json!(0), "{}", doc["roots"]);
+    let root = utc_roots(&dir, "9999-12-31");
+    assert_eq!(root["files"], json!(0), "{root}");
+}
+
+/// A window past the last instant still counts a database that cannot be read, as the
+/// day before does.
+#[cfg(unix)]
+#[test]
+fn a_window_past_the_last_instant_still_counts_an_unreadable_database() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("opencode-past-last-text");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("folder");
+    std::fs::write(dir.join("opencode.db"), "not a database").expect("text file");
+    for since in ["9999-12-30", "9999-12-31"] {
+        let root = utc_roots(&dir, since);
+        assert_eq!(
+            [&root["files"], &root["unreadable"]],
+            [&json!(1), &json!(1)],
+            "{since}: {root}"
+        );
+    }
 }
