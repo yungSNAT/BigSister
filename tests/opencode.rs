@@ -701,12 +701,11 @@ fn a_window_past_the_last_instant_still_counts_an_unreadable_database() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("folder");
     std::fs::write(dir.join("opencode.db"), "not a database").expect("text file");
-    for since in ["9999-12-30", "9999-12-31"] {
-        let root = utc_roots(&dir, since);
-        assert_eq!(
-            [&root["files"], &root["unreadable"]],
-            [&json!(1), &json!(1)],
-            "{since}: {root}"
-        );
-    }
+    let day_before = utc_roots(&dir, "9999-12-30");
+    assert_eq!(
+        [&day_before["files"], &day_before["unreadable"]],
+        [&json!(1), &json!(1)],
+        "{day_before}"
+    );
+    assert_eq!(utc_roots(&dir, "9999-12-31"), day_before);
 }
