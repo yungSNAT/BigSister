@@ -60,7 +60,7 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         })
         .collect();
     let meta = Meta {
-        since,
+        since: since.unwrap_or(jiff::Timestamp::MAX),
         roots: &stats,
         skipped_roots: &skipped,
         home: home.as_deref(),

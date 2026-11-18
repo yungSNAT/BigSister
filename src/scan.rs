@@ -128,15 +128,16 @@ impl RootStats {
 const CLAUDE_SKIP_PREFIX: &str = "{\"type\":\"api-request-blob\"";
 
 /// Scans every transcript under each root that a chosen detector reads and that
-/// was modified at or after `since`, pricing what each model reads at `prices`.
+/// was modified at or after `since`, pricing what each model reads at `prices`. With no
+/// `since`, the window starts after every instant and nothing is read.
 pub fn scan(
     roots: &[(Agent, PathBuf)],
-    since: Timestamp,
+    since: Option<Timestamp>,
     prices: &Prices,
     dets: &mut [Box<dyn Detector>],
 ) -> Vec<RootStats> {
-    let window = Window { since, prices };
-    let cutoff = u64::try_from(since.as_second())
+    let window = since.map(|since| Window { since, prices });
+    let cutoff = u64::try_from(since.unwrap_or(Timestamp::UNIX_EPOCH).as_second())
         .ok()
         .and_then(|s| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(s)))
         .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -158,8 +159,12 @@ pub fn scan(
             compressed: 0,
             unreadable_reasons: BTreeMap::new(),
         };
+        let Some(window) = &window else {
+            out.push(st);
+            continue;
+        };
         if *agent == Agent::OpenCode {
-            scan_opencode(root, &window, dets, &active, &mut st, &mut earlier);
+            scan_opencode(root, window, dets, &active, &mut st, &mut earlier);
             out.push(st);
             continue;
         }
@@ -170,7 +175,7 @@ pub fn scan(
             // fork's header is written when it is made, after the entries it copies.
             files.sort_by_cached_key(|p| first_time(p));
         }
-        scan_files(files, &window, dets, &active, &mut st, &mut earlier);
+        scan_files(files, window, dets, &active, &mut st, &mut earlier);
         out.push(st);
     }
     out

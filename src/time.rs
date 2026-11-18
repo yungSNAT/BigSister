@@ -4,22 +4,23 @@ use jiff::civil::Date;
 use jiff::tz::TimeZone;
 use jiff::{SignedDuration, Timestamp};
 
-/// Parses `--since`: `7d`, `24h`, a date (local midnight) or an RFC 3339 time.
+/// Parses `--since`: `7d`, `24h`, a date (local midnight) or an RFC 3339 time. `None` is a
+/// local midnight past the last instant jiff holds (9999-12-30T22:00Z), which no record
+/// can be at or after.
 ///
 /// # Errors
 /// Returns a message naming the accepted forms when `s` matches none of them.
-pub fn parse_since(s: &str, now: Timestamp) -> Result<Timestamp, String> {
+pub fn parse_since(s: &str, now: Timestamp) -> Result<Option<Timestamp>, String> {
     let t = s.trim();
     let bad = || format!("--since: expected 7d, 24h, YYYY-MM-DD or an RFC 3339 time, got '{t}'");
     let before_1970 = || format!("--since: '{t}' is before 1970");
     let since = if let Some(delta) = relative(t) {
         now.checked_sub(delta).map_err(|_| before_1970())?
     } else if let Ok(date) = Date::strptime("%Y-%m-%d", t) {
-        // A repeated midnight is the first; a skipped one is when the clocks resume. A
-        // midnight past the last instant jiff holds (9999-12-30T22:00Z) is that instant.
+        // A repeated midnight is the first; a skipped one is when the clocks resume.
         match date.to_zoned_datetime(TimeZone::system()) {
             Ok(midnight) => midnight.timestamp(),
-            Err(_) if date.year() > 1970 => Timestamp::MAX,
+            Err(_) if date.year() > 1970 => return Ok(None),
             Err(_) => return Err(before_1970()),
         }
     } else {
@@ -28,7 +29,7 @@ pub fn parse_since(s: &str, now: Timestamp) -> Result<Timestamp, String> {
     if since < Timestamp::UNIX_EPOCH {
         return Err(before_1970());
     }
-    Ok(since)
+    Ok(Some(since))
 }
 
 fn relative(t: &str) -> Option<SignedDuration> {
@@ -100,23 +101,23 @@ mod tests {
     fn relative_days_and_hours() {
         assert_eq!(
             parse_since("7d", now()),
-            parse_ts("2026-11-01T00:00:00Z").ok_or(String::new())
+            Ok(parse_ts("2026-11-01T00:00:00Z"))
         );
         assert_eq!(
             parse_since("24h", now()),
-            parse_ts("2026-11-07T00:00:00Z").ok_or(String::new())
+            Ok(parse_ts("2026-11-07T00:00:00Z"))
         );
     }
 
     #[test]
     fn rfc3339_with_offset() {
-        let t = parse_since("2026-11-08T10:00:00+11:00", now()).unwrap();
-        assert_eq!(t, parse_ts("2026-11-07T23:00:00Z").unwrap());
+        let t = parse_since("2026-11-08T10:00:00+11:00", now());
+        assert_eq!(t, Ok(parse_ts("2026-11-07T23:00:00Z")));
     }
 
     #[test]
     fn date_is_local_midnight() {
-        let t = parse_since("2026-11-01", now()).unwrap();
+        let t = parse_since("2026-11-01", now()).unwrap().unwrap();
         assert_eq!(
             t.to_zoned_datetime(TimeZone::system())
                 .strftime("%Y-%m-%d %H:%M")
@@ -174,10 +175,10 @@ mod tests {
     fn since_forms_and_messages() {
         assert_eq!(parse_since(" 7d ", now()), parse_since("7d", now()));
         assert_eq!(parse_since("07d", now()), parse_since("7d", now()));
-        assert_eq!(parse_since("0h", now()), Ok(now()));
+        assert_eq!(parse_since("0h", now()), Ok(Some(now())));
         assert_eq!(
             parse_since("2026-11-08T00:00:00Z", now()),
-            parse_ts("2026-11-08T00:00:00Z").ok_or(String::new())
+            Ok(parse_ts("2026-11-08T00:00:00Z"))
         );
         assert_eq!(
             parse_since("2026-1-1", now()),
@@ -193,7 +194,7 @@ mod tests {
         );
         assert_eq!(
             parse_since("1970-01-01T00:00:00Z", now()),
-            parse_ts("1970-01-01T00:00:00Z").ok_or(String::new())
+            Ok(parse_ts("1970-01-01T00:00:00Z"))
         );
         assert_eq!(
             parse_since("7w", now()),
