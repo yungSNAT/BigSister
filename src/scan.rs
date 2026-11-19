@@ -616,7 +616,11 @@ impl Feed<'_> {
     fn line(&mut self, line: &str) {
         let blob = self.session.agent == Agent::Claude && line.starts_with(CLAUDE_BLOB_PREFIX);
         if line.is_empty()
-            || (blob && !self.active.iter().any(|&i| self.dets[i].reads_request_blobs()))
+            || (blob
+                && !self
+                    .active
+                    .iter()
+                    .any(|&i| self.dets[i].reads_request_blobs()))
         {
             return;
         }

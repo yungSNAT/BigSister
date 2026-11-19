@@ -221,7 +221,8 @@ impl Detector for Context {
         let str_field = |k: &str| v.get(k).and_then(Value::as_str);
         match r.kind() {
             "api-request-blob" => {
-                if let (Some(hash), Some(message)) = (str_field("hash").and_then(hex32), v.get("message"))
+                if let (Some(hash), Some(message)) =
+                    (str_field("hash").and_then(hex32), v.get("message"))
                 {
                     f.add_message(hash, message);
                 }
@@ -284,7 +285,10 @@ impl Detector for Context {
                     missing.insert(m);
                 }
             });
-            let tokens = f.request_refs[i].as_ref().and_then(|id| f.tokens.get(id)).copied();
+            let tokens = f.request_refs[i]
+                .as_ref()
+                .and_then(|id| f.tokens.get(id))
+                .copied();
             self.measured.push(Measured {
                 time: req.time,
                 scope: s.scope(),
@@ -355,7 +359,12 @@ impl Context {
                 json!(median(&v)),
                 json!(v.iter().max().copied().unwrap_or(0)),
                 ratio(v.iter().sum(), all),
-                json!(self.measured.iter().map(|m| m.est_tokens(m.parts[i])).sum::<u64>()),
+                json!(
+                    self.measured
+                        .iter()
+                        .map(|m| m.est_tokens(m.parts[i]))
+                        .sum::<u64>()
+                ),
             ]);
         }
         t
@@ -405,8 +414,11 @@ impl Context {
     }
 
     fn largest(&self) -> Table {
-        let mut with_tokens: Vec<&Measured> =
-            self.measured.iter().filter(|m| m.tokens.is_some()).collect();
+        let mut with_tokens: Vec<&Measured> = self
+            .measured
+            .iter()
+            .filter(|m| m.tokens.is_some())
+            .collect();
         with_tokens.sort_by_key(|m| (std::cmp::Reverse(m.tokens), m.time));
         let mut t = Table::new(
             "Largest requests by recorded input tokens, with each part's est input tokens",
@@ -431,7 +443,9 @@ impl Context {
 /// does not hold its base request or shape.
 fn add_request(f: &mut File, v: &Value, in_window: bool) {
     let str_field = |k: &str| v.get(k).and_then(Value::as_str);
-    let shape = str_field("shapeHash").and_then(|h| f.shapes.get(h)).copied();
+    let shape = str_field("shapeHash")
+        .and_then(|h| f.shapes.get(h))
+        .copied();
     let base = match str_field("base") {
         None => Some(None),
         Some(b) => f.request_ids.get(b).map(|&i| Some(i)),
@@ -484,7 +498,11 @@ fn hex32(s: &str) -> Option<[u8; 32]> {
     if b.len() != 64 {
         return None;
     }
-    let digit = |c: u8| char::from(c).to_digit(16).and_then(|d| u8::try_from(d).ok());
+    let digit = |c: u8| {
+        char::from(c)
+            .to_digit(16)
+            .and_then(|d| u8::try_from(d).ok())
+    };
     let mut out = [0; 32];
     for (o, pair) in out.iter_mut().zip(b.chunks(2)) {
         *o = (digit(pair[0])? << 4) | digit(pair[1])?;
@@ -562,8 +580,7 @@ mod tests {
                 .expect("valid JSON");
         assert_eq!(
             hash_of(&m),
-            hex32("f90cf44c749421a11b1900b7762b044b9477e3bb6bf90ad40849adf1a2884654")
-                .expect("hex")
+            hex32("f90cf44c749421a11b1900b7762b044b9477e3bb6bf90ad40849adf1a2884654").expect("hex")
         );
     }
 

@@ -3218,8 +3218,14 @@ fn context_report() -> Value {
 fn context_rebuilds_each_request_and_splits_its_input_by_part() {
     let doc = context_report();
     let s = &doc["detectors"]["context"]["summary"];
-    assert_eq!(s["requests_rebuilt"], 3, "the request before the window is left out");
-    assert_eq!(s["requests_not_rebuilt"], 1, "its base request is not in the file");
+    assert_eq!(
+        s["requests_rebuilt"], 3,
+        "the request before the window is left out"
+    );
+    assert_eq!(
+        s["requests_not_rebuilt"], 1,
+        "its base request is not in the file"
+    );
     assert_eq!(s["requests_with_tokens"], 3);
     assert_eq!(s["messages_not_found"], 1);
     assert_eq!(s["median_input_tokens"], 1010);
@@ -3372,5 +3378,8 @@ fn all_reads_the_request_log_with_every_section() {
     assert_eq!(code, 0, "stderr: {stderr}");
     let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
     assert_eq!(doc["roots"][0]["lines_skipped"], 0);
-    assert_eq!(doc["detectors"]["context"]["summary"]["requests_rebuilt"], 3);
+    assert_eq!(
+        doc["detectors"]["context"]["summary"]["requests_rebuilt"],
+        3
+    );
 }
