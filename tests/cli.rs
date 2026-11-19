@@ -1503,6 +1503,7 @@ fn output_never_contains_transcript_content() {
     assert_no_sentinel(CACHE, CODEX);
     assert_no_sentinel(MODELS, CODEX);
     assert_no_sentinel(MODELS_TIERS, CODEX);
+    assert_no_sentinel(CONTEXT, CODEX);
 }
 
 /// One main session with the attachment kinds, hook errors and pipe result the main
@@ -3189,4 +3190,187 @@ fn the_last_date_starts_a_window_only_from_plus_two_hours() {
         let tz: &[(&str, &Path)] = &[("TZ", Path::new(zone))];
         assert_eq!(since_json("9999-12-31", tz), json!(start), "{zone}");
     }
+}
+
+const CONTEXT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/context/claude");
+
+fn context_report() -> Value {
+    let args = [
+        "context",
+        "--claude-root",
+        CONTEXT,
+        "--agent",
+        "claude",
+        "--since",
+        SINCE,
+        "--json",
+    ];
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+/// Each request is rebuilt from Claude Code's request log: its shape's system prompt and
+/// loaded tools, its base request's first `keep` messages and its tail, each found as a
+/// request blob, a user record or the blocks of one reply, by the SHA-256 of the message.
+#[test]
+fn context_rebuilds_each_request_and_splits_its_input_by_part() {
+    let doc = context_report();
+    let s = &doc["detectors"]["context"]["summary"];
+    assert_eq!(s["requests_rebuilt"], 3, "the request before the window is left out");
+    assert_eq!(s["requests_not_rebuilt"], 1, "its base request is not in the file");
+    assert_eq!(s["requests_with_tokens"], 3);
+    assert_eq!(s["messages_not_found"], 1);
+    assert_eq!(s["median_input_tokens"], 1010);
+    let parts = rows(&doc, "context", 0);
+    for (part, requests, median, max, share, tokens) in [
+        ("system prompt", 3, 37, 37, 0.06, 175),
+        ("built-in tools", 3, 79, 79, 0.16, 474),
+        ("MCP tools", 2, 263, 263, 0.36, 902),
+        ("system messages", 2, 20, 20, 0.03, 69),
+        ("reminders", 2, 58, 58, 0.08, 199),
+        ("tool results", 1, 0, 78, 0.05, 117),
+        ("tool calls", 1, 0, 88, 0.06, 132),
+        ("thinking", 1, 0, 32, 0.02, 48),
+        ("text", 3, 66, 66, 0.1, 275),
+        ("other blocks", 1, 0, 90, 0.06, 135),
+    ] {
+        let row = find(parts, &[("part", json!(part))]);
+        assert_eq!(
+            cells(
+                row,
+                &[
+                    "requests",
+                    "median_chars",
+                    "max_chars",
+                    "share_of_chars",
+                    "est_input_tokens"
+                ]
+            ),
+            json!([requests, median, max, share, tokens]),
+            "{part}"
+        );
+    }
+    assert_eq!(parts.len(), 10);
+    let servers = rows(&doc, "context", 1);
+    assert_eq!(
+        servers
+            .iter()
+            .map(|r| cells(
+                r,
+                &[
+                    "server",
+                    "requests",
+                    "median_chars",
+                    "max_chars",
+                    "est_input_tokens"
+                ]
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            json!(["browser", 2, 181, 181, 621]),
+            json!(["notes", 2, 82, 82, 281])
+        ]
+    );
+    let largest = rows(&doc, "context", 2);
+    let columns = [
+        "time",
+        "scope",
+        "model",
+        "input_tokens",
+        "messages",
+        "system_prompt",
+        "built_in_tools",
+        "mcp_tools",
+        "system_messages",
+        "reminders",
+        "tool_results",
+        "tool_calls",
+        "thinking",
+        "text",
+        "other_blocks",
+    ];
+    assert_eq!(
+        largest
+            .iter()
+            .map(|r| cells(r, &columns))
+            .collect::<Vec<_>>(),
+        vec![
+            json!([
+                "2026-11-08T01:04:00Z",
+                "main",
+                "claude-opus-5-5",
+                1215,
+                7,
+                55,
+                118,
+                394,
+                30,
+                87,
+                117,
+                132,
+                48,
+                99,
+                135
+            ]),
+            json!([
+                "2026-11-08T01:01:00Z",
+                "main",
+                "claude-opus-5-5",
+                1010,
+                3,
+                71,
+                153,
+                508,
+                39,
+                112,
+                0,
+                0,
+                0,
+                127,
+                0
+            ]),
+            json!([
+                "2026-11-08T01:11:00Z",
+                "subagent",
+                "claude-haiku-5-5",
+                300,
+                1,
+                49,
+                203,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                49,
+                0
+            ]),
+        ]
+    );
+}
+
+/// With every section chosen, the request log's lines are read with none skipped, and the
+/// context section still rebuilds each request.
+#[test]
+fn all_reads_the_request_log_with_every_section() {
+    let args = |cmd| {
+        vec![
+            cmd,
+            "--claude-root",
+            CONTEXT,
+            "--agent",
+            "claude",
+            "--since",
+            SINCE,
+            "--json",
+        ]
+    };
+    let (code, stdout, stderr) = run(&args("all"));
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(doc["roots"][0]["lines_skipped"], 0);
+    assert_eq!(doc["detectors"]["context"]["summary"]["requests_rebuilt"], 3);
 }
