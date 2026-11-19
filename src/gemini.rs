@@ -181,10 +181,10 @@ fn user(uuid: &Value, content: Vec<Value>, ts: &Value) -> String {
 }
 
 /// Tool call `c` (its `id`, `name` and `args`) as a Claude `tool_use` block, or `None`
-/// without a non-empty string id and name. The 2 CLIs' built-in tools are named as Claude Code's:
-/// `run_shell_command` runs `command` as `Bash` does, `read_file` reads `file_path` as
-/// `Read` does, and `replace` (Gemini CLI), `edit` (Qwen Code) and `write_file` change a
-/// file. Their arguments already carry Claude Code's names.
+/// without a non-empty string id and name. The 2 CLIs' built-in tools are named as Claude
+/// Code's: `run_shell_command` runs `command` as `Bash` does, `read_file` reads `file_path`
+/// as `Read` does, and `replace` (Gemini CLI), `edit` (Qwen Code) and `write_file` change
+/// a file. Their arguments already carry Claude Code's names.
 fn tool_use(c: &Value) -> Option<Value> {
     let id = c.get("id").filter(|id| non_empty(id))?;
     let name = match c
