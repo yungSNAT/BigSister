@@ -23,8 +23,7 @@ use scan::Agent;
 /// # Errors
 /// Returns a message when `--since` is invalid or no transcript folder can be read.
 pub fn run(cli: &Cli) -> Result<String, String> {
-    let when = cli.sample.then_some(sample::SINCE).unwrap_or(&cli.since);
-    let since = time::parse_since(when, jiff::Timestamp::now())?;
+    let since = window_start(cli)?;
     let home = std::env::home_dir().map(|h| report::display_path(&h.display().to_string(), None));
     let prices = std::rc::Rc::new(read_prices(cli, home.as_deref())?);
     let mut dets = detectors::build(
@@ -72,6 +71,16 @@ pub fn run(cli: &Cli) -> Result<String, String> {
     } else {
         report::text(&meta, &sections)
     })
+}
+
+/// Where the window starts: `--since`, or the sample's own start with `--sample`.
+fn window_start(cli: &Cli) -> Result<Option<jiff::Timestamp>, String> {
+    let when = if cli.sample {
+        sample::SINCE
+    } else {
+        &cli.since
+    };
+    time::parse_since(when, jiff::Timestamp::now())
 }
 
 /// Scans the transcripts the chosen detectors read: the sample's with `--sample`, else
