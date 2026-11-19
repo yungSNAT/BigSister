@@ -1,9 +1,10 @@
 # v0.2.0
 
-BigSister is ShaphansAudit renamed, with 3 new report sections, 2 more agents, priced estimates and CSV output.
+BigSister is ShaphansAudit renamed, with 4 new report sections, 2 more agents, priced estimates and CSV output.
 
 ## New since v0.1.0
 
+- `context`: each request in Claude Code's request log, rebuilt, with its input's characters by part (system prompt, built-in tools, MCP tools by server, system messages, reminders, tool results, tool calls, thinking, text, other blocks), its recorded input tokens split across them, and the largest requests (Claude).
 - `tools`: per tool, calls, the characters their results returned, errors, and image and document blocks; also runs of 3 or more errors in a row and calls repeated with the same input after erring twice (Claude, pi, OpenCode).
 - `cache`: cache write tokens split into new context and context cached again after an idle gap, a model switch or otherwise, priced at the cache write price (Claude).
 - `models`: input-side cost by model, reasoning effort and subagent type, and how many subagent sessions ran on their parent session's top-priced model (Claude).

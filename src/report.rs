@@ -183,7 +183,7 @@ fn local(t: Timestamp) -> String {
 
 /// RFC 3339 with a `+00:00` offset and 0, 3, 6 or 9 fractional digits, the fewest that
 /// keep the time exact.
-fn rfc3339(t: Timestamp) -> String {
+pub(crate) fn rfc3339(t: Timestamp) -> String {
     let ns = t.subsec_nanosecond();
     let digits = match ns {
         0 => 0,

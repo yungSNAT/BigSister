@@ -97,6 +97,11 @@ pub trait Detector {
     /// A model has read the session's context so far: its uncached input price per
     /// million tokens, or `None` when it has no price or no model did.
     fn read_by(&mut self, _s: &Session, _usd_per_mtok: Option<f64>) {}
+    /// Whether the detector reads Claude Code's request blobs, lines that can be large and
+    /// that every other detector is spared.
+    fn reads_request_blobs(&self) -> bool {
+        false
+    }
     fn section(&self, opts: &Opts) -> Section;
 }
 
@@ -124,8 +129,9 @@ impl RootStats {
     }
 }
 
-/// Claude's request blobs repeat message content already in the transcript.
-const CLAUDE_SKIP_PREFIX: &str = "{\"type\":\"api-request-blob\"";
+/// The start of a Claude Code request blob: a message as a request sent it, which only
+/// the request log's reader needs; to the rest it repeats transcript content.
+const CLAUDE_BLOB_PREFIX: &str = "{\"type\":\"api-request-blob\"";
 
 /// Scans every transcript under each root that a chosen detector reads and that
 /// was modified at or after `since`, pricing what each model reads at `prices`. With no
@@ -608,22 +614,19 @@ impl Feed<'_> {
     }
 
     fn line(&mut self, line: &str) {
-        if line.is_empty()
-            || (self.session.agent == Agent::Claude && line.starts_with(CLAUDE_SKIP_PREFIX))
-        {
+        if line.is_empty() {
+            return;
+        }
+        let blob = self.session.agent == Agent::Claude && line.starts_with(CLAUDE_BLOB_PREFIX);
+        let wanting = self.wanting(line, blob);
+        if blob && wanting.is_empty() {
             return;
         }
         if !line.ends_with('}') {
             self.st.bad_lines += 1;
             return;
         }
-        let reply = self.model(line);
-        let wanting: Vec<usize> = self
-            .active
-            .iter()
-            .copied()
-            .filter(|&i| self.dets[i].wants(&self.session, line))
-            .collect();
+        let reply = if blob { None } else { self.model(line) };
         if wanting.is_empty() && reply.is_none() {
             if let Some(t) = raw_timestamp(line) {
                 self.last_time = Some(t);
@@ -661,6 +664,19 @@ impl Feed<'_> {
 }
 
 impl Feed<'_> {
+    /// The active detectors that want `line`; a request blob goes only to those that
+    /// read request blobs.
+    fn wanting(&self, line: &str, blob: bool) -> Vec<usize> {
+        self.active
+            .iter()
+            .copied()
+            .filter(|&i| {
+                (!blob || self.dets[i].reads_request_blobs())
+                    && self.dets[i].wants(&self.session, line)
+            })
+            .collect()
+    }
+
     /// Whether a parsed record copies an earlier file's record, or `None` when it
     /// repeats one of this file's. Claude Code can write a record again later in its
     /// file, with the same uuid; such a record counts nowhere. A resumed session's file
