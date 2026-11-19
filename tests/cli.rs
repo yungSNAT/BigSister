@@ -3334,3 +3334,101 @@ fn all_reads_the_request_log_with_every_section() {
         3
     );
 }
+
+/// Copies every file under `from` into `to`, keeping its path below `from`.
+fn copy_tree(from: &Path, to: &Path) {
+    for entry in std::fs::read_dir(from).expect("fixture folder") {
+        let path = entry.expect("fixture entry").path();
+        let dest = to.join(path.file_name().expect("file name"));
+        if path.is_dir() {
+            std::fs::create_dir_all(&dest).expect("folder");
+            copy_tree(&path, &dest);
+        } else {
+            std::fs::copy(&path, &dest).expect("copy");
+        }
+    }
+}
+
+/// `--sample` reads the sample transcripts built into the binary, with no transcript
+/// folder on the machine: the main Claude, Codex and pi fixtures and the request-log
+/// fixture, from 2026-11-01. Each section reports what it reports on those fixtures read
+/// from disk.
+#[test]
+fn sample_reports_the_bundled_fixtures_with_no_transcripts_on_the_machine() {
+    let (code, stdout, stderr) = run(&["all", "--sample", "--json"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let sample: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let claude = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sample-claude");
+    let _ = std::fs::remove_dir_all(&claude);
+    std::fs::create_dir_all(&claude).expect("folder");
+    copy_tree(Path::new(CLAUDE), &claude);
+    copy_tree(Path::new(CONTEXT), &claude);
+    let claude = claude.to_str().expect("UTF-8 path");
+    let (code, stdout, stderr) = run(&[
+        "all",
+        "--claude-root",
+        claude,
+        "--codex-root",
+        CODEX,
+        "--pi-root",
+        PI,
+        "--agent",
+        "all",
+        "--since",
+        "2026-11-01",
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let disk: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(sample["detectors"], disk["detectors"]);
+    assert_eq!(sample["since"], disk["since"]);
+    let roots: Vec<Value> = sample["roots"]
+        .as_array()
+        .expect("roots")
+        .iter()
+        .map(|r| cells(r, &["agent", "root", "files"]))
+        .collect();
+    assert_eq!(
+        roots,
+        [
+            json!(["claude", "(bundled sample)", 5]),
+            json!(["codex", "(bundled sample)", 2]),
+            json!(["pi", "(bundled sample)", 2])
+        ]
+    );
+    assert_eq!(sample["skipped_roots"], json!([]));
+    for section in sample["detectors"].as_object().expect("detectors").values() {
+        let rows: usize = section["tables"]
+            .as_array()
+            .expect("tables")
+            .iter()
+            .map(|t| t["rows"].as_array().map_or(0, Vec::len))
+            .sum();
+        assert!(rows > 0, "a section with no rows: {section}");
+    }
+}
+
+/// The sample's window and folders are its own, so `--since` and the folder options
+/// are usage errors beside it.
+#[test]
+fn sample_takes_no_window_or_folder() {
+    for extra in [
+        ["--since", "7d"],
+        ["--claude-root", CLAUDE],
+        ["--codex-root", CODEX],
+        ["--pi-root", PI],
+        ["--opencode-root", PI],
+    ] {
+        let (code, _, stderr) = run(&["all", "--sample", extra[0], extra[1]]);
+        assert_eq!(code, 2, "{extra:?}: {stderr}");
+    }
+}
+
+/// With no transcript folder on the machine, the error names the sample run.
+#[test]
+fn no_transcript_folder_points_to_the_sample() {
+    let (code, _, stderr) = run(&["all"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("transcript folder not found"), "{stderr}");
+    assert!(stderr.contains("bigsister all --sample"), "{stderr}");
+}
