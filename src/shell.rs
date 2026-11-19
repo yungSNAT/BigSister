@@ -1214,6 +1214,9 @@ const s = readFile('C:\\hub\\b.md'); await tools.apply_patch(p);"#;
             "a\"b\\c\nABC"
         );
         assert_eq!(js_unescape("''"), "");
+        // Tab, carriage return and NUL escapes, a line continuation, an unknown escape
+        // read as its character, and a lone backslash at the end kept as written.
+        assert_eq!(js_unescape("'a\\tb\\rc\\0d\\\ne\\qf\\'"), "a\tb\rc\0deqf\\");
     }
 
     #[test]
