@@ -20,8 +20,9 @@
 //! record becomes a record holding only its time, which the detectors ignore. A call whose
 //! status is `error` or `cancelled` is an error. A Gemini CLI line with no `id` that is not
 //! the header or a `$set`, `$patch` or `$rewindTo` record, a call or result without a
-//! non-empty string id (or, for a call, name), and a list field that is not a list count
-//! as skipped lines.
+//! non-empty string id (or, for a call, name), a Gemini CLI result part without a
+//! `functionResponse` (a call whose result holds only such parts gets no result), and a
+//! list field that is not a list count as skipped lines.
 //!
 //! Gemini CLI 0.69.0 and Qwen Code 0.28.0 wrote the files these rules were taken from, on
 //! 19 November 2026; other versions are unverified, and Gemini CLI's older `.json` session
@@ -105,7 +106,8 @@ fn key(v: &Value) -> Option<(String, String)> {
 /// Appends the Claude Code records for Gemini CLI record `v`, the last of its type with id
 /// `id`: a reply and a result for each of its tool calls that has one, or a record holding
 /// only its time. Returns how many of its tool calls have no non-empty string id or name,
-/// which are left out.
+/// and of its result parts no `functionResponse`, which are left out, and of its list
+/// fields are not lists.
 fn gemini_record(id: &str, v: &Value, out: &mut Vec<String>) -> u64 {
     let ts = v.get("timestamp").cloned().unwrap_or(Value::Null);
     if v.get("type").and_then(Value::as_str) != Some("gemini") {
@@ -135,10 +137,17 @@ fn gemini_record(id: &str, v: &Value, out: &mut Vec<String>) -> u64 {
         let Some(result) = c.get("result").and_then(Value::as_array) else {
             continue;
         };
-        let error = failed(c.get("status"));
-        let text = result
+        let responses: Vec<&Value> = result
             .iter()
             .filter_map(|p| p.get("functionResponse"))
+            .collect();
+        skipped += (result.len() - responses.len()) as u64;
+        if responses.is_empty() && !result.is_empty() {
+            continue;
+        }
+        let error = failed(c.get("status"));
+        let text = responses
+            .into_iter()
             .map(response_text)
             .collect::<Vec<_>>()
             .join("\n");
