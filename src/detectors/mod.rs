@@ -1,6 +1,7 @@
 //! The detectors and the record helpers they share.
 
 pub mod cache;
+pub mod context;
 pub mod hooks;
 pub mod models;
 pub mod pipes;
@@ -34,6 +35,9 @@ pub fn build(cmd: Command, programs: &Rc<Programs>, prices: &Rc<Prices>) -> Vec<
     let mut v: Vec<Box<dyn Detector>> = Vec::new();
     if all || cmd == Command::Startup {
         v.push(Box::new(startup::Startup::new(Rc::clone(programs))));
+    }
+    if all || cmd == Command::Context {
+        v.push(Box::<context::Context>::default());
     }
     if all || cmd == Command::Schemas {
         v.push(Box::<schemas::Schemas>::default());

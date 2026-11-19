@@ -15,6 +15,7 @@ ruzstd = "0.9"
 rusqlite = { version = "0.41.1", features = ["bundled", "hooks", "serialize"] }
 serde = "1"
 serde_json = { version = "1", features = ["raw_value"] }
+sha2 = "0.11"
 
 [dev-dependencies]
 csv = "1"

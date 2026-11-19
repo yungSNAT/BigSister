@@ -83,6 +83,8 @@ pub enum Command {
     All,
     /// What loads before the first non-synthetic reply of each main session (Claude)
     Startup,
+    /// What each request's input held, by part and MCP server, rebuilt from Claude Code's request log (Claude)
+    Context,
     /// Tool schemas loaded against tools called, and skills listed against skills used (Claude)
     Schemas,
     /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex, pi, OpenCode)
