@@ -14,6 +14,14 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
 
+    /// Read the sample transcripts built into bigsister instead of this machine's, from 2026-11-01
+    #[arg(
+        long,
+        global = true,
+        conflicts_with_all = ["since", "claude_root", "codex_root", "pi_root", "opencode_root"]
+    )]
+    pub sample: bool,
+
     /// Count records at or after this time: 7d, 24h, YYYY-MM-DD (local midnight) or an RFC 3339 time
     #[arg(long, global = true, default_value = "7d", value_name = "WHEN")]
     pub since: String,

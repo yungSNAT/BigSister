@@ -122,6 +122,18 @@ pub struct RootStats {
 }
 
 impl RootStats {
+    fn new(agent: Agent, root: PathBuf) -> Self {
+        RootStats {
+            agent,
+            root,
+            files: 0,
+            unreadable: 0,
+            bad_lines: 0,
+            compressed: 0,
+            unreadable_reasons: BTreeMap::new(),
+        }
+    }
+
     /// Counts one unreadable file or folder, and why.
     fn count_unreadable(&mut self, reason: String) {
         self.unreadable += 1;
@@ -158,15 +170,7 @@ pub fn scan(
         if active.is_empty() {
             continue;
         }
-        let mut st = RootStats {
-            agent: *agent,
-            root: root.clone(),
-            files: 0,
-            unreadable: 0,
-            bad_lines: 0,
-            compressed: 0,
-            unreadable_reasons: BTreeMap::new(),
-        };
+        let mut st = RootStats::new(*agent, root.clone());
         if *agent == Agent::OpenCode {
             scan_opencode(root, &window, dets, &active, &mut st, &mut earlier);
             out.push(st);
@@ -180,6 +184,65 @@ pub fn scan(
             files.sort_by_cached_key(|p| first_time(p));
         }
         scan_files(files, &window, dets, &active, &mut st, &mut earlier);
+        out.push(st);
+    }
+    out
+}
+
+/// A transcript held in memory: the agent that wrote it, its path below its root and its
+/// text.
+#[derive(Clone, Copy)]
+pub struct Memory {
+    pub agent: Agent,
+    pub path: &'static str,
+    pub text: &'static str,
+}
+
+/// Scans `files` as `scan` scans transcript folders, each agent's files as one root shown
+/// as `root`, in the order the agents first appear. A file's modified time plays no part.
+pub fn scan_memory(
+    files: &[Memory],
+    root: &str,
+    since: Option<Timestamp>,
+    prices: &Prices,
+    dets: &mut [Box<dyn Detector>],
+) -> Vec<RootStats> {
+    let window = Window { since, prices };
+    let mut agents: Vec<Agent> = Vec::new();
+    for f in files {
+        if !agents.contains(&f.agent) {
+            agents.push(f.agent);
+        }
+    }
+    let mut out = Vec::new();
+    let mut earlier = Earlier::default();
+    for agent in agents {
+        let active: Vec<usize> = (0..dets.len())
+            .filter(|&i| dets[i].agents().contains(&agent))
+            .collect();
+        if active.is_empty() {
+            continue;
+        }
+        let mut st = RootStats::new(agent, PathBuf::from(root));
+        // In the order `scan` reads a folder's files.
+        let mut mine: Vec<&Memory> = files.iter().filter(|f| f.agent == agent).collect();
+        mine.sort_by_key(|f| Path::new(f.path));
+        if agent.claude_shaped() {
+            mine.sort_by_cached_key(|f| first_time_in(Box::new(f.text.as_bytes())));
+        }
+        for f in mine {
+            st.files += 1;
+            // An in-memory transcript cannot fail to read.
+            let _ = scan_file(
+                Box::new(f.text.as_bytes()),
+                Path::new(f.path),
+                &window,
+                dets,
+                &active,
+                &mut st,
+                &mut earlier,
+            );
+        }
         out.push(st);
     }
     out
@@ -299,7 +362,12 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
 /// The top-level `timestamp` of a transcript's first record that has one, or `None`
 /// when no record has one or the file cannot be read.
 fn first_time(path: &Path) -> Option<Timestamp> {
-    let mut lines = Lines::new(open(path).ok()?);
+    first_time_in(open(path).ok()?)
+}
+
+/// The top-level `timestamp` of the first record in `reader` that has one.
+fn first_time_in(reader: Box<dyn BufRead>) -> Option<Timestamp> {
+    let mut lines = Lines::new(reader);
     while let Ok(Some(line)) = lines.next_line() {
         let value = serde_json::from_str::<Value>(line.trim_end()).ok();
         let t = value.as_ref().and_then(|v| v.get("timestamp"));
