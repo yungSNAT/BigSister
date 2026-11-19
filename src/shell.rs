@@ -906,6 +906,9 @@ mod tests {
             "ssh agent-heavy"
         );
         assert_eq!(vc("ssh ll"), "ssh");
+        // A wrapper with no command after it runs nothing.
+        assert_eq!(vc("sudo -u me"), "(empty)");
+        assert_eq!(vc("rtk bypass"), "(empty)");
         assert_eq!(vc(r#""C:\Program Files\Git\bin\git.exe" status"#), "git");
         assert_eq!(vc("Get-Content -Raw x.md"), "get-content");
         assert_eq!(vc("sudo -u root agent-heavy status"), "agent-heavy");
