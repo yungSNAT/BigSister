@@ -239,6 +239,19 @@ mod tests {
     }
 
     #[test]
+    fn a_write_is_a_claude_write_and_another_tool_keeps_its_name() {
+        let line = r#"{"type":"message","id":"a2","parentId":null,"timestamp":"2026-11-09T06:00:00.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"write","arguments":{"path":"/w/b.rs","content":"x"}},{"type":"toolCall","id":"c2","name":"grep","arguments":{"pattern":"y"}}],"model":"m"}}"#;
+        assert_eq!(
+            parsed(line)["message"]["content"],
+            json!([
+                {"type": "tool_use", "id": "c1", "name": "Write",
+                 "input": {"path": "/w/b.rs", "content": "x"}},
+                {"type": "tool_use", "id": "c2", "name": "grep", "input": {"pattern": "y"}},
+            ])
+        );
+    }
+
+    #[test]
     fn a_tool_result_and_a_compaction_take_claude_shapes() {
         let result = r#"{"type":"message","id":"b2","timestamp":"t","message":{"role":"toolResult","toolCallId":"c1","toolName":"bash","content":[{"type":"text","text":"out"}],"isError":true}}"#;
         assert_eq!(
