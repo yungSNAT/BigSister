@@ -277,6 +277,58 @@ mod tests {
         );
     }
 
+    /// A tool call without a string id or name is not reported: it counts as skipped.
+    #[test]
+    fn a_call_without_an_id_or_name_is_skipped() {
+        let text = concat!(
+            "{\"id\":\"g\",\"type\":\"gemini\",\"model\":\"m\",\"toolCalls\":[{},",
+            "{\"id\":\"c\",\"name\":\"read_file\",\"args\":{}},{\"name\":\"x\"}]}\n",
+        );
+        let (lines, bad) = gemini(text);
+        assert_eq!(bad, 2);
+        assert_eq!(
+            parsed(&lines[0])["message"]["content"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        let text = concat!(
+            "{\"uuid\":\"a\",\"type\":\"assistant\",\"message\":{\"parts\":[{\"functionCall\":{}},",
+            "{\"functionCall\":{\"id\":\"c\",\"name\":\"edit\"}}]}}\n",
+            "{\"uuid\":\"r\",\"type\":\"tool_result\",\"message\":{\"parts\":[",
+            "{\"functionResponse\":{\"response\":{}}}]}}\n",
+        );
+        let (lines, bad) = qwen(text);
+        assert_eq!(bad, 2);
+        assert_eq!(
+            parsed(&lines[0])["message"]["content"]
+                .as_array()
+                .map(Vec::len),
+            Some(1)
+        );
+        assert_eq!(parsed(&lines[1])["message"]["content"], json!([]));
+    }
+
+    /// A record of another type with a reply's id neither replaces the reply nor is lost.
+    #[test]
+    fn an_id_shared_across_record_types_keeps_both_records() {
+        let text = concat!(
+            "{\"id\":\"x\",\"type\":\"gemini\",\"timestamp\":\"t1\",\"toolCalls\":[",
+            "{\"id\":\"c\",\"name\":\"read_file\",\"args\":{}}]}\n",
+            "{\"id\":\"x\",\"type\":\"user\",\"timestamp\":\"t2\"}\n",
+        );
+        let (lines, _) = gemini(text);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(
+            parsed(&lines[0])["message"]["content"][0]["name"],
+            json!("Read")
+        );
+        assert_eq!(
+            parsed(&lines[1]),
+            json!({"type": "gemini", "timestamp": "t2"})
+        );
+    }
+
     #[test]
     fn a_qwen_result_takes_its_status_from_the_call_result() {
         let text = concat!(
