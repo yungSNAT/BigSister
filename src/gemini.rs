@@ -3,10 +3,11 @@
 //!
 //! Gemini CLI (<https://github.com/google-gemini/gemini-cli>) writes each session to
 //! `~/.gemini/tmp/<project>/chats/session-<time>-<id>.jsonl`: a header, then records with
-//! an `id` and a `type` of `user` or `gemini`, and `$set` records. It writes a reply again,
-//! under the same id, as its tool calls are scheduled and finish, so the last record with
-//! an id stands for it, in the place of the first. A reply's `toolCalls` give each call's
-//! `name`, `args`, `status` and `result`, a list of `functionResponse` parts.
+//! an `id` and a `type` of `user` or `gemini`, and `$set`, `$patch` and `$rewindTo`
+//! records. It writes a reply again, under the same id, as its tool calls are scheduled and
+//! finish, so the last record of a type with an id stands for it, in the place of the
+//! first. A reply's `toolCalls` give each call's `name`, `args`, `status` and `result`, a
+//! list of `functionResponse` parts.
 //!
 //! Qwen Code (<https://github.com/QwenLM/qwen-code>), a fork of Gemini CLI, writes
 //! `~/.qwen/projects/<folder>/chats/<session id>.jsonl`: records with a `uuid` and a `type`
@@ -16,9 +17,17 @@
 //! A reply becomes a Claude `assistant` record holding a `tool_use` block for each tool
 //! call, and each result a Claude `user` record holding one `tool_result` block, so that
 //! the Claude code paths count both agents' tool calls by the same rules. Every other
-//! record becomes a record holding only its time, which the detectors ignore. Gemini CLI
-//! 0.69.0 and Qwen Code 0.28.0 wrote the files these rules were taken from, on
-//! 19 November 2026; no context compaction was seen in them, so `rereads` reads neither.
+//! record becomes a record holding only its time, which the detectors ignore. A call whose
+//! status is `error` or `cancelled` is an error. A record of a shape not listed here, a call
+//! or result without a non-empty string id (or, for a call, name), and a list field that
+//! is not a list count as skipped lines.
+//!
+//! Gemini CLI 0.69.0 and Qwen Code 0.28.0 wrote the files these rules were taken from, on
+//! 19 November 2026; other versions are unverified, and Gemini CLI's older `.json` session
+//! files are not read. Neither reader reads compaction (Gemini CLI's `$patch` removals and
+//! `$rewindTo` rollbacks, Qwen Code's `chat_compression` system records), so `rereads`
+//! reads neither agent, nor a subagent's header field or parent record, so every session
+//! counts as a main session.
 
 use std::collections::HashMap;
 
@@ -29,7 +38,10 @@ use serde_json::{Value, json};
 /// string id or name, which are left out.
 ///
 /// shortcut: the whole file is held in memory, as a reply's last version can come any
-/// number of lines after its first; Gemini CLI's files hold one session each.
+/// number of lines after its first: about 3 to 4 times the file at peak, with no line
+/// limit, and Gemini CLI writes a reply again whole at each change, so a long session's
+/// file can reach hundreds of megabytes. Reading it twice, first each id's last line
+/// number, then the lines, each held to the scan's line limit, would be the upgrade.
 #[must_use]
 pub fn gemini(text: &str) -> (Vec<String>, u64) {
     let mut order = Vec::new();
@@ -48,6 +60,11 @@ pub fn gemini(text: &str) -> (Vec<String>, u64) {
                 order.push(key.clone());
             }
             last.insert(key, v);
+        } else if !["sessionId", "$set", "$patch", "$rewindTo"]
+            .iter()
+            .any(|k| v.get(k).is_some())
+        {
+            bad += 1;
         }
     }
     let mut out = Vec::new();
@@ -73,7 +90,7 @@ fn gemini_record(id: &str, v: &Value, out: &mut Vec<String>) -> u64 {
         .flatten()
         .filter_map(|c| tool_use(c).map(|u| (c, u)))
         .collect();
-    let skipped = all.map_or(0, Vec::len) - calls.len();
+    let mut skipped = (all.map_or(0, Vec::len) - calls.len()) as u64 + not_list(v.get("toolCalls"));
     let tokens = v.get("tokens");
     let count = |k: &str| tokens.and_then(|t| t.get(k)).and_then(Value::as_u64);
     let usage = usage(count("input"), count("cached"), count("output"));
@@ -86,10 +103,11 @@ fn gemini_record(id: &str, v: &Value, out: &mut Vec<String>) -> u64 {
         &ts,
     ));
     for (n, (c, u)) in calls.iter().enumerate() {
+        skipped += not_list(c.get("result"));
         let Some(result) = c.get("result").and_then(Value::as_array) else {
             continue;
         };
-        let error = c.get("status").and_then(Value::as_str) == Some("error");
+        let error = failed(c.get("status"));
         let text = result
             .iter()
             .filter_map(|p| p.get("functionResponse"))
@@ -99,7 +117,7 @@ fn gemini_record(id: &str, v: &Value, out: &mut Vec<String>) -> u64 {
         let block = tool_result(&u["id"], &Value::from(text), error);
         out.push(user(&Value::from(format!("{id}#{n}")), vec![block], &ts));
     }
-    skipped as u64
+    skipped
 }
 
 /// The Claude Code records for a Qwen Code session file's `text`, one a line, and the
@@ -116,6 +134,7 @@ pub fn qwen(text: &str) -> (Vec<String>, u64) {
         };
         let ts = v.get("timestamp").cloned().unwrap_or(Value::Null);
         let uuid = v.get("uuid").cloned().unwrap_or(Value::Null);
+        bad += not_list(v.pointer("/message/parts"));
         let parts = v.pointer("/message/parts").and_then(Value::as_array);
         let parts = parts.into_iter().flatten();
         match v.get("type").and_then(Value::as_str) {
@@ -133,8 +152,7 @@ pub fn qwen(text: &str) -> (Vec<String>, u64) {
                 out.push(assistant(&uuid, v.get("model"), uses, &usage, &ts));
             }
             Some("tool_result") => {
-                let error =
-                    v.pointer("/toolCallResult/status").and_then(Value::as_str) == Some("error");
+                let error = failed(v.pointer("/toolCallResult/status"));
                 let responses: Vec<&Value> =
                     parts.filter_map(|p| p.get("functionResponse")).collect();
                 let blocks: Vec<Value> = responses
@@ -200,6 +218,17 @@ fn tool_use(c: &Value) -> Option<Value> {
     };
     let input = c.get("args").cloned().unwrap_or(Value::Null);
     Some(json!({"type": "tool_use", "id": id, "name": name, "input": input}))
+}
+
+/// Whether a call's status says it failed: `error`, or `cancelled`, as Claude Code records
+/// a refused call as an error.
+fn failed(status: Option<&Value>) -> bool {
+    matches!(status.and_then(Value::as_str), Some("error" | "cancelled"))
+}
+
+/// 1 for a field that is present but not a list, else 0.
+fn not_list(v: Option<&Value>) -> u64 {
+    u64::from(v.is_some_and(|v| !v.is_array()))
 }
 
 /// Whether `v` is a string holding at least one character.

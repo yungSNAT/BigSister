@@ -305,9 +305,10 @@ fn rewritten(
         Agent::Qwen => crate::gemini::qwen,
         _ => return Ok(reader),
     };
-    let mut text = String::new();
-    reader.read_to_string(&mut text)?;
-    let (lines, bad) = rewrite(&text);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    // A byte that is not UTF-8 spoils only the text it sits in, as in other agents' lines.
+    let (lines, bad) = rewrite(&String::from_utf8_lossy(&bytes));
     st.bad_lines += bad;
     Ok(Box::new(io::Cursor::new(lines.join("\n").into_bytes())))
 }
@@ -654,7 +655,7 @@ fn scan_file(
 // by `parent_thread_id` in its first record, as both agents lay them out in November
 // 2026. A layout change makes subagents count as main sessions; a record field naming
 // the parent would be the upgrade. pi, Gemini CLI and Qwen Code sessions count as main
-// sessions: the files seen name no parent.
+// sessions: Gemini CLI's subagent header field and Qwen Code's parent record are unread.
 fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
     match agent {
         Agent::Claude => path.components().any(|c| c.as_os_str() == "subagents"),

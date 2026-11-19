@@ -15,7 +15,7 @@
 
 </div>
 
-`bigsister` reads the transcripts that Claude Code, Codex, [pi](https://github.com/earendil-works/pi), [OpenCode](https://github.com/anomalyco/opencode), [Gemini CLI](https://github.com/google-gemini/gemini-cli) and [Qwen Code](https://github.com/QwenLM/qwen-code) save on your machine and reports where tokens and checks are wasted: context loaded before the first non-synthetic reply, what each request's input held, part by part, tool schemas loaded but never called, skills listed but never used, test output piped past its exit status, repeated polling, files re-read after a compaction, the prompt cache rebuilt after an idle gap, input cost by model, reasoning effort and subagent type, and slow hooks.
+`bigsister` reads the transcripts that Claude Code, Codex, [pi](https://github.com/earendil-works/pi), [OpenCode](https://github.com/anomalyco/opencode), [Gemini CLI](https://github.com/google-gemini/gemini-cli) and [Qwen Code](https://github.com/QwenLM/qwen-code) (their formats as versions 0.69.0 and 0.28.0 wrote them; other versions unverified) save on your machine and reports where tokens and checks are wasted: context loaded before the first non-synthetic reply, what each request's input held, part by part, tool schemas loaded but never called, skills listed but never used, test output piped past its exit status, repeated polling, files re-read after a compaction, the prompt cache rebuilt after an idle gap, input cost by model, reasoning effort and subagent type, and slow hooks.
 
 It prints names, paths, counts, sizes and times, as listed under [Privacy](#privacy). It never prints message text, tool inputs or tool outputs, and it makes no network calls.
 
@@ -73,7 +73,7 @@ cargo install --locked --path .
 bigsister all
 ```
 
-This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.pi/agent/sessions`, `~/.local/share/opencode`, `~/.gemini/tmp` and `~/.qwen/projects` and prints one section per detector. If none of them exists, it exits 1, names each missing folder but `~/.codex/archived_sessions`, which need not exist, and suggests the sample below. Run one detector by name, for example `bigsister hooks --since 24h`. With the v0.1.0 release, run `shaphan` instead; it predates the `tools`, `cache` and `models` sections and the pi and OpenCode readers.
+This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.pi/agent/sessions`, `~/.local/share/opencode`, `~/.gemini/tmp` and `~/.qwen/projects` and prints one section per detector. If none of them exists, it exits 1, names each missing folder but `~/.codex/archived_sessions`, which need not exist, and suggests the sample below. Run one detector by name, for example `bigsister hooks --since 24h`. With the v0.1.0 release, run `shaphan` instead; it predates the `context`, `tools`, `cache` and `models` sections, `--sample` and the pi, OpenCode, Gemini CLI and Qwen Code readers.
 
 To see a full report before you have transcripts of your own, run it on the sample transcripts built into `bigsister`:
 
