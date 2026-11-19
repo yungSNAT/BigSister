@@ -9,7 +9,7 @@
 
 <div align="center">
 
-[![CI](https://img.shields.io/github/actions/workflow/status/yungSNAT/BigSister/ci.yml?branch=main&style=flat&label=CI&labelColor=000000)](https://github.com/yungSNAT/BigSister/actions/workflows/ci.yml?query=branch%3Amain) [![coverage](https://img.shields.io/codecov/c/github/yungSNAT/ShaphansAudit?branch=main&style=flat&label=coverage&labelColor=000000)](https://app.codecov.io/gh/yungSNAT/ShaphansAudit) [![licence: Apache-2.0](.github/assets/badges/licence.svg)](#licence)
+[![CI](https://img.shields.io/github/actions/workflow/status/yungSNAT/BigSister/ci.yml?branch=main&style=flat&label=CI&labelColor=000000)](https://github.com/yungSNAT/BigSister/actions/workflows/ci.yml?query=branch%3Amain) [![coverage](https://img.shields.io/codecov/c/github/yungSNAT/BigSister?branch=main&style=flat&label=coverage&labelColor=000000)](https://app.codecov.io/gh/yungSNAT/BigSister) [![licence: Apache-2.0](.github/assets/badges/licence.svg)](#licence)
 
 [Install](#install) · [Use](#use) · [Privacy](#privacy) · [Limits](#limits) · [Development](#development) · [Credits](#credits) · [Licence](#licence)
 
