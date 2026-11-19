@@ -25,7 +25,21 @@ Each [release](https://github.com/yungSNAT/BigSister/releases) carries the execu
 
 BigSister was called ShaphansAudit until 19 November 2026. The only release so far, v0.1.0, came out under that name: its archives are named `shaphansaudit-0.1.0-*` and its executable is `shaphan`, which the commands below install; with it, run `shaphan` wherever this README says `bigsister`. From the next release the executable is `bigsister`; until then, [install from source](#from-source) to get it. [RELEASE_NOTES.md](RELEASE_NOTES.md) lists what changes for a v0.1.0 install.
 
-On Linux, this downloads v0.1.0, stops if the file does not match `SHA256SUMS`, and installs to `~/.local/bin`, which must be on your `PATH`:
+With the [GitHub CLI](https://cli.github.com/) installed, the installer from [release-policy](https://github.com/ryanduguid/release-policy), which builds the releases, checks who built a release as well as its checksum: it installs nothing unless `gh` verifies `SHA256SUMS` and the archive against the release's signed provenance and the archive matches its `SHA256SUMS` line. It takes the repository under the name the provenance carries, `yungSNAT/ShaphansAudit` for v0.1.0, and installs into `~/.local/share/shaphansaudit` on Linux or `%LOCALAPPDATA%\Programs\shaphansaudit` on Windows; `--modify-path` (`-ModifyPath` on Windows) also adds that folder to your `PATH`. On Linux:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ryanduguid/release-policy/9f68505df98558566564ffe45af1b7213de243b3/scripts/install.sh |
+  sh -s -- --modify-path yungSNAT/ShaphansAudit v0.1.0
+```
+
+On Windows, in PowerShell:
+
+```powershell
+$url = 'https://raw.githubusercontent.com/ryanduguid/release-policy/9f68505df98558566564ffe45af1b7213de243b3/scripts/install.ps1'
+& ([scriptblock]::Create((Invoke-RestMethod $url))) yungSNAT/ShaphansAudit v0.1.0 -ModifyPath
+```
+
+Without the GitHub CLI, check the checksum yourself. On Linux, this downloads v0.1.0, stops if the file does not match `SHA256SUMS`, and installs to `~/.local/bin`, which must be on your `PATH`:
 
 ```bash
 base=https://github.com/yungSNAT/BigSister/releases/download/v0.1.0
