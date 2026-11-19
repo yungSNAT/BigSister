@@ -3235,8 +3235,8 @@ fn context_rebuilds_each_request_and_splits_its_input_by_part() {
         "the request before the window is left out"
     );
     assert_eq!(
-        s["requests_not_rebuilt"], 1,
-        "its base request is not in the file"
+        s["requests_not_rebuilt"], 2,
+        "one names a base request not in the file, one a message not in it"
     );
     assert_eq!(s["requests_with_tokens"], 3);
     assert_eq!(s["messages_not_found"], 1);
@@ -3302,7 +3302,7 @@ fn context_lists_the_largest_requests_first() {
     assert_eq!(
         context_cells(&doc, 2, &columns),
         parsed(
-            r#"[["2026-11-08T01:04:00+00:00","main","claude-opus-5-5",1215,7,55,118,394,30,87,117,132,48,99,135],
+            r#"[["2026-11-08T01:04:00+00:00","main","claude-opus-5-5",1215,5,55,118,394,30,87,117,132,48,99,135],
             ["2026-11-08T01:01:00+00:00","main","claude-opus-5-5",1010,3,71,153,508,39,112,0,0,0,127,0],
             ["2026-11-08T01:11:00+00:00","subagent","claude-haiku-5-5",300,1,49,203,0,0,0,0,0,0,49,0]]"#
         )

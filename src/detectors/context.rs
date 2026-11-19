@@ -593,6 +593,31 @@ mod tests {
         out
     }
 
+    /// Claude Code sends text content as one text block, and consecutive user records as
+    /// one message holding their blocks, up to `MAX_RUN` records; a reply ends a run.
+    #[test]
+    fn user_records_match_as_sent_alone_and_in_runs() {
+        let role = json!("user");
+        let text = |t: &str| json!({"type": "text", "text": t});
+        let held = |f: &File, blocks: Vec<Value>| f.ids.contains_key(&hash_of(&role, &Value::Array(blocks)));
+        let mut f = File::default();
+        f.add_user(&role, &json!("a"));
+        f.add_user(&role, &json!([text("b")]));
+        assert!(held(&f, vec![text("a")]));
+        assert!(held(&f, vec![text("a"), text("b")]));
+        f.run = (Vec::new(), 0);
+        f.add_user(&role, &json!([text("c")]));
+        assert!(!held(&f, vec![text("a"), text("b"), text("c")]));
+        for i in 1..=MAX_RUN {
+            f.add_user(&role, &json!([text(&i.to_string())]));
+        }
+        let run: Vec<Value> = std::iter::once(text("c"))
+            .chain((1..=MAX_RUN).map(|i| text(&i.to_string())))
+            .collect();
+        assert!(held(&f, run[..MAX_RUN].to_vec()));
+        assert!(!held(&f, run), "a run longer than MAX_RUN is not matched");
+    }
+
     /// A request keeps its base's first `keep` messages, all of them when `keep` is
     /// larger, then adds its tail, through any number of generations.
     #[test]
