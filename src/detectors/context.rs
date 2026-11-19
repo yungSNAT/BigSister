@@ -317,7 +317,7 @@ impl Detector for Context {
                 "Characters: text blocks count their text, thinking blocks their thinking text, other blocks and loaded tool schemas their compact JSON; reminders are user text blocks starting <system-reminder>.".to_owned(),
                 "est input tokens split each request's recorded input tokens (uncached, cache writes and cache reads, from the first reply that names the request) across its parts by their share of its characters, so they are estimates: tokens per character differ between parts.".to_owned(),
                 "Medians by part are over every rebuilt request, a request without the part counting 0; by MCP server, over the requests that loaded its tools.".to_owned(),
-                "A message not found is one a rebuilt request lists that no request blob, user record or reply in its transcript matches, counted once a transcript; its characters count nowhere. A request not rebuilt names a base request or shape its transcript does not hold.".to_owned(),
+                "A message not found is one a rebuilt request lists that no request blob, user record or reply in its transcript matches, counted once a transcript; its characters count nowhere. A request not rebuilt names a base request or shape its transcript does not hold, or has a base, keep or tail field it cannot read.".to_owned(),
             ],
         }
     }
@@ -440,30 +440,30 @@ impl Context {
 }
 
 /// Reads one `api-request` record into `f`, or counts it as not rebuilt when its file
-/// does not hold its base request or shape.
+/// does not hold its base request or shape, or a field it needs is missing or malformed:
+/// `base` absent, null or a string; `keep` a whole number; `tail` a list of hashes.
 fn add_request(f: &mut File, v: &Value, in_window: bool) {
     let str_field = |k: &str| v.get(k).and_then(Value::as_str);
     let shape = str_field("shapeHash")
         .and_then(|h| f.shapes.get(h))
         .copied();
-    let base = match str_field("base") {
-        None => Some(None),
-        Some(b) => f.request_ids.get(b).map(|&i| Some(i)),
+    let base = match v.get("base") {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(b)) => f.request_ids.get(b).map(|&i| Some(i)),
+        Some(_) => None,
     };
     let tail: Option<Vec<[u8; 32]>> = v
         .get("tail")
         .and_then(Value::as_array)
-        .map(|t| t.iter().map(|h| h.as_str().and_then(hex32)).collect())
-        .unwrap_or(Some(Vec::new()));
-    let (Some(shape), Some(base), Some(tail)) = (shape, base, tail) else {
-        f.not_rebuilt += u64::from(in_window);
-        return;
-    };
+        .and_then(|t| t.iter().map(|h| h.as_str().and_then(hex32)).collect());
     let keep = v
         .get("keep")
         .and_then(Value::as_u64)
-        .and_then(|k| usize::try_from(k).ok())
-        .unwrap_or(0);
+        .and_then(|k| usize::try_from(k).ok());
+    let (Some(shape), Some(base), Some(tail), Some(keep)) = (shape, base, tail, keep) else {
+        f.not_rebuilt += u64::from(in_window);
+        return;
+    };
     let kept = base.map_or(0, |b| keep.min(f.len(b)));
     let tail = tail.into_iter().map(|h| f.id(h)).collect();
     let model = v
