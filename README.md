@@ -15,7 +15,7 @@
 
 </div>
 
-`bigsister` reads the transcripts that Claude Code, Codex, [pi](https://github.com/earendil-works/pi) and [OpenCode](https://github.com/anomalyco/opencode) save on your machine and reports where tokens and checks are wasted: context loaded before the first non-synthetic reply, what each request's input held, part by part, tool schemas loaded but never called, skills listed but never used, test output piped past its exit status, repeated polling, files re-read after a compaction, the prompt cache rebuilt after an idle gap, input cost by model, reasoning effort and subagent type, and slow hooks.
+`bigsister` reads the transcripts that Claude Code, Codex, [pi](https://github.com/earendil-works/pi), [OpenCode](https://github.com/anomalyco/opencode), [Gemini CLI](https://github.com/google-gemini/gemini-cli) and [Qwen Code](https://github.com/QwenLM/qwen-code) (their formats as versions 0.69.0 and 0.28.0 wrote them on 19 November 2026; other versions unverified, and Gemini CLI's older `.json` sessions are not read) save on your machine and reports where tokens and checks are wasted: context loaded before the first non-synthetic reply, what each request's input held, part by part, tool schemas loaded but never called, skills listed but never used, test output piped past its exit status, repeated polling, files re-read after a compaction, the prompt cache rebuilt after an idle gap, input cost by model, reasoning effort and subagent type, and slow hooks.
 
 It prints names, paths, counts, sizes and times, as listed under [Privacy](#privacy). It never prints message text, tool inputs or tool outputs, and it makes no network calls.
 
@@ -87,7 +87,7 @@ cargo install --locked --path .
 bigsister all
 ```
 
-This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.pi/agent/sessions` and `~/.local/share/opencode` and prints one section per detector. If none of them exists, it exits 1, names each missing folder but `~/.codex/archived_sessions`, which need not exist, and suggests the sample below. Run one detector by name, for example `bigsister hooks --since 24h`. With the v0.1.0 release, run `shaphan` instead; it predates the `tools`, `cache` and `models` sections and the pi and OpenCode readers.
+This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.pi/agent/sessions`, `~/.local/share/opencode`, `~/.gemini/tmp` and `~/.qwen/projects` and prints one section per detector. If none of them exists, it exits 1, names each missing folder but `~/.codex/archived_sessions`, which need not exist, and suggests the sample below. Run one detector by name, for example `bigsister hooks --since 24h`. With the v0.1.0 release, run `shaphan` instead; it predates the `context`, `tools`, `cache` and `models` sections, `--sample` and the pi, OpenCode, Gemini CLI and Qwen Code readers.
 
 To see a full report before you have transcripts of your own, run it on the sample transcripts built into `bigsister`:
 
@@ -110,7 +110,7 @@ bigsister 0.2.0: records since 2026-11-01 00:00 +11:00
 claude: 3 files under tests/fixtures/claude (unreadable files or folders: 0, lines skipped: 1, compressed files skipped: 0)
 codex: 2 files under tests/fixtures/codex (unreadable files or folders: 0, lines skipped: 0, compressed files skipped: 0)
 
-== pipes: test runs piped into tail or head (Claude and OpenCode Bash, Codex commands, pi bash and powershell) ==
+== pipes: test runs piped into tail or head (Claude and OpenCode Bash, Codex commands, pi bash and powershell, Gemini and Qwen shell) ==
 test runs: 5
 piped into tail or head: 5
 over ssh not judged: 1
@@ -149,10 +149,10 @@ bigsister context --sample
 | `startup` | Claude | Characters loaded before the first non-synthetic reply of each main session, by source: instruction files, hook output, listings, tool schemas and MCP instructions; also the input tokens recorded for that first reply |
 | `context` | Claude | Each request Claude Code's request log records, rebuilt: its input's characters by part (system prompt, built-in tools, MCP tools, system messages, reminders, tool results, tool calls, thinking, text, other blocks) and by MCP server, its recorded input tokens split across the parts by their share, and the largest requests; a request naming a message its transcript does not hold counts as partly rebuilt, in no table |
 | `schemas` | Claude | Per tool or MCP server: sessions that loaded its schema, sessions that called it, and the characters loaded in sessions that never called it; the same for each skill listed against the skills used |
-| `pipes` | Claude, Codex, pi, OpenCode | Test runs piped into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many printed a failure whilst the call reported success, in total and by agent |
-| `polls` | Claude, Codex, pi, OpenCode | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit, the polls of a command whose previous run's result was an error and the characters polls returned; also, by verb class, the characters every non-blank command's results returned |
+| `pipes` | Claude, Codex, pi, OpenCode, Gemini, Qwen | Test runs piped into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many printed a failure whilst the call reported success, in total and by agent |
+| `polls` | Claude, Codex, pi, OpenCode, Gemini, Qwen | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit, the polls of a command whose previous run's result was an error and the characters polls returned; also, by verb class, the characters every non-blank command's results returned |
 | `rereads` | Claude, Codex, pi, OpenCode | Files read again after a context compaction that had been read before it, and the characters those re-reads returned |
-| `tools` | Claude, pi, OpenCode | Per tool: calls, the characters their results returned, errors, and image and document blocks; also runs of 3 or more errors in a row (cascades) and calls repeated with the same input after erring twice (retry churn) |
+| `tools` | Claude, pi, OpenCode, Gemini, Qwen | Per tool: calls, the characters their results returned, errors, and image and document blocks; also runs of 3 or more errors in a row (cascades) and calls repeated with the same input after erring twice (retry churn) |
 | `cache` | Claude | Cache write tokens split into new context and context cached again (rebuilt) after an idle gap longer than the cache's lifetime, after a model switch or otherwise, with their dollars at the cache write price |
 | `models` | Claude | Input-side cost by scope, model, reasoning effort and subagent type, and how many subagent sessions ran on their parent session's top-priced model |
 | `hooks` | Claude | Hook runs, cancellations, timeouts and durations, by event, matcher and hook |
@@ -161,11 +161,13 @@ bigsister context --sample
 |---|---|---|
 | `--since` | `7d` | Start of the window: `Nd`, `Nh`, a date (local midnight) or an RFC 3339 time |
 | `--sample` | off | Read the sample transcripts built into `bigsister` instead of your folders, from 2026-11-01; not with `--since` or a folder option |
-| `--agent` | `all` | `claude`, `codex`, `pi`, `opencode` or `all` |
+| `--agent` | `all` | `claude`, `codex`, `pi`, `opencode`, `gemini`, `qwen` or `all` |
 | `--claude-root DIR` | `~/.claude/projects` | Claude Code transcript folder |
 | `--codex-root DIR` | `~/.codex/sessions` and `~/.codex/archived_sessions` | Codex transcript folder; a given folder replaces both |
 | `--pi-root DIR` | `~/.pi/agent/sessions` | pi session folder |
 | `--opencode-root DIR` | `~/.local/share/opencode` | OpenCode data folder, holding `opencode.db` |
+| `--gemini-root DIR` | `~/.gemini/tmp` | Gemini CLI session folder |
+| `--qwen-root DIR` | `~/.qwen/projects` | Qwen Code session folder |
 | `--json` | off | Print one JSON object with `schema_version` 2 |
 | `--csv` | off | Print the report's sections as one CSV table, one value a record; not with `--json` |
 | `--limit N` | 20 | Rows per table |

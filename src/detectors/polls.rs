@@ -112,12 +112,19 @@ pub struct Polls {
 
 impl Detector for Polls {
     fn agents(&self) -> &'static [Agent] {
-        &[Agent::Claude, Agent::Codex, Agent::Pi, Agent::OpenCode]
+        &[
+            Agent::Claude,
+            Agent::Codex,
+            Agent::Pi,
+            Agent::OpenCode,
+            Agent::Gemini,
+            Agent::Qwen,
+        ]
     }
 
     fn wants(&self, s: &Session, line: &str) -> bool {
         match s.agent {
-            Agent::Claude | Agent::Pi | Agent::OpenCode => {
+            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {
                 line.contains("\"tool_use\"") || self.claude.wants(line)
             }
             Agent::Codex => codex_call_line(line) || self.codex.wants(line),
@@ -151,7 +158,7 @@ impl Detector for Polls {
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
         match s.agent {
-            Agent::Claude | Agent::Pi | Agent::OpenCode => {
+            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {
                 for b in tool_uses(r) {
                     let id = b.get("id").and_then(Value::as_str);
                     let fresh = self.claude.note(id);

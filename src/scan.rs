@@ -12,6 +12,7 @@ use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
 use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
 use serde_json::Value;
 
+use crate::gemini::{Gemini, Rewrite};
 use crate::prices::Prices;
 use crate::report::{Opts, Section};
 use crate::time::parse_ts;
@@ -23,6 +24,8 @@ pub enum Agent {
     Codex,
     Pi,
     OpenCode,
+    Gemini,
+    Qwen,
 }
 
 impl Agent {
@@ -33,14 +36,20 @@ impl Agent {
             Agent::Codex => "codex",
             Agent::Pi => "pi",
             Agent::OpenCode => "opencode",
+            Agent::Gemini => "gemini",
+            Agent::Qwen => "qwen",
         }
     }
 
-    /// Whether the agent's records reach the detectors as Claude Code records: pi's and
-    /// OpenCode's are rewritten into them ([`crate::pi`], [`crate::opencode`]).
+    /// Whether the agent's records reach the detectors as Claude Code records: pi's,
+    /// OpenCode's, Gemini CLI's and Qwen Code's are rewritten into them ([`crate::pi`],
+    /// [`crate::opencode`], [`crate::gemini`]).
     #[must_use]
     pub fn claude_shaped(self) -> bool {
-        matches!(self, Agent::Claude | Agent::Pi | Agent::OpenCode)
+        matches!(
+            self,
+            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen
+        )
     }
 }
 
@@ -235,6 +244,7 @@ pub fn scan_memory(
             // An in-memory transcript cannot fail to read.
             let _ = scan_file(
                 Box::new(f.text.as_bytes()),
+                None,
                 Path::new(f.path),
                 &window,
                 dets,
@@ -271,10 +281,36 @@ fn scan_files(
             }
         };
         st.files += 1;
-        if let Err(e) = scan_file(reader, &path, window, dets, active, st, earlier) {
+        let (reader, rewrite) = match st.agent {
+            Agent::Gemini => match indexed(reader, &path) {
+                Ok((reader, index)) => (reader, Some(Rewrite::Gemini(index))),
+                Err(reason) => {
+                    st.count_unreadable(reason);
+                    continue;
+                }
+            },
+            Agent::Qwen => (reader, Some(Rewrite::Qwen)),
+            _ => (reader, None),
+        };
+        if let Err(e) = scan_file(reader, rewrite, &path, window, dets, active, st, earlier) {
             st.count_unreadable(read_error(&e));
         }
     }
+}
+
+/// Indexes Gemini CLI file `path` from `reader` ([`Gemini::index`]), then opens it again
+/// for the second pass, or says why either cannot be read.
+fn indexed(reader: Box<dyn BufRead>, path: &Path) -> Result<(Box<dyn BufRead>, Gemini), String> {
+    let mut lines = Lines::new(reader);
+    let mut index = Gemini::default();
+    while let Some(line) = lines.next_line().map_err(|e| read_error(&e))? {
+        index.index(&line);
+    }
+    let reader = open(path).map_err(|e| match e {
+        Open::Io(reason) => reason,
+        Open::NotZstd => "it changed whilst it was read".to_owned(),
+    })?;
+    Ok((reader, index))
 }
 
 /// Reads the OpenCode sessions in `root`'s `opencode.db`, each as one transcript. A
@@ -313,7 +349,7 @@ fn scan_opencode(
         }
         let reader = Box::new(io::Cursor::new(text.into_bytes()));
         // An in-memory transcript cannot fail to read.
-        let _ = scan_file(reader, &db, window, dets, active, st, earlier);
+        let _ = scan_file(reader, None, &db, window, dets, active, st, earlier);
     }
 }
 
@@ -552,8 +588,15 @@ impl Earlier {
     }
 }
 
+/// Reads a transcript from `reader`, each line through `rewrite` for an agent whose lines
+/// are rewritten into Claude Code records.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the transcript's reader, rewrite and path, and the scan's state"
+)]
 fn scan_file(
     reader: Box<dyn BufRead>,
+    rewrite: Option<Rewrite>,
     path: &Path,
     window: &Window<'_>,
     dets: &mut [Box<dyn Detector>],
@@ -585,6 +628,7 @@ fn scan_file(
         replies: HashSet::new(),
         earlier,
         pi: (agent == Agent::Pi).then(crate::pi::Tree::default),
+        rewrite,
         replaying: false,
         dets,
         active,
@@ -605,8 +649,7 @@ fn scan_file(
     // A Codex turn's model reads its results; a Claude result no reply read stays
     // unpriced.
     if agent == Agent::Codex {
-        let price = feed.codex_price(|| None);
-        feed.read_by(price);
+        feed.read_by(feed.codex_price(|| None));
     }
     for &i in active {
         feed.dets[i].end(&session);
@@ -618,7 +661,8 @@ fn scan_file(
 // shortcut: a Claude subagent is told apart by its `subagents` folder and a Codex one
 // by `parent_thread_id` in its first record, as both agents lay them out in November
 // 2026. A layout change makes subagents count as main sessions; a record field naming
-// the parent would be the upgrade.
+// the parent would be the upgrade. pi, Gemini CLI and Qwen Code sessions count as main
+// sessions: Gemini CLI's subagent header field and Qwen Code's parent record are unread.
 fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
     match agent {
         Agent::Claude => path.components().any(|c| c.as_os_str() == "subagents"),
@@ -627,7 +671,7 @@ fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
                 .and_then(Value::as_str)
                 .is_some_and(|p| !p.is_empty())
         }),
-        Agent::Pi => false,
+        Agent::Pi | Agent::Gemini | Agent::Qwen => false,
         Agent::OpenCode => serde_json::from_str::<Value>(first)
             .is_ok_and(|v| v.get("subagent") == Some(&Value::Bool(true))),
     }
@@ -647,6 +691,8 @@ struct Feed<'a> {
     earlier: &'a Earlier,
     /// A pi session's tree; `None` for other agents.
     pi: Option<crate::pi::Tree>,
+    /// A Gemini CLI or Qwen Code session's rewrite; `None` for other agents.
+    rewrite: Option<Rewrite>,
     /// Whether the lines fed are a pi path given again, which count nowhere.
     replaying: bool,
     dets: &'a mut [Box<dyn Detector>],
@@ -656,8 +702,14 @@ struct Feed<'a> {
 
 impl Feed<'_> {
     /// Feeds one line, a pi entry as the Claude Code record it is rewritten to, after
-    /// the path it branches from.
+    /// the path it branches from, and a Gemini CLI or Qwen Code line as the records it is
+    /// rewritten to.
     fn take(&mut self, line: &str) {
+        if let Some(rewrite) = self.rewrite.as_mut() {
+            let mut out = Vec::new();
+            self.st.bad_lines += rewrite.read(line, &mut out);
+            return out.iter().for_each(|l| self.line(l));
+        }
         let Some(tree) = self.pi.as_mut() else {
             return self.line(line);
         };
@@ -803,7 +855,7 @@ impl Feed<'_> {
     /// replies no detector reads to the uuids held for the scan.
     fn model(&mut self, line: &str) -> Option<Option<f64>> {
         match self.session.agent {
-            Agent::Claude | Agent::Pi | Agent::OpenCode => {
+            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {
                 const KEY: &str = "\"message\":{\"model\":\"";
                 let at = line.find(KEY)?;
                 let rest = &line[at + KEY.len()..];
@@ -932,6 +984,7 @@ mod tests {
             let path = Path::new("s.jsonl");
             scan_file(
                 reader,
+                None,
                 path,
                 &Window {
                     since: Some(Timestamp::MIN),

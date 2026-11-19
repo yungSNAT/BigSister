@@ -1773,7 +1773,7 @@ fn help_says_pipes_reads_codex_commands_too() {
     assert_eq!(code, 0);
     let help = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        help.contains("a pipe into tail or head hides (Claude, Codex, pi, OpenCode)"),
+        help.contains("a pipe into tail or head hides (Claude, Codex, pi, OpenCode, Gemini, Qwen)"),
         "{stdout}"
     );
 }
@@ -2832,6 +2832,155 @@ fn pi_output_never_contains_transcript_content() {
     }
 }
 
+const GEMINI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/gemini");
+const QWEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/qwen");
+
+/// Each of the 2 agents, its folder option and its fixture: one session whose 5 tool
+/// calls are a test run piped into `tail`, `git status` twice, a read and a failed edit.
+const GEMINI_AND_QWEN: [(&str, &str, &str); 2] = [
+    ("gemini", "--gemini-root", GEMINI),
+    ("qwen", "--qwen-root", QWEN),
+];
+
+/// `bigsister all --agent <agent> --json` over that agent's fixture.
+fn agent_report(agent: &str, flag: &str, root: &str) -> Value {
+    let args = [
+        "all", "--agent", agent, flag, root, "--since", SINCE, "--json",
+    ];
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+#[test]
+fn gemini_and_qwen_sessions_feed_pipes_polls_and_tools() {
+    for (agent, flag, root) in GEMINI_AND_QWEN {
+        let doc = agent_report(agent, flag, root);
+        let pipes = find(rows(&doc, "pipes", 0), &[("agent", json!(agent))]);
+        for field in [
+            "test_runs",
+            "unguarded",
+            "showed_a_failure_but_reported_success",
+        ] {
+            assert_eq!(pipes[field], json!(1), "{agent} {field}");
+        }
+        let polls = find(rows(&doc, "polls", 0), &[("agent", json!(agent))]);
+        assert_eq!(
+            [&polls["commands"], &polls["polls"]],
+            [&json!(3), &json!(1)],
+            "{agent}"
+        );
+        // No compaction record is read for either, so rereads does not read them.
+        assert!(
+            rows(&doc, "rereads", 0)
+                .iter()
+                .all(|r| r["agent"] != json!(agent)),
+            "{agent}"
+        );
+        let roots = doc["roots"].as_array().expect("roots");
+        assert_eq!(roots.len(), 1, "{agent}: {roots:?}");
+        assert_eq!(roots[0]["agent"], json!(agent));
+        assert_eq!(roots[0]["files"], json!(1), "{agent}");
+        assert_eq!(roots[0]["lines_skipped"], json!(0), "{agent}");
+    }
+}
+
+/// Gemini CLI writes a reply again under the same id as its tool calls progress: only the
+/// last version counts, with each call's status.
+#[test]
+fn gemini_and_qwen_tool_calls_count_once_under_claude_names() {
+    for (agent, flag, root) in GEMINI_AND_QWEN {
+        let doc = agent_report(agent, flag, root);
+        let table = rows(&doc, "tools", 0);
+        assert_eq!(table.len(), 3, "{agent}: {table:?}");
+        for (tool, calls, errors) in [("Bash", 3, 0), ("Read", 1, 0), ("Edit", 1, 1)] {
+            let row = find(table, &[("agent", json!(agent)), ("tool", json!(tool))]);
+            assert_eq!(
+                [&row["calls"], &row["errors"]],
+                [&json!(calls), &json!(errors)],
+                "{agent} {tool}"
+            );
+        }
+    }
+}
+
+#[test]
+fn gemini_and_qwen_output_never_contains_transcript_content() {
+    for (agent, flag, root) in GEMINI_AND_QWEN {
+        for extra in [&[][..], &["--json"], &["--paths"], &["--csv", "--paths"]] {
+            let mut args = vec!["all", "--agent", agent, flag, root, "--since", SINCE];
+            args.extend_from_slice(extra);
+            let (code, stdout, stderr) = run(&args);
+            assert_eq!(code, 0, "{stderr}");
+            let all = format!("{stdout}{stderr}").to_lowercase();
+            assert!(!all.contains("sentinel"), "{agent} {extra:?}:\n{all}");
+        }
+    }
+}
+
+/// A byte that is not UTF-8 spoils only the text it sits in, not the file.
+#[test]
+fn a_gemini_file_with_a_stray_byte_is_still_read() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("gemini-stray-byte");
+    let _ = std::fs::remove_dir_all(&root);
+    copy_tree(Path::new(GEMINI), &root);
+    let file = root.join("proj/chats/session-2026-11-09T06-00-0c1a2b3d.jsonl");
+    let mut bytes = std::fs::read(&file).expect("fixture");
+    let at = bytes
+        .windows(13)
+        .position(|w| w == b"SENTINEL_DESC")
+        .expect("a sentinel");
+    bytes[at] = 0xFF;
+    std::fs::write(&file, bytes).expect("write");
+    let doc = agent_report(
+        "gemini",
+        "--gemini-root",
+        root.to_str().expect("UTF-8 path"),
+    );
+    let roots = doc["roots"].as_array().expect("roots");
+    assert_eq!(roots[0]["unreadable"], json!(0), "{roots:?}");
+    let polls = find(rows(&doc, "polls", 0), &[("agent", json!("gemini"))]);
+    assert_eq!(polls["commands"], json!(3));
+}
+
+/// A Gemini CLI line longer than the scan's line limit is skipped, not held, and the lines
+/// after it are still read.
+#[test]
+fn a_gemini_line_over_the_line_limit_is_skipped() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("gemini-long-line");
+    let _ = std::fs::remove_dir_all(&root);
+    copy_tree(Path::new(GEMINI), &root);
+    let file = root.join("proj/chats/session-2026-11-09T06-00-0c1a2b3d.jsonl");
+    let text = std::fs::read_to_string(&file).expect("fixture");
+    let (header, rest) = text.split_once('\n').expect("a header");
+    let long = format!(
+        "{{\"id\":\"long\",\"type\":\"user\",\"pad\":\"{}\"}}",
+        "a".repeat(64 << 20)
+    );
+    std::fs::write(&file, format!("{header}\n{long}\n{rest}")).expect("write");
+    let doc = agent_report(
+        "gemini",
+        "--gemini-root",
+        root.to_str().expect("UTF-8 path"),
+    );
+    let roots = doc["roots"].as_array().expect("roots");
+    assert_eq!(roots[0]["lines_skipped"], json!(1), "{roots:?}");
+    let polls = find(rows(&doc, "polls", 0), &[("agent", json!("gemini"))]);
+    assert_eq!(polls["commands"], json!(3));
+}
+
+#[test]
+fn a_missing_gemini_or_qwen_folder_is_an_error_when_asked_for() {
+    let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-agent-here");
+    let missing = missing.to_str().expect("UTF-8 path");
+    for (agent, flag, _) in GEMINI_AND_QWEN {
+        let (code, _, stderr) = run(&["polls", flag, missing, "--agent", agent]);
+        assert_eq!(code, 1, "{stderr}");
+        let wanted = format!("{agent} transcript folder not found");
+        assert!(stderr.contains(&wanted), "{stderr}");
+    }
+}
+
 #[test]
 fn a_missing_pi_folder_is_an_error_when_asked_for_and_noted_otherwise() {
     let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-pi-here");
@@ -2860,7 +3009,9 @@ fn a_missing_pi_folder_is_an_error_when_asked_for_and_noted_otherwise() {
         doc["skipped_roots"],
         json!([
             "pi transcript folder not found: ~/.pi/agent/sessions",
-            "opencode transcript folder not found: ~/.local/share/opencode"
+            "opencode transcript folder not found: ~/.local/share/opencode",
+            "gemini transcript folder not found: ~/.gemini/tmp",
+            "qwen transcript folder not found: ~/.qwen/projects"
         ])
     );
     assert_eq!(doc["roots"].as_array().expect("roots").len(), 2, "{doc}");

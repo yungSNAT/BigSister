@@ -131,7 +131,13 @@ pub(super) fn printed(name: &str) -> String {
 
 impl Detector for Tools {
     fn agents(&self) -> &'static [Agent] {
-        &[Agent::Claude, Agent::Pi, Agent::OpenCode]
+        &[
+            Agent::Claude,
+            Agent::Pi,
+            Agent::OpenCode,
+            Agent::Gemini,
+            Agent::Qwen,
+        ]
     }
 
     fn wants(&self, _s: &Session, line: &str) -> bool {
