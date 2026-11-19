@@ -3331,6 +3331,10 @@ fn context_rebuilds_each_request_and_splits_its_input_by_part() {
         s["requests_not_rebuilt"], 1,
         "its base request is not in the file"
     );
+    assert_eq!(
+        s["requests_partly_rebuilt"], 1,
+        "it names a message not in the file, and counts in no table"
+    );
     assert_eq!(s["requests_with_tokens"], 3);
     assert_eq!(s["messages_not_found"], 1);
     assert_eq!(s["median_input_tokens"], 1010);
@@ -3345,7 +3349,7 @@ fn context_rebuilds_each_request_and_splits_its_input_by_part() {
     assert_eq!(
         context_cells(&doc, 0, &columns),
         parsed(
-            r#"[["system prompt",3,37,37,0.06,175],["built-in tools",3,79,79,0.16,474],
+            r#"[["system prompt",3,37,37,0.06,175],["built-in tools",3,79,79,0.16,473],
             ["MCP tools",2,263,263,0.36,902],["system messages",2,20,20,0.03,69],
             ["reminders",2,58,58,0.08,199],["tool results",1,0,78,0.05,117],
             ["tool calls",1,0,88,0.06,132],["thinking",1,0,32,0.02,48],
@@ -3395,9 +3399,9 @@ fn context_lists_the_largest_requests_first() {
     assert_eq!(
         context_cells(&doc, 2, &columns),
         parsed(
-            r#"[["2026-11-08T01:04:00+00:00","main","claude-opus-5-5",1215,7,55,118,394,30,87,117,132,48,99,135],
+            r#"[["2026-11-08T01:04:00+00:00","main","claude-opus-5-5",1215,5,55,118,394,30,87,117,132,48,99,135],
             ["2026-11-08T01:01:00+00:00","main","claude-opus-5-5",1010,3,71,153,508,39,112,0,0,0,127,0],
-            ["2026-11-08T01:11:00+00:00","subagent","claude-haiku-5-5",300,1,49,203,0,0,0,0,0,0,49,0]]"#
+            ["2026-11-08T01:11:00+00:00","subagent","claude-haiku-5-5",300,1,49,202,0,0,0,0,0,0,49,0]]"#
         )
     );
 }
