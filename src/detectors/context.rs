@@ -317,7 +317,7 @@ impl Detector for Context {
                 "Characters: text blocks count their text, thinking blocks their thinking text, other blocks and loaded tool schemas their compact JSON; reminders are user text blocks starting <system-reminder>.".to_owned(),
                 "est input tokens split each request's recorded input tokens (uncached, cache writes and cache reads, from the first reply that names the request) across its parts by their share of its characters, so they are estimates: tokens per character differ between parts.".to_owned(),
                 "Medians by part are over every rebuilt request, a request without the part counting 0; by MCP server, over the requests that loaded its tools.".to_owned(),
-                "A message not found is one a rebuilt request lists that no request blob, user record or reply in its transcript matches, counted once a transcript; its characters count nowhere. A request not rebuilt names a base request or shape its transcript does not hold.".to_owned(),
+                "A message not found is one a rebuilt request lists that no request blob, user record or reply in its transcript matches, counted once a transcript; its characters count nowhere. A request not rebuilt names a base request or shape its transcript does not hold, or has a base, keep or tail field it cannot read.".to_owned(),
             ],
         }
     }
@@ -440,30 +440,30 @@ impl Context {
 }
 
 /// Reads one `api-request` record into `f`, or counts it as not rebuilt when its file
-/// does not hold its base request or shape.
+/// does not hold its base request or shape, or a field it needs is missing or malformed:
+/// `base` absent, null or a string; `keep` a whole number; `tail` a list of hashes.
 fn add_request(f: &mut File, v: &Value, in_window: bool) {
     let str_field = |k: &str| v.get(k).and_then(Value::as_str);
     let shape = str_field("shapeHash")
         .and_then(|h| f.shapes.get(h))
         .copied();
-    let base = match str_field("base") {
-        None => Some(None),
-        Some(b) => f.request_ids.get(b).map(|&i| Some(i)),
+    let base = match v.get("base") {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(b)) => f.request_ids.get(b).map(|&i| Some(i)),
+        Some(_) => None,
     };
     let tail: Option<Vec<[u8; 32]>> = v
         .get("tail")
         .and_then(Value::as_array)
-        .map(|t| t.iter().map(|h| h.as_str().and_then(hex32)).collect())
-        .unwrap_or(Some(Vec::new()));
-    let (Some(shape), Some(base), Some(tail)) = (shape, base, tail) else {
-        f.not_rebuilt += u64::from(in_window);
-        return;
-    };
+        .and_then(|t| t.iter().map(|h| h.as_str().and_then(hex32)).collect());
     let keep = v
         .get("keep")
         .and_then(Value::as_u64)
-        .and_then(|k| usize::try_from(k).ok())
-        .unwrap_or(0);
+        .and_then(|k| usize::try_from(k).ok());
+    let (Some(shape), Some(base), Some(tail), Some(keep)) = (shape, base, tail, keep) else {
+        f.not_rebuilt += u64::from(in_window);
+        return;
+    };
     let kept = base.map_or(0, |b| keep.min(f.len(b)));
     let tail = tail.into_iter().map(|h| f.id(h)).collect();
     let model = v
@@ -570,6 +570,69 @@ fn shape_parts(shape: &Value) -> Shape {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn value(s: &str) -> Value {
+        serde_json::from_str(s).expect("valid JSON")
+    }
+
+    /// A file holding shape `s` and the requests `lines`, each in the window.
+    fn file_of(lines: &[&str]) -> File {
+        let mut f = File::default();
+        f.shapes.insert("s".to_owned(), 0);
+        f.shape_list
+            .push(shape_parts(&value(r#"{"system":[],"tools":[]}"#)));
+        for line in lines {
+            add_request(&mut f, &value(line), true);
+        }
+        f
+    }
+
+    fn messages(f: &File, i: usize) -> Vec<u32> {
+        let mut out = Vec::new();
+        f.each_message(i, |m| out.push(m));
+        out
+    }
+
+    /// A request keeps its base's first `keep` messages, all of them when `keep` is
+    /// larger, then adds its tail, through any number of generations.
+    #[test]
+    fn each_message_follows_bases_through_several_generations() {
+        let h = |c: char| format!("\"{}\"", c.to_string().repeat(64));
+        let (a, b, c, d, e, g) = (h('a'), h('b'), h('c'), h('d'), h('e'), h('f'));
+        let f = file_of(&[
+            &format!(r#"{{"id":"r1","keep":0,"tail":[{a},{b},{c}],"shapeHash":"s"}}"#),
+            &format!(r#"{{"id":"r2","base":"r1","keep":2,"tail":[{d}],"shapeHash":"s"}}"#),
+            &format!(r#"{{"id":"r3","base":"r2","keep":9,"tail":[{e}],"shapeHash":"s"}}"#),
+            &format!(r#"{{"id":"r4","base":"r3","keep":0,"tail":[{g}],"shapeHash":"s"}}"#),
+            r#"{"id":"r5","base":"r3","keep":1,"tail":[],"shapeHash":"s"}"#,
+        ]);
+        assert_eq!(f.not_rebuilt, 0);
+        assert_eq!(messages(&f, 0), [0, 1, 2]);
+        assert_eq!(messages(&f, 1), [0, 1, 3]);
+        assert_eq!(messages(&f, 2), [0, 1, 3, 4]);
+        assert_eq!(messages(&f, 3), [5]);
+        assert_eq!(messages(&f, 4), [0]);
+        assert_eq!((1..5).map(|i| f.len(i)).collect::<Vec<_>>(), [3, 4, 1, 1]);
+    }
+
+    /// A request whose `base`, `keep` or `tail` is missing where needed or of the wrong
+    /// type is not rebuilt, rather than read as a request with fewer messages.
+    #[test]
+    fn a_request_with_a_malformed_field_is_not_rebuilt() {
+        let f = file_of(&[
+            r#"{"id":"r0","keep":0,"tail":[],"shapeHash":"s"}"#,
+            r#"{"id":"r1","base":5,"keep":0,"tail":[],"shapeHash":"s"}"#,
+            r#"{"id":"r2","base":"r0","keep":"0","tail":[],"shapeHash":"s"}"#,
+            r#"{"id":"r3","base":"r0","keep":-1,"tail":[],"shapeHash":"s"}"#,
+            r#"{"id":"r4","base":"r0","tail":[],"shapeHash":"s"}"#,
+            r#"{"id":"r5","keep":0,"tail":"x","shapeHash":"s"}"#,
+            r#"{"id":"r6","keep":0,"shapeHash":"s"}"#,
+            r#"{"id":"r7","keep":0,"tail":[1],"shapeHash":"s"}"#,
+            r#"{"id":"r8","base":null,"keep":0,"tail":[],"shapeHash":"s"}"#,
+        ]);
+        assert_eq!(f.not_rebuilt, 7);
+        assert_eq!(f.requests.len(), 2, "r0, and r8 with a null base");
+    }
 
     /// The digest Python's `hashlib.sha256(json.dumps(m, separators=(",", ":"),
     /// ensure_ascii=False, sort_keys=True).encode())` gives for the fixture's first prompt.
