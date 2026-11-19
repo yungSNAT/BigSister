@@ -1641,6 +1641,53 @@ fn each_reason_a_transcript_is_unreadable_prints_with_its_count() {
 
 #[cfg(unix)]
 #[test]
+fn default_folders_that_cannot_be_listed_are_skipped_with_a_note() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("home-locked");
+    let locked = [
+        home.join(".gemini/tmp"),
+        home.join(".codex/archived_sessions"),
+    ];
+    for dir in &locked {
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
+    }
+    let _ = std::fs::remove_dir_all(&home);
+    for dir in &locked {
+        std::fs::create_dir_all(dir).expect("folder");
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).expect("mode");
+    }
+    if std::fs::read_dir(&locked[0]).is_ok() {
+        // Run as root, which reads any folder: there is nothing to test.
+        return;
+    }
+    let args = ["polls", "--claude-root", CLAUDE, "--since", SINCE, "--json"];
+    let (code, stdout, stderr) = run_env(&args, &[("HOME", &home), ("USERPROFILE", &home)]);
+    for dir in &locked {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).expect("mode");
+    }
+    assert_eq!(code, 0, "{stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(
+        doc["skipped_roots"],
+        json!([
+            "codex transcript folder not found: ~/.codex/sessions",
+            "pi transcript folder not found: ~/.pi/agent/sessions",
+            "opencode transcript folder not found: ~/.local/share/opencode",
+            "gemini transcript folder unreadable: ~/.gemini/tmp",
+            "qwen transcript folder not found: ~/.qwen/projects",
+            "codex transcript folder unreadable: ~/.codex/archived_sessions"
+        ])
+    );
+    let roots = doc["roots"].as_array().expect("roots");
+    assert_eq!(
+        (roots.len(), &roots[0]["agent"]),
+        (1, &json!("claude")),
+        "{doc}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_folder_that_cannot_be_listed_prints_its_reason() {
     use std::os::unix::fs::PermissionsExt;
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("unreadable-folder");

@@ -969,35 +969,81 @@ mod tests {
         .join("\n");
         // Claude reads u1 once; Codex records carry no such uuid, so all count.
         for (agent, want) in [(Agent::Claude, 4), (Agent::Codex, 5)] {
-            let mut st = RootStats {
-                agent,
-                root: PathBuf::new(),
-                files: 0,
-                unreadable: 0,
-                bad_lines: 0,
-                compressed: 0,
-                unreadable_reasons: BTreeMap::new(),
-            };
-            let n = std::rc::Rc::default();
-            let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count(std::rc::Rc::clone(&n)))];
             let reader = Box::new(io::Cursor::new(lines.clone().into_bytes()));
-            let path = Path::new("s.jsonl");
-            scan_file(
-                reader,
-                None,
-                path,
-                &Window {
-                    since: Some(Timestamp::MIN),
-                    prices: &Prices::bundled(),
-                },
-                &mut dets,
-                &[0],
-                &mut st,
-                &mut Earlier::default(),
-            )
-            .expect("read");
-            assert_eq!(n.get(), want, "{agent:?}");
+            assert_eq!(scan_one(agent, reader).0, want, "{agent:?}");
         }
+    }
+
+    /// Scans one transcript with `Count`, and gives the records it was given and the
+    /// lines skipped.
+    fn scan_one(agent: Agent, reader: Box<dyn BufRead>) -> (u64, u64) {
+        let mut st = RootStats::new(agent, PathBuf::new());
+        let n = std::rc::Rc::default();
+        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count(std::rc::Rc::clone(&n)))];
+        scan_file(
+            reader,
+            None,
+            Path::new("s.jsonl"),
+            &Window {
+                since: Some(Timestamp::MIN),
+                prices: &Prices::bundled(),
+            },
+            &mut dets,
+            &[0],
+            &mut st,
+            &mut Earlier::default(),
+        )
+        .expect("read");
+        (n.get(), st.bad_lines)
+    }
+
+    #[test]
+    fn blank_lines_are_passed_over_and_a_record_that_does_not_parse_is_skipped() {
+        let lines = [
+            r#"{"type":"user","uuid":"u1","message":{}}"#,
+            "",
+            r#"{"type":"user","uuid":"u2" "message":{}}"#,
+            "   ",
+            r#"{"type":"summary"}"#,
+        ]
+        .join("\n");
+        let reader = Box::new(io::Cursor::new(lines.into_bytes()));
+        assert_eq!(scan_one(Agent::Claude, reader), (2, 1));
+    }
+
+    #[test]
+    fn a_transcript_of_one_over_long_line_counts_it_as_skipped() {
+        let long = io::repeat(b'a').take(MAX_LINE + 10);
+        assert_eq!(
+            scan_one(Agent::Claude, Box::new(BufReader::new(long))),
+            (0, 1)
+        );
+    }
+
+    #[test]
+    fn only_jsonl_and_compressed_jsonl_files_are_listed() {
+        let dir = std::env::temp_dir().join(format!("bigsister-list-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub")).expect("temp folder");
+        for name in [
+            "a.jsonl",
+            "sub/b.jsonl.zst",
+            "notes.txt",
+            "c.json",
+            "d.zst",
+            "jsonl",
+        ] {
+            fs::write(dir.join(name), "{}\n").expect("stub");
+        }
+        let mut st = RootStats::new(Agent::Claude, dir.clone());
+        let mut got = list_files(&dir, SystemTime::UNIX_EPOCH, &mut st);
+        got.sort();
+        fs::remove_dir_all(&dir).expect("clean up");
+        assert_eq!(
+            got,
+            [dir.join("a.jsonl"), dir.join("sub").join("b.jsonl.zst")]
+        );
+        assert_eq!(st.unreadable, 0);
     }
 
     #[test]
