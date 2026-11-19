@@ -6,8 +6,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 /// Find where your coding agent's tokens go, from its own transcripts.
 ///
-/// Reads Claude Code, Codex, pi and OpenCode transcripts on this machine and prints names,
-/// counts and sizes. Never prints message text, tool inputs or tool outputs.
+/// Reads Claude Code, Codex, pi, OpenCode, Gemini CLI and Qwen Code transcripts on this
+/// machine and prints names, counts and sizes. Never prints message text, tool inputs or tool outputs.
 #[derive(Parser, Debug)]
 #[command(name = "bigsister", version)]
 pub struct Cli {
@@ -18,7 +18,15 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
-        conflicts_with_all = ["since", "claude_root", "codex_root", "pi_root", "opencode_root"]
+        conflicts_with_all = [
+            "since",
+            "claude_root",
+            "codex_root",
+            "pi_root",
+            "opencode_root",
+            "gemini_root",
+            "qwen_root",
+        ]
     )]
     pub sample: bool,
 
@@ -45,6 +53,14 @@ pub struct Cli {
     /// OpenCode data folder, holding opencode.db [default: ~/.local/share/opencode]
     #[arg(long, global = true, value_name = "DIR")]
     pub opencode_root: Option<PathBuf>,
+
+    /// Gemini CLI session folder [default: ~/.gemini/tmp]
+    #[arg(long, global = true, value_name = "DIR")]
+    pub gemini_root: Option<PathBuf>,
+
+    /// Qwen Code session folder [default: ~/.qwen/projects]
+    #[arg(long, global = true, value_name = "DIR")]
+    pub qwen_root: Option<PathBuf>,
 
     /// Print one JSON object instead of tables
     #[arg(long, global = true)]
@@ -95,13 +111,13 @@ pub enum Command {
     Context,
     /// Tool schemas loaded against tools called, and skills listed against skills used (Claude)
     Schemas,
-    /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex, pi, OpenCode)
+    /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex, pi, OpenCode, Gemini, Qwen)
     Pipes,
-    /// Commands repeated with no edit in between (Claude, Codex, pi, OpenCode)
+    /// Commands repeated with no edit in between (Claude, Codex, pi, OpenCode, Gemini, Qwen)
     Polls,
     /// Files read again after a context compaction (Claude, Codex, pi, OpenCode)
     Rereads,
-    /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi, OpenCode)
+    /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi, OpenCode, Gemini, Qwen)
     Tools,
     /// Cache writes by cause: new context, or rebuilds after an idle gap, a model switch or otherwise (Claude)
     Cache,
@@ -118,5 +134,7 @@ pub enum AgentChoice {
     Codex,
     Pi,
     Opencode,
+    Gemini,
+    Qwen,
     All,
 }
