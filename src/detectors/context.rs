@@ -68,11 +68,13 @@ type Parts = [u64; PARTS.len()];
 
 /// Most consecutive user records read together as one message.
 ///
-/// shortcut: Claude Code sends a run of user records with no reply between them as one
-/// message, which no record or blob holds; runs of up to 16 records are matched (the
-/// longest seen in 40 transcripts on 19 November 2026 held 6), each longer run hashed again
-/// in full, so a run costs up to 16 times its records' size. A longer run's message is not
-/// found. Hashing a run as it grows would be the upgrade.
+/// shortcut: Claude Code 2.1.325 was seen to send a run of user records with no reply
+/// between them as one message, which no record or blob holds (its request logs, 19 November
+/// 2026; runs of up to 7 records seen). Runs of up to 16 records are matched, each longer run
+/// hashed again in full, so a run costs up to 16 times its records' size in hashing. The run
+/// holds a copy of its records' blocks, at most 16 lines of up to 64 MiB each (1 GiB), and
+/// hashing writes the merged message out once more. A longer run's message is not found.
+/// Hashing a run as it grows would be the upgrade.
 const MAX_RUN: usize = 16;
 
 /// A shape's system prompt and loaded tools, with the MCP tools' characters by server.
