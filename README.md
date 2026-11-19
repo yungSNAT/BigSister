@@ -73,7 +73,15 @@ cargo install --locked --path .
 bigsister all
 ```
 
-This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.pi/agent/sessions` and `~/.local/share/opencode` and prints one section per detector. If none of them exists, it exits 1 and names each missing folder but `~/.codex/archived_sessions`, which need not exist. Run one detector by name, for example `bigsister hooks --since 24h`. With the v0.1.0 release, run `shaphan` instead; it predates the `tools`, `cache` and `models` sections and the pi and OpenCode readers.
+This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.pi/agent/sessions` and `~/.local/share/opencode` and prints one section per detector. If none of them exists, it exits 1, names each missing folder but `~/.codex/archived_sessions`, which need not exist, and suggests the sample below. Run one detector by name, for example `bigsister hooks --since 24h`. With the v0.1.0 release, run `shaphan` instead; it predates the `tools`, `cache` and `models` sections and the pi and OpenCode readers.
+
+To see a full report before you have transcripts of your own, run it on the sample transcripts built into `bigsister`:
+
+```bash
+bigsister all --sample
+```
+
+The sample holds synthetic Claude Code, Codex and pi sessions, with a Claude Code request log, and every section finds something in it. It reads none of your folders and writes no file. `--json`, `--csv`, `--limit`, `--agent` and the price options work with it; `--since` and the folder options do not, as the sample has its own window, from 2026-11-01. Hook labels still name only programs found on your machine.
 
 From a clone, this runs it on the synthetic test transcripts:
 
@@ -116,10 +124,10 @@ By hook name and command, most cancellations first
   PreToolUse:Bash       guard.exe         1          0          0       0         40      40      40                    0
 ```
 
-`context` needs the request log that recent Claude Code versions write into their transcripts; the main fixtures have none, so from a clone this shows it on a synthetic one:
+`context` needs the request log that recent Claude Code versions write into their transcripts; the main fixtures have none, so this shows it on the sample's:
 
 ```bash
-bigsister context --since 2026-11-01 --claude-root tests/fixtures/context/claude
+bigsister context --sample
 ```
 
 | Command | Agents | Reports |
@@ -138,6 +146,7 @@ bigsister context --since 2026-11-01 --claude-root tests/fixtures/context/claude
 | Option | Default | Meaning |
 |---|---|---|
 | `--since` | `7d` | Start of the window: `Nd`, `Nh`, a date (local midnight) or an RFC 3339 time |
+| `--sample` | off | Read the sample transcripts built into `bigsister` instead of your folders, from 2026-11-01; not with `--since` or a folder option |
 | `--agent` | `all` | `claude`, `codex`, `pi`, `opencode` or `all` |
 | `--claude-root DIR` | `~/.claude/projects` | Claude Code transcript folder |
 | `--codex-root DIR` | `~/.codex/sessions` and `~/.codex/archived_sessions` | Codex transcript folder; a given folder replaces both |

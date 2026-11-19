@@ -11,6 +11,7 @@ BigSister is ShaphansAudit renamed, with 4 new report sections, 2 more agents, p
 - pi's sessions (`~/.pi/agent/sessions`, `--pi-root`) for `pipes`, `polls`, `rereads` and `tools`, and OpenCode's database (`~/.local/share/opencode`, `--opencode-root`) for `pipes`, `polls`, `rereads` and `tools`. OpenCode's database is read from a copy in memory, without a lock or a file beside it; `--agent pi` and `--agent opencode` read one of them alone.
 - Each `tokens est` column is followed by a `usd est` column: the estimate at the bundled price of the model that read it (every active Claude model, OpenAI's GPT-6, GPT-5.6 and Codex models, priced by prompt size where the price depends on it). `--usd-per-mtok USD` prices every estimate at one rate instead, and `--prices FILE` reads prices from a file with LiteLLM's field names.
 - `--csv` prints the report's sections as one CSV table, a value a record.
+- `--sample` runs any section on sample transcripts built into `bigsister`, so a first run gives a full report before there are transcripts to read; with no transcript folder, the error suggests it.
 - `schemas` also counts skills listed against skills used, and `polls` the characters every non-blank command's results returned, by verb class.
 - The run header gives the reason each unreadable file or folder was unreadable.
 - `--json` prints `schema_version` 2, which adds the dollar and unpriced columns, each root's `unreadable_reasons` and the new sections.

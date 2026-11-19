@@ -64,10 +64,10 @@ Fixtures in this repository are synthetic. Tests check, ignoring case, that no s
 ```text
 bigsister <all|startup|context|schemas|pipes|polls|rereads|tools|cache|models|hooks> [--since 7d|24h|YYYY-MM-DD|RFC 3339]
         [--agent claude|codex|pi|opencode|all] [--claude-root DIR] [--codex-root DIR] [--pi-root DIR]
-        [--opencode-root DIR] [--json | --csv] [--limit N] [--paths]
+        [--opencode-root DIR] [--sample] [--json | --csv] [--limit N] [--paths]
 ```
 
-`--since` defaults to `7d`; a bare date means local midnight. `--limit` (default 20) caps each table's rows. `--json` prints one object with `schema_version` 2 (2 added the dollar and unpriced columns). `--csv` prints the same detector values as one long CSV table (`section,kind,table,row,column,value`), each value JSON-encoded, and leaves out the run header. Exit codes: 0 success, 1 a runtime error such as a missing transcript folder or a bad `--since`, 2 a usage error.
+`--since` defaults to `7d`; a bare date means local midnight. `--sample` reads, instead of any folder, the synthetic transcripts in `src/sample.rs`, compiled in from the test fixtures (the main Claude, Codex and pi ones and the request-log one), each agent's as one root shown as `(bundled sample)`, in the order a folder's files are read, with the window from 2026-11-01 at local midnight; it conflicts with `--since` and the folder options, and `--agent` still picks the agents. When every default folder is missing, the error ends by suggesting `bigsister all --sample`. `--limit` (default 20) caps each table's rows. `--json` prints one object with `schema_version` 2 (2 added the dollar and unpriced columns). `--csv` prints the same detector values as one long CSV table (`section,kind,table,row,column,value`), each value JSON-encoded, and leaves out the run header. Exit codes: 0 success, 1 a runtime error such as a missing transcript folder or a bad `--since`, 2 a usage error.
 
 ## Codex results
 

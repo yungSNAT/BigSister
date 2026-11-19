@@ -7,6 +7,7 @@ pub mod pi;
 pub mod prices;
 pub mod programs;
 pub mod report;
+pub mod sample;
 pub mod scan;
 pub mod shell;
 pub mod time;
@@ -22,7 +23,7 @@ use scan::Agent;
 /// # Errors
 /// Returns a message when `--since` is invalid or no transcript folder can be read.
 pub fn run(cli: &Cli) -> Result<String, String> {
-    let since = time::parse_since(&cli.since, jiff::Timestamp::now())?;
+    let since = window_start(cli)?;
     let home = std::env::home_dir().map(|h| report::display_path(&h.display().to_string(), None));
     let prices = std::rc::Rc::new(read_prices(cli, home.as_deref())?);
     let mut dets = detectors::build(
@@ -30,9 +31,7 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         &std::rc::Rc::new(programs::Programs::from_env()),
         &prices,
     );
-    let read: Vec<Agent> = dets.iter().flat_map(|d| d.agents()).copied().collect();
-    let (roots, skipped) = resolve_roots(cli, &read, home.as_deref())?;
-    let stats = scan::scan(&roots, since, &prices, &mut dets);
+    let (stats, skipped) = read_transcripts(cli, home.as_deref(), since, &prices, &mut dets)?;
     let opts = Opts {
         limit: cli.limit,
         paths: cli.paths,
@@ -74,6 +73,41 @@ pub fn run(cli: &Cli) -> Result<String, String> {
     })
 }
 
+/// Where the window starts: `--since`, or the sample's own start with `--sample`.
+fn window_start(cli: &Cli) -> Result<Option<jiff::Timestamp>, String> {
+    let when = if cli.sample {
+        sample::SINCE
+    } else {
+        &cli.since
+    };
+    time::parse_since(when, jiff::Timestamp::now())
+}
+
+/// Scans the transcripts the chosen detectors read: the sample's with `--sample`, else
+/// those in the transcript folders, with notes on default folders that are missing.
+fn read_transcripts(
+    cli: &Cli,
+    home: Option<&str>,
+    since: Option<jiff::Timestamp>,
+    prices: &prices::Prices,
+    dets: &mut [Box<dyn scan::Detector>],
+) -> Result<(Vec<scan::RootStats>, Vec<String>), String> {
+    let read: Vec<Agent> = dets.iter().flat_map(|d| d.agents()).copied().collect();
+    if cli.sample {
+        let files: Vec<scan::Memory> = sample::FILES
+            .iter()
+            .filter(|f| read.contains(&f.agent) && chosen(cli).is_none_or(|c| c == f.agent))
+            .copied()
+            .collect();
+        return Ok((
+            scan::scan_memory(&files, sample::ROOT, since, prices, dets),
+            Vec::new(),
+        ));
+    }
+    let (roots, skipped) = resolve_roots(cli, &read, home)?;
+    Ok((scan::scan(&roots, since, prices, dets), skipped))
+}
+
 /// The bundled prices, or those of the price file `--prices` names.
 fn read_prices(cli: &Cli, home: Option<&str>) -> Result<prices::Prices, String> {
     let Some(path) = &cli.prices else {
@@ -98,16 +132,21 @@ fn price(cli: &Cli, prices: &prices::Prices, s: &mut report::Section) {
 
 type Roots = (Vec<(Agent, PathBuf)>, Vec<String>);
 
-/// The transcript folders to scan for agents that `--agent` allows and the chosen
-/// detectors read, and notes on default folders that are missing.
-fn resolve_roots(cli: &Cli, read: &[Agent], home: Option<&str>) -> Result<Roots, String> {
-    let chosen = match cli.agent {
+/// The one agent `--agent` names, or `None` for all.
+fn chosen(cli: &Cli) -> Option<Agent> {
+    match cli.agent {
         AgentChoice::All => None,
         AgentChoice::Claude => Some(Agent::Claude),
         AgentChoice::Codex => Some(Agent::Codex),
         AgentChoice::Pi => Some(Agent::Pi),
         AgentChoice::Opencode => Some(Agent::OpenCode),
-    };
+    }
+}
+
+/// The transcript folders to scan for agents that `--agent` allows and the chosen
+/// detectors read, and notes on default folders that are missing.
+fn resolve_roots(cli: &Cli, read: &[Agent], home: Option<&str>) -> Result<Roots, String> {
+    let chosen = chosen(cli);
     let wanted = |a: Agent| read.contains(&a) && chosen.is_none_or(|c| c == a);
     let candidates = [
         (Agent::Claude, cli.claude_root.clone(), ".claude/projects"),
@@ -150,7 +189,10 @@ fn resolve_roots(cli: &Cli, read: &[Agent], home: Option<&str>) -> Result<Roots,
     // With no folder tried, as for `hooks --agent codex`, each section notes that
     // none of its transcripts were scanned.
     if roots.is_empty() && !skipped.is_empty() {
-        return Err(skipped.join("; "));
+        return Err(format!(
+            "{}. To see a report on sample transcripts, run: bigsister all --sample",
+            skipped.join("; ")
+        ));
     }
     Ok((roots, skipped))
 }
