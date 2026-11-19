@@ -1,5 +1,6 @@
 //! Test runs whose exit status a pipe into `tail` or `head` hides (Claude and OpenCode
-//! Bash, Codex commands and pi bash and powershell calls).
+//! Bash, Codex commands, pi bash and powershell calls, and Gemini CLI and Qwen Code
+//! `run_shell_command` calls).
 
 use std::collections::BTreeMap;
 
@@ -130,7 +131,7 @@ impl Detector for Pipes {
         table.truncate(opts.limit);
         Section {
             name: "pipes",
-            title: "test runs piped into tail or head (Claude and OpenCode Bash, Codex commands, pi bash and powershell)",
+            title: "test runs piped into tail or head (Claude and OpenCode Bash, Codex commands, pi bash and powershell, Gemini and Qwen shell)",
             summary: fields
                 .iter()
                 .map(|(k, v)| ((*k).to_owned(), json!(v)))
