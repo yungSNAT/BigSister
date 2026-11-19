@@ -23,6 +23,8 @@ pub enum Agent {
     Codex,
     Pi,
     OpenCode,
+    Gemini,
+    Qwen,
 }
 
 impl Agent {
@@ -33,14 +35,20 @@ impl Agent {
             Agent::Codex => "codex",
             Agent::Pi => "pi",
             Agent::OpenCode => "opencode",
+            Agent::Gemini => "gemini",
+            Agent::Qwen => "qwen",
         }
     }
 
-    /// Whether the agent's records reach the detectors as Claude Code records: pi's and
-    /// OpenCode's are rewritten into them ([`crate::pi`], [`crate::opencode`]).
+    /// Whether the agent's records reach the detectors as Claude Code records: pi's,
+    /// OpenCode's, Gemini CLI's and Qwen Code's are rewritten into them ([`crate::pi`],
+    /// [`crate::opencode`], [`crate::gemini`]).
     #[must_use]
     pub fn claude_shaped(self) -> bool {
-        matches!(self, Agent::Claude | Agent::Pi | Agent::OpenCode)
+        matches!(
+            self,
+            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen
+        )
     }
 }
 
@@ -271,10 +279,37 @@ fn scan_files(
             }
         };
         st.files += 1;
+        let reader = match rewritten(st.agent, reader, st) {
+            Ok(r) => r,
+            Err(e) => {
+                st.count_unreadable(read_error(&e));
+                continue;
+            }
+        };
         if let Err(e) = scan_file(reader, &path, window, dets, active, st, earlier) {
             st.count_unreadable(read_error(&e));
         }
     }
+}
+
+/// A Gemini CLI or Qwen Code file, read whole and rewritten into Claude Code records
+/// ([`crate::gemini`]), counting its lines that are not JSON objects as skipped; any other
+/// agent's file as it is.
+fn rewritten(
+    agent: Agent,
+    mut reader: Box<dyn BufRead>,
+    st: &mut RootStats,
+) -> io::Result<Box<dyn BufRead>> {
+    let rewrite = match agent {
+        Agent::Gemini => crate::gemini::gemini,
+        Agent::Qwen => crate::gemini::qwen,
+        _ => return Ok(reader),
+    };
+    let mut text = String::new();
+    reader.read_to_string(&mut text)?;
+    let (lines, bad) = rewrite(&text);
+    st.bad_lines += bad;
+    Ok(Box::new(io::Cursor::new(lines.join("\n").into_bytes())))
 }
 
 /// Reads the OpenCode sessions in `root`'s `opencode.db`, each as one transcript. A
@@ -618,7 +653,8 @@ fn scan_file(
 // shortcut: a Claude subagent is told apart by its `subagents` folder and a Codex one
 // by `parent_thread_id` in its first record, as both agents lay them out in November
 // 2026. A layout change makes subagents count as main sessions; a record field naming
-// the parent would be the upgrade.
+// the parent would be the upgrade. pi, Gemini CLI and Qwen Code sessions count as main
+// sessions: the files seen name no parent.
 fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
     match agent {
         Agent::Claude => path.components().any(|c| c.as_os_str() == "subagents"),
@@ -627,7 +663,7 @@ fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
                 .and_then(Value::as_str)
                 .is_some_and(|p| !p.is_empty())
         }),
-        Agent::Pi => false,
+        Agent::Pi | Agent::Gemini | Agent::Qwen => false,
         Agent::OpenCode => serde_json::from_str::<Value>(first)
             .is_ok_and(|v| v.get("subagent") == Some(&Value::Bool(true))),
     }
@@ -803,7 +839,7 @@ impl Feed<'_> {
     /// replies no detector reads to the uuids held for the scan.
     fn model(&mut self, line: &str) -> Option<Option<f64>> {
         match self.session.agent {
-            Agent::Claude | Agent::Pi | Agent::OpenCode => {
+            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {
                 const KEY: &str = "\"message\":{\"model\":\"";
                 let at = line.find(KEY)?;
                 let rest = &line[at + KEY.len()..];

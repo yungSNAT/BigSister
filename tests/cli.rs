@@ -2844,7 +2844,9 @@ const GEMINI_AND_QWEN: [(&str, &str, &str); 2] = [
 
 /// `bigsister all --agent <agent> --json` over that agent's fixture.
 fn agent_report(agent: &str, flag: &str, root: &str) -> Value {
-    let args = ["all", "--agent", agent, flag, root, "--since", SINCE, "--json"];
+    let args = [
+        "all", "--agent", agent, flag, root, "--since", SINCE, "--json",
+    ];
     let (code, stdout, stderr) = run(&args);
     assert_eq!(code, 0, "stderr: {stderr}");
     serde_json::from_str(&stdout).expect("valid JSON")
@@ -2855,11 +2857,19 @@ fn gemini_and_qwen_sessions_feed_pipes_polls_and_tools() {
     for (agent, flag, root) in GEMINI_AND_QWEN {
         let doc = agent_report(agent, flag, root);
         let pipes = find(rows(&doc, "pipes", 0), &[("agent", json!(agent))]);
-        for field in ["test_runs", "unguarded", "showed_a_failure_but_reported_success"] {
+        for field in [
+            "test_runs",
+            "unguarded",
+            "showed_a_failure_but_reported_success",
+        ] {
             assert_eq!(pipes[field], json!(1), "{agent} {field}");
         }
         let polls = find(rows(&doc, "polls", 0), &[("agent", json!(agent))]);
-        assert_eq!([&polls["commands"], &polls["polls"]], [&json!(3), &json!(1)], "{agent}");
+        assert_eq!(
+            [&polls["commands"], &polls["polls"]],
+            [&json!(3), &json!(1)],
+            "{agent}"
+        );
         let roots = doc["roots"].as_array().expect("roots");
         assert_eq!(roots.len(), 1, "{agent}: {roots:?}");
         assert_eq!(roots[0]["agent"], json!(agent));

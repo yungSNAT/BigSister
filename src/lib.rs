@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod detectors;
+pub mod gemini;
 pub mod opencode;
 pub mod pi;
 pub mod prices;
@@ -140,6 +141,8 @@ fn chosen(cli: &Cli) -> Option<Agent> {
         AgentChoice::Codex => Some(Agent::Codex),
         AgentChoice::Pi => Some(Agent::Pi),
         AgentChoice::Opencode => Some(Agent::OpenCode),
+        AgentChoice::Gemini => Some(Agent::Gemini),
+        AgentChoice::Qwen => Some(Agent::Qwen),
     }
 }
 
@@ -157,6 +160,8 @@ fn resolve_roots(cli: &Cli, read: &[Agent], home: Option<&str>) -> Result<Roots,
             cli.opencode_root.clone(),
             ".local/share/opencode",
         ),
+        (Agent::Gemini, cli.gemini_root.clone(), ".gemini/tmp"),
+        (Agent::Qwen, cli.qwen_root.clone(), ".qwen/projects"),
     ];
     let mut roots = Vec::new();
     let mut skipped = Vec::new();
