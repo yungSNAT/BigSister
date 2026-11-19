@@ -3349,6 +3349,17 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
+/// One folder holding the main Claude fixtures and the request-log fixture, as the sample
+/// does.
+fn sample_claude_root() -> PathBuf {
+    let claude = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sample-claude");
+    let _ = std::fs::remove_dir_all(&claude);
+    std::fs::create_dir_all(&claude).expect("folder");
+    copy_tree(Path::new(CLAUDE), &claude);
+    copy_tree(Path::new(CONTEXT), &claude);
+    claude
+}
+
 /// `--sample` reads the sample transcripts built into the binary, with no transcript
 /// folder on the machine: the main Claude, Codex and pi fixtures and the request-log
 /// fixture, from 2026-11-01. Each section reports what it reports on those fixtures read
@@ -3358,11 +3369,7 @@ fn sample_reports_the_bundled_fixtures_with_no_transcripts_on_the_machine() {
     let (code, stdout, stderr) = run(&["all", "--sample", "--json"]);
     assert_eq!(code, 0, "stderr: {stderr}");
     let sample: Value = serde_json::from_str(&stdout).expect("valid JSON");
-    let claude = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sample-claude");
-    let _ = std::fs::remove_dir_all(&claude);
-    std::fs::create_dir_all(&claude).expect("folder");
-    copy_tree(Path::new(CLAUDE), &claude);
-    copy_tree(Path::new(CONTEXT), &claude);
+    let claude = sample_claude_root();
     let claude = claude.to_str().expect("UTF-8 path");
     let (code, stdout, stderr) = run(&[
         "all",
