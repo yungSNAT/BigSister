@@ -1773,7 +1773,7 @@ fn help_says_pipes_reads_codex_commands_too() {
     assert_eq!(code, 0);
     let help = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        help.contains("a pipe into tail or head hides (Claude, Codex, pi, OpenCode)"),
+        help.contains("a pipe into tail or head hides (Claude, Codex, pi, OpenCode, Gemini, Qwen)"),
         "{stdout}"
     );
 }
