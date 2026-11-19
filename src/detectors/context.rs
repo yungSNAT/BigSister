@@ -715,6 +715,39 @@ mod tests {
         assert!(!held(&f, run), "a run longer than MAX_RUN is not matched");
     }
 
+    /// Only a reply ends a run of user records: a user or assistant record without a
+    /// message object, and a record of another kind, leave it whole.
+    #[test]
+    fn only_a_reply_with_a_message_ends_a_run() {
+        let s = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let user = |t: &str| {
+            json!({"type": "user", "message": {"role": "user",
+                                    "content": [{"type": "text", "text": t}]}})
+        };
+        let mut d = Context::default();
+        d.begin(&s);
+        for v in [
+            user("a"),
+            json!({"type": "user", "message": "a"}),
+            json!({"type": "assistant", "message": null}),
+            json!({"type": "api-request-other"}),
+            user("b"),
+        ] {
+            d.record(
+                &s,
+                &Record {
+                    value: &v,
+                    in_window: true,
+                },
+            );
+        }
+        let blocks = json!([{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]);
+        assert!(d.cur.ids.contains_key(&hash_of(&json!("user"), &blocks)));
+    }
+
     /// A user record whose content is neither text nor blocks, or whose role is not
     /// `user`, ends a run: the records either side are not one message.
     #[test]
