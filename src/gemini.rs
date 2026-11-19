@@ -412,6 +412,25 @@ mod tests {
         assert_eq!(qwen(text).1, 1);
     }
 
+    /// A result part without a `functionResponse` counts as skipped, and a call whose result
+    /// holds only such parts gets no result, rather than an empty successful one.
+    #[test]
+    fn a_result_part_without_a_function_response_is_skipped() {
+        let text = concat!(
+            "{\"id\":\"g\",\"type\":\"gemini\",\"toolCalls\":[",
+            "{\"id\":\"c\",\"name\":\"x\",\"status\":\"success\",\"result\":[{}]},",
+            "{\"id\":\"d\",\"name\":\"x\",\"status\":\"success\",\"result\":[{},",
+            "{\"functionResponse\":{\"response\":{\"output\":\"ok\"}}}]}]}\n",
+        );
+        let (lines, bad) = gemini(text);
+        assert_eq!(bad, 2);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(
+            parsed(&lines[1])["message"]["content"],
+            json!([{"type": "tool_result", "tool_use_id": "d", "content": "ok", "is_error": false}])
+        );
+    }
+
     /// A cancelled call counts as an error, as Claude Code records a refused call.
     #[test]
     fn a_cancelled_call_is_an_error() {
