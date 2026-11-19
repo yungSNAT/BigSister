@@ -12,6 +12,7 @@ use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
 use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
 use serde_json::Value;
 
+use crate::gemini::{Gemini, Rewrite};
 use crate::prices::Prices;
 use crate::report::{Opts, Section};
 use crate::time::parse_ts;
@@ -243,6 +244,7 @@ pub fn scan_memory(
             // An in-memory transcript cannot fail to read.
             let _ = scan_file(
                 Box::new(f.text.as_bytes()),
+                None,
                 Path::new(f.path),
                 &window,
                 dets,
@@ -279,38 +281,36 @@ fn scan_files(
             }
         };
         st.files += 1;
-        let reader = match rewritten(st.agent, reader, st) {
-            Ok(r) => r,
-            Err(e) => {
-                st.count_unreadable(read_error(&e));
-                continue;
-            }
+        let (reader, rewrite) = match st.agent {
+            Agent::Gemini => match indexed(reader, &path) {
+                Ok((reader, index)) => (reader, Some(Rewrite::Gemini(index))),
+                Err(reason) => {
+                    st.count_unreadable(reason);
+                    continue;
+                }
+            },
+            Agent::Qwen => (reader, Some(Rewrite::Qwen)),
+            _ => (reader, None),
         };
-        if let Err(e) = scan_file(reader, &path, window, dets, active, st, earlier) {
+        if let Err(e) = scan_file(reader, rewrite, &path, window, dets, active, st, earlier) {
             st.count_unreadable(read_error(&e));
         }
     }
 }
 
-/// A Gemini CLI or Qwen Code file, read whole and rewritten into Claude Code records
-/// ([`crate::gemini`]), counting its lines that are not JSON objects as skipped; any other
-/// agent's file as it is.
-fn rewritten(
-    agent: Agent,
-    mut reader: Box<dyn BufRead>,
-    st: &mut RootStats,
-) -> io::Result<Box<dyn BufRead>> {
-    let rewrite = match agent {
-        Agent::Gemini => crate::gemini::gemini,
-        Agent::Qwen => crate::gemini::qwen,
-        _ => return Ok(reader),
-    };
-    let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes)?;
-    // A byte that is not UTF-8 spoils only the text it sits in, as in other agents' lines.
-    let (lines, bad) = rewrite(&String::from_utf8_lossy(&bytes));
-    st.bad_lines += bad;
-    Ok(Box::new(io::Cursor::new(lines.join("\n").into_bytes())))
+/// Indexes Gemini CLI file `path` from `reader` ([`Gemini::index`]), then opens it again
+/// for the second pass, or says why either cannot be read.
+fn indexed(reader: Box<dyn BufRead>, path: &Path) -> Result<(Box<dyn BufRead>, Gemini), String> {
+    let mut lines = Lines::new(reader);
+    let mut index = Gemini::default();
+    while let Some(line) = lines.next_line().map_err(|e| read_error(&e))? {
+        index.index(&line);
+    }
+    let reader = open(path).map_err(|e| match e {
+        Open::Io(reason) => reason,
+        Open::NotZstd => "it changed whilst it was read".to_owned(),
+    })?;
+    Ok((reader, index))
 }
 
 /// Reads the OpenCode sessions in `root`'s `opencode.db`, each as one transcript. A
@@ -349,7 +349,7 @@ fn scan_opencode(
         }
         let reader = Box::new(io::Cursor::new(text.into_bytes()));
         // An in-memory transcript cannot fail to read.
-        let _ = scan_file(reader, &db, window, dets, active, st, earlier);
+        let _ = scan_file(reader, None, &db, window, dets, active, st, earlier);
     }
 }
 
@@ -588,8 +588,15 @@ impl Earlier {
     }
 }
 
+/// Reads a transcript from `reader`, each line through `rewrite` for an agent whose lines
+/// are rewritten into Claude Code records.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the transcript's reader, rewrite and path, and the scan's state"
+)]
 fn scan_file(
     reader: Box<dyn BufRead>,
+    rewrite: Option<Rewrite>,
     path: &Path,
     window: &Window<'_>,
     dets: &mut [Box<dyn Detector>],
@@ -621,6 +628,7 @@ fn scan_file(
         replies: HashSet::new(),
         earlier,
         pi: (agent == Agent::Pi).then(crate::pi::Tree::default),
+        rewrite,
         replaying: false,
         dets,
         active,
@@ -684,6 +692,8 @@ struct Feed<'a> {
     earlier: &'a Earlier,
     /// A pi session's tree; `None` for other agents.
     pi: Option<crate::pi::Tree>,
+    /// A Gemini CLI or Qwen Code session's rewrite; `None` for other agents.
+    rewrite: Option<Rewrite>,
     /// Whether the lines fed are a pi path given again, which count nowhere.
     replaying: bool,
     dets: &'a mut [Box<dyn Detector>],
@@ -693,8 +703,14 @@ struct Feed<'a> {
 
 impl Feed<'_> {
     /// Feeds one line, a pi entry as the Claude Code record it is rewritten to, after
-    /// the path it branches from.
+    /// the path it branches from, and a Gemini CLI or Qwen Code line as the records it is
+    /// rewritten to.
     fn take(&mut self, line: &str) {
+        if let Some(rewrite) = self.rewrite.as_mut() {
+            let mut out = Vec::new();
+            self.st.bad_lines += rewrite.read(line, &mut out);
+            return out.iter().for_each(|l| self.line(l));
+        }
         let Some(tree) = self.pi.as_mut() else {
             return self.line(line);
         };
@@ -969,6 +985,7 @@ mod tests {
             let path = Path::new("s.jsonl");
             scan_file(
                 reader,
+                None,
                 path,
                 &Window {
                     since: Some(Timestamp::MIN),

@@ -2958,7 +2958,11 @@ fn a_gemini_line_over_the_line_limit_is_skipped() {
         "a".repeat(64 << 20)
     );
     std::fs::write(&file, format!("{header}\n{long}\n{rest}")).expect("write");
-    let doc = agent_report("gemini", "--gemini-root", root.to_str().expect("UTF-8 path"));
+    let doc = agent_report(
+        "gemini",
+        "--gemini-root",
+        root.to_str().expect("UTF-8 path"),
+    );
     let roots = doc["roots"].as_array().expect("roots");
     assert_eq!(roots[0]["lines_skipped"], json!(1), "{roots:?}");
     let polls = find(rows(&doc, "polls", 0), &[("agent", json!("gemini"))]);

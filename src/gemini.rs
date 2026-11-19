@@ -5,9 +5,9 @@
 //! `~/.gemini/tmp/<project>/chats/session-<time>-<id>.jsonl`: a header, then records with
 //! an `id` and a `type` of `user` or `gemini`, and `$set`, `$patch` and `$rewindTo`
 //! records. It writes a reply again, under the same id, as its tool calls are scheduled and
-//! finish, so the last record of a type with an id stands for it, in the place of the
-//! first. A reply's `toolCalls` give each call's `name`, `args`, `status` and `result`, a
-//! list of `functionResponse` parts.
+//! finish, so the last record of a type with an id stands for it, in its own place. A
+//! reply's `toolCalls` give each call's `name`, `args`, `status` and `result`, a list of
+//! `functionResponse` parts.
 //!
 //! Qwen Code (<https://github.com/QwenLM/qwen-code>), a fork of Gemini CLI, writes
 //! `~/.qwen/projects/<folder>/chats/<session id>.jsonl`: records with a `uuid` and a `type`
@@ -33,45 +33,72 @@ use std::collections::HashMap;
 
 use serde_json::{Value, json};
 
-/// The Claude Code records for a Gemini CLI session file's `text`, one a line, and the
-/// number of its lines that are not JSON objects and of its tool calls without a non-empty
-/// string id or name, which are left out.
-///
-/// shortcut: the whole file is held in memory, as a reply's last version can come any
-/// number of lines after its first: about 3 to 4 times the file at peak, with no line
-/// limit, and Gemini CLI writes a reply again whole at each change, so a long session's
-/// file can reach hundreds of megabytes. Reading it twice, first each id's last line
-/// number, then the lines, each held to the scan's line limit, would be the upgrade.
-#[must_use]
-pub fn gemini(text: &str) -> (Vec<String>, u64) {
-    let mut order = Vec::new();
-    // By type and id: only a record of the same type stands for an earlier one.
-    let mut last: HashMap<(String, String), Value> = HashMap::new();
-    let mut bad = 0;
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let Some(v) = object(line) else {
-            bad += 1;
-            continue;
-        };
-        if let Some(id) = v.get("id").and_then(Value::as_str) {
-            let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
-            let key = (kind.to_owned(), id.to_owned());
-            if !last.contains_key(&key) {
-                order.push(key.clone());
-            }
-            last.insert(key, v);
-        } else if !["sessionId", "$set", "$patch", "$rewindTo"]
-            .iter()
-            .any(|k| v.get(k).is_some())
-        {
-            bad += 1;
+/// A Gemini CLI or Qwen Code session file, rewritten a line at a time.
+pub enum Rewrite {
+    /// A Gemini CLI file, indexed in a first pass.
+    Gemini(Gemini),
+    Qwen,
+}
+
+impl Rewrite {
+    /// Appends the Claude Code records for the file's next line to `out`. Returns 1 for a
+    /// line that is not a JSON object or is of a shape not known, and the number of its
+    /// tool calls and results that are left out.
+    pub fn read(&mut self, line: &str, out: &mut Vec<String>) -> u64 {
+        match self {
+            Self::Gemini(g) => g.read(line, out),
+            Self::Qwen => qwen(line, out),
         }
     }
-    let mut out = Vec::new();
-    for key in &order {
-        bad += gemini_record(&key.1, &last[key], &mut out);
+}
+
+/// A Gemini CLI file read twice: first each record's last line, then the lines, each
+/// record rewritten at its last version's line. A record is held one line at a time, so
+/// the scan's line limit bounds the memory, plus a type and id for each record.
+#[derive(Default)]
+pub struct Gemini {
+    /// By type and id: only a record of the same type stands for an earlier one.
+    last: HashMap<(String, String), u64>,
+    /// Lines indexed. Lines after them, written since the first pass, are not read.
+    indexed: u64,
+    /// Lines read in the second pass.
+    read: u64,
+}
+
+impl Gemini {
+    /// Notes the file's next line in the first pass.
+    pub fn index(&mut self, line: &str) {
+        if let Some(key) = object(line).as_ref().and_then(key) {
+            self.last.insert(key, self.indexed);
+        }
+        self.indexed += 1;
     }
-    (out, bad)
+
+    fn read(&mut self, line: &str, out: &mut Vec<String>) -> u64 {
+        let n = self.read;
+        self.read += 1;
+        if n >= self.indexed || line.trim().is_empty() {
+            return 0;
+        }
+        let Some(v) = object(line) else {
+            return 1;
+        };
+        let Some(key) = key(&v) else {
+            let known = ["sessionId", "$set", "$patch", "$rewindTo"];
+            return u64::from(!known.iter().any(|k| v.get(k).is_some()));
+        };
+        if self.last.get(&key).is_some_and(|&last| last != n) {
+            return 0;
+        }
+        gemini_record(&key.1, &v, out)
+    }
+}
+
+/// A Gemini CLI record's type and id, if it has an id.
+fn key(v: &Value) -> Option<(String, String)> {
+    let id = v.get("id").and_then(Value::as_str)?;
+    let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+    Some((kind.to_owned(), id.to_owned()))
 }
 
 /// Appends the Claude Code records for Gemini CLI record `v`, the last of its type with id
@@ -120,57 +147,54 @@ fn gemini_record(id: &str, v: &Value, out: &mut Vec<String>) -> u64 {
     skipped
 }
 
-/// The Claude Code records for a Qwen Code session file's `text`, one a line, and the
-/// number of its lines that are not JSON objects and of its tool calls and results that
-/// have no non-empty string id (or, for a call, name), which are left out.
-#[must_use]
-pub fn qwen(text: &str) -> (Vec<String>, u64) {
-    let mut out = Vec::new();
-    let mut bad = 0;
-    for line in text.lines().filter(|l| !l.trim().is_empty()) {
-        let Some(v) = object(line) else {
-            bad += 1;
-            continue;
-        };
-        let ts = v.get("timestamp").cloned().unwrap_or(Value::Null);
-        let uuid = v.get("uuid").cloned().unwrap_or(Value::Null);
-        bad += not_list(v.pointer("/message/parts"));
-        let parts = v.pointer("/message/parts").and_then(Value::as_array);
-        let parts = parts.into_iter().flatten();
-        match v.get("type").and_then(Value::as_str) {
-            Some("assistant") => {
-                let calls: Vec<&Value> = parts.filter_map(|p| p.get("functionCall")).collect();
-                let uses: Vec<Value> = calls.iter().copied().filter_map(tool_use).collect();
-                bad += (calls.len() - uses.len()) as u64;
-                let u = v.get("usageMetadata");
-                let count = |k: &str| u.and_then(|u| u.get(k)).and_then(Value::as_u64);
-                let usage = usage(
-                    count("promptTokenCount"),
-                    count("cachedContentTokenCount"),
-                    count("candidatesTokenCount"),
-                );
-                out.push(assistant(&uuid, v.get("model"), uses, &usage, &ts));
-            }
-            Some("tool_result") => {
-                let error = failed(v.pointer("/toolCallResult/status"));
-                let responses: Vec<&Value> =
-                    parts.filter_map(|p| p.get("functionResponse")).collect();
-                let blocks: Vec<Value> = responses
-                    .iter()
-                    .filter(|r| r.get("id").is_some_and(non_empty))
-                    .map(|r| tool_result(&r["id"], &Value::from(response_text(r)), error))
-                    .collect();
-                bad += (responses.len() - blocks.len()) as u64;
-                out.push(user(&uuid, blocks, &ts));
-            }
-            _ => out.push(json!({"type": "qwen", "timestamp": ts}).to_string()),
-        }
+/// Appends the Claude Code records for a Qwen Code session file's `line` to `out`. Returns
+/// 1 for a line that is not a JSON object, and the number of its tool calls and results
+/// that have no non-empty string id (or, for a call, name), which are left out.
+fn qwen(line: &str, out: &mut Vec<String>) -> u64 {
+    if line.trim().is_empty() {
+        return 0;
     }
-    (out, bad)
+    let Some(v) = object(line) else {
+        return 1;
+    };
+    let ts = v.get("timestamp").cloned().unwrap_or(Value::Null);
+    let uuid = v.get("uuid").cloned().unwrap_or(Value::Null);
+    let mut bad = not_list(v.pointer("/message/parts"));
+    let parts = v.pointer("/message/parts").and_then(Value::as_array);
+    let parts = parts.into_iter().flatten();
+    match v.get("type").and_then(Value::as_str) {
+        Some("assistant") => {
+            let calls: Vec<&Value> = parts.filter_map(|p| p.get("functionCall")).collect();
+            let uses: Vec<Value> = calls.iter().copied().filter_map(tool_use).collect();
+            bad += (calls.len() - uses.len()) as u64;
+            let u = v.get("usageMetadata");
+            let count = |k: &str| u.and_then(|u| u.get(k)).and_then(Value::as_u64);
+            let usage = usage(
+                count("promptTokenCount"),
+                count("cachedContentTokenCount"),
+                count("candidatesTokenCount"),
+            );
+            out.push(assistant(&uuid, v.get("model"), uses, &usage, &ts));
+        }
+        Some("tool_result") => {
+            let error = failed(v.pointer("/toolCallResult/status"));
+            let responses: Vec<&Value> = parts.filter_map(|p| p.get("functionResponse")).collect();
+            let blocks: Vec<Value> = responses
+                .iter()
+                .filter(|r| r.get("id").is_some_and(non_empty))
+                .map(|r| tool_result(&r["id"], &Value::from(response_text(r)), error))
+                .collect();
+            bad += (responses.len() - blocks.len()) as u64;
+            out.push(user(&uuid, blocks, &ts));
+        }
+        _ => out.push(json!({"type": "qwen", "timestamp": ts}).to_string()),
+    }
+    bad
 }
 
+/// `line` as a JSON object, after any byte order mark.
 fn object(line: &str) -> Option<Value> {
-    serde_json::from_str::<Value>(line)
+    serde_json::from_str::<Value>(line.trim_start_matches('\u{feff}'))
         .ok()
         .filter(Value::is_object)
 }
@@ -273,6 +297,23 @@ mod tests {
 
     fn parsed(line: &str) -> Value {
         serde_json::from_str(line).expect("JSON")
+    }
+
+    /// A Gemini CLI file's `text` read as the scan reads it, in 2 passes.
+    fn gemini(text: &str) -> (Vec<String>, u64) {
+        let mut g = Gemini::default();
+        text.lines().for_each(|l| g.index(l));
+        read_all(Rewrite::Gemini(g), text)
+    }
+
+    fn qwen(text: &str) -> (Vec<String>, u64) {
+        read_all(Rewrite::Qwen, text)
+    }
+
+    fn read_all(mut r: Rewrite, text: &str) -> (Vec<String>, u64) {
+        let mut out = Vec::new();
+        let bad = text.lines().map(|l| r.read(l, &mut out)).sum();
+        (out, bad)
     }
 
     #[test]
