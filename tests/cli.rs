@@ -3211,6 +3211,18 @@ fn context_report() -> Value {
     serde_json::from_str(&stdout).expect("valid JSON")
 }
 
+/// The cells `columns` of each row of the context section's table `table`.
+fn context_cells(doc: &Value, table: usize, columns: &[&str]) -> Value {
+    rows(doc, "context", table)
+        .iter()
+        .map(|r| cells(r, columns))
+        .collect()
+}
+
+fn parsed(text: &str) -> Value {
+    serde_json::from_str(text).expect("valid JSON")
+}
+
 /// Each request is rebuilt from Claude Code's request log: its shape's system prompt and
 /// loaded tools, its base request's first `keep` messages and its tail, each found as a
 /// request blob, a user record or the blocks of one reply, by the SHA-256 of the message.
@@ -3229,57 +3241,47 @@ fn context_rebuilds_each_request_and_splits_its_input_by_part() {
     assert_eq!(s["requests_with_tokens"], 3);
     assert_eq!(s["messages_not_found"], 1);
     assert_eq!(s["median_input_tokens"], 1010);
-    let parts = rows(&doc, "context", 0);
-    for (part, requests, median, max, share, tokens) in [
-        ("system prompt", 3, 37, 37, 0.06, 175),
-        ("built-in tools", 3, 79, 79, 0.16, 474),
-        ("MCP tools", 2, 263, 263, 0.36, 902),
-        ("system messages", 2, 20, 20, 0.03, 69),
-        ("reminders", 2, 58, 58, 0.08, 199),
-        ("tool results", 1, 0, 78, 0.05, 117),
-        ("tool calls", 1, 0, 88, 0.06, 132),
-        ("thinking", 1, 0, 32, 0.02, 48),
-        ("text", 3, 66, 66, 0.1, 275),
-        ("other blocks", 1, 0, 90, 0.06, 135),
-    ] {
-        let row = find(parts, &[("part", json!(part))]);
-        assert_eq!(
-            cells(
-                row,
-                &[
-                    "requests",
-                    "median_chars",
-                    "max_chars",
-                    "share_of_chars",
-                    "est_input_tokens"
-                ]
-            ),
-            json!([requests, median, max, share, tokens]),
-            "{part}"
-        );
-    }
-    assert_eq!(parts.len(), 10);
-    let servers = rows(&doc, "context", 1);
+    let columns = [
+        "part",
+        "requests",
+        "median_chars",
+        "max_chars",
+        "share_of_chars",
+        "est_input_tokens",
+    ];
     assert_eq!(
-        servers
-            .iter()
-            .map(|r| cells(
-                r,
-                &[
-                    "server",
-                    "requests",
-                    "median_chars",
-                    "max_chars",
-                    "est_input_tokens"
-                ]
-            ))
-            .collect::<Vec<_>>(),
-        vec![
-            json!(["browser", 2, 181, 181, 621]),
-            json!(["notes", 2, 82, 82, 281])
-        ]
+        context_cells(&doc, 0, &columns),
+        parsed(
+            r#"[["system prompt",3,37,37,0.06,175],["built-in tools",3,79,79,0.16,474],
+            ["MCP tools",2,263,263,0.36,902],["system messages",2,20,20,0.03,69],
+            ["reminders",2,58,58,0.08,199],["tool results",1,0,78,0.05,117],
+            ["tool calls",1,0,88,0.06,132],["thinking",1,0,32,0.02,48],
+            ["text",3,66,66,0.1,275],["other blocks",1,0,90,0.06,135]]"#
+        )
     );
-    let largest = rows(&doc, "context", 2);
+}
+
+/// MCP tools are split by server, over the requests that loaded each server's tools.
+#[test]
+fn context_splits_mcp_tools_by_server() {
+    let doc = context_report();
+    let columns = [
+        "server",
+        "requests",
+        "median_chars",
+        "max_chars",
+        "est_input_tokens",
+    ];
+    assert_eq!(
+        context_cells(&doc, 1, &columns),
+        parsed(r#"[["browser",2,181,181,621],["notes",2,82,82,281]]"#)
+    );
+}
+
+/// The largest requests come first, each with its scope, model and parts' tokens.
+#[test]
+fn context_lists_the_largest_requests_first() {
+    let doc = context_report();
     let columns = [
         "time",
         "scope",
@@ -3298,63 +3300,12 @@ fn context_rebuilds_each_request_and_splits_its_input_by_part() {
         "other_blocks",
     ];
     assert_eq!(
-        largest
-            .iter()
-            .map(|r| cells(r, &columns))
-            .collect::<Vec<_>>(),
-        vec![
-            json!([
-                "2026-11-08T01:04:00Z",
-                "main",
-                "claude-opus-5-5",
-                1215,
-                7,
-                55,
-                118,
-                394,
-                30,
-                87,
-                117,
-                132,
-                48,
-                99,
-                135
-            ]),
-            json!([
-                "2026-11-08T01:01:00Z",
-                "main",
-                "claude-opus-5-5",
-                1010,
-                3,
-                71,
-                153,
-                508,
-                39,
-                112,
-                0,
-                0,
-                0,
-                127,
-                0
-            ]),
-            json!([
-                "2026-11-08T01:11:00Z",
-                "subagent",
-                "claude-haiku-5-5",
-                300,
-                1,
-                49,
-                203,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                49,
-                0
-            ]),
-        ]
+        context_cells(&doc, 2, &columns),
+        parsed(
+            r#"[["2026-11-08T01:04:00Z","main","claude-opus-5-5",1215,7,55,118,394,30,87,117,132,48,99,135],
+            ["2026-11-08T01:01:00Z","main","claude-opus-5-5",1010,3,71,153,508,39,112,0,0,0,127,0],
+            ["2026-11-08T01:11:00Z","subagent","claude-haiku-5-5",300,1,49,203,0,0,0,0,0,0,49,0]]"#
+        )
     );
 }
 
