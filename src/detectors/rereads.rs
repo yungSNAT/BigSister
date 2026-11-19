@@ -305,4 +305,20 @@ mod tests {
         let c = d.totals[&(Agent::Claude, "main")];
         assert_eq!((c.rereads, c.reread_chars), (1, 0));
     }
+
+    #[test]
+    fn reads_with_no_path_are_not_re_reads() {
+        let lines: Vec<(bool, String)> = ["a", "b"]
+            .into_iter()
+            .map(|id| (true, claude_tool_use(id, "Read", &json!({"file_path": ""}))))
+            .collect();
+        let s = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let mut d = Rereads::default();
+        replay(&mut d, &s, &lines);
+        let rereads = d.totals.get(&(Agent::Claude, "main")).map(|c| c.rereads);
+        assert_eq!(rereads.unwrap_or(0), 0);
+    }
 }

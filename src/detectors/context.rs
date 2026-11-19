@@ -715,6 +715,26 @@ mod tests {
         assert!(!held(&f, run), "a run longer than MAX_RUN is not matched");
     }
 
+    /// A user record whose content is neither text nor blocks, or whose role is not
+    /// `user`, ends a run: the records either side are not one message.
+    #[test]
+    fn a_record_of_another_shape_or_role_ends_a_run() {
+        let user = json!("user");
+        let text = |t: &str| json!({"type": "text", "text": t});
+        let held = |f: &File, blocks: Vec<Value>| {
+            f.ids.contains_key(&hash_of(&user, &Value::Array(blocks)))
+        };
+        for (role, content) in [(json!("user"), json!(7)), (json!("system"), json!("x"))] {
+            let mut f = File::default();
+            f.add_user(&user, &json!([text("a")]));
+            f.add_user(&role, &content);
+            f.add_user(&user, &json!([text("b")]));
+            assert!(held(&f, vec![text("b")]), "{role} {content}");
+            assert!(!held(&f, vec![text("a"), text("b")]), "{role} {content}");
+        }
+        assert_eq!(message_parts(&user, &json!(7)), [0; PARTS.len()]);
+    }
+
     /// A request keeps its base's first `keep` messages, all of them when `keep` is
     /// larger, then adds its tail, through any number of generations.
     #[test]

@@ -291,6 +291,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_system_prompt_is_sized_as_text_blocks_text_or_nothing() {
+        assert_eq!(text_chars(&json!(["ab", "cde"])), 5);
+        assert_eq!(text_chars(&json!("four")), 4);
+        assert_eq!(text_chars(&Value::Null), 0);
+    }
+
+    #[test]
     fn a_shape_after_the_first_reply_is_not_startup() {
         let s = Session {
             agent: Agent::Claude,

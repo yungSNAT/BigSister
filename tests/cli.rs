@@ -1570,6 +1570,44 @@ fn hooks_count_both_error_kinds() {
 }
 
 #[test]
+fn hooks_name_a_run_by_its_event_and_skip_other_hook_records() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("hooks-event-name");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("proj")).expect("folder");
+    let line = |attachment: Value| {
+        json!({"type": "attachment", "timestamp": "2026-11-09T01:01:01.000Z",
+               "attachment": attachment})
+        .to_string()
+    };
+    let text = [
+        line(
+            json!({"type": "hook_success", "hookName": " ", "hookEvent": "Stop",
+                    "command": "node a.js", "content": "ok", "durationMs": 20}),
+        ),
+        // Hook context that is not a run, and a hook-looking record with no attachment.
+        line(
+            json!({"type": "hook_additional_context", "hookName": "SessionStart",
+                    "command": "node b.js", "durationMs": 5}),
+        ),
+        json!({"type": "attachment", "timestamp": "2026-11-09T01:01:02.000Z",
+               "note": {"type": "hook_success"}})
+        .to_string(),
+    ]
+    .join("\n");
+    std::fs::write(dir.join("proj").join("s.jsonl"), text).expect("transcript");
+    let root = dir.to_str().expect("UTF-8 path");
+    let (code, stdout, stderr) = run(&["hooks", "--claude-root", root, "--since", SINCE, "--json"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let r = rows(&doc, "hooks", 0);
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(
+        (r[0]["hook_name"].clone(), r[0]["runs"].clone()),
+        (json!("Stop"), json!(1))
+    );
+}
+
+#[test]
 fn pipes_count_a_result_with_no_pass_or_fail_line() {
     let doc = kinds("pipes");
     let s = &doc["detectors"]["pipes"]["summary"];

@@ -1011,5 +1011,74 @@ mod tests {
             Some("bash run.sh arg")
         );
         assert_eq!(cmd(json!(["git", "status"])).as_deref(), Some("git status"));
+        assert_eq!(cmd(json!("cargo build")).as_deref(), Some("cargo build"));
+        assert_eq!(cmd(json!({"cmd": "ls"})), None);
+    }
+
+    fn at(value: &Value) -> Record<'_> {
+        Record {
+            value,
+            in_window: true,
+        }
+    }
+
+    #[test]
+    fn a_function_call_output_closes_its_call_and_is_not_read_as_a_cell_output() {
+        let mut codex = CodexCalls::<()>::default();
+        let call = CodexCall {
+            call_id: "c1".to_owned(),
+            exec: true,
+            ..CodexCall::default()
+        };
+        let empty = json!({});
+        codex.call(&at(&empty), &call, Some(Vec::new()));
+        let out = json!({"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "c1", "output": "done"
+        }});
+        assert!(codex.wants(&out.to_string()));
+        assert!(codex.record(&at(&out)));
+        assert!(!codex.wants(&out.to_string()), "the call stays open");
+        assert!(codex_output(&at(&out)).is_none());
+        // A record with no payload is neither kind.
+        assert!(!codex.record(&at(&json!({"type": "response_item"}))));
+    }
+
+    #[test]
+    fn outputs_of_other_shapes_hold_no_text_or_results() {
+        let r = |value: &Value| codex_output(&at(value));
+        let output = |output: Value| {
+            json!({"type": "response_item", "payload": {
+                "type": "custom_tool_call_output", "call_id": "c1", "output": output
+            }})
+        };
+        let got = r(&output(json!({"exit_code": 0, "output": "x"}))).expect("an output");
+        assert_eq!((got.chars, got.results.len()), (0, 0));
+        // A result whose output is not text is not a result.
+        let text = json!({"exit_code": 0, "output": 5}).to_string();
+        let got = r(&output(json!(text))).expect("an output");
+        assert_eq!((got.chars > 0, got.results.len()), (true, 0));
+        let event = json!({"type": "event_msg", "payload": {
+            "type": "custom_tool_call_output", "call_id": "c1", "output": "x"
+        }});
+        assert!(r(&event).is_none());
+        assert_eq!(text_of(&json!(5)), "");
+    }
+
+    #[test]
+    fn an_item_s_output_is_text_or_missing() {
+        let result = |item: Value| item_result(&item).map(|r| (r.exit_code, r.output));
+        assert_eq!(
+            result(json!({"exit_code": 2, "aggregated_output": "e"})),
+            Some((2, "e".to_owned()))
+        );
+        assert_eq!(
+            result(json!({"exit_code": 1, "aggregated_output": null})),
+            Some((1, String::new()))
+        );
+        assert_eq!(result(json!({"exit_code": 1})), Some((1, String::new())));
+        assert_eq!(
+            result(json!({"exit_code": 1, "aggregated_output": 5})),
+            None
+        );
     }
 }
