@@ -1677,6 +1677,41 @@ fn each_reason_a_transcript_is_unreadable_prints_with_its_count() {
     );
 }
 
+/// Gemini CLI files are read twice, to index them first; a read that fails in the
+/// first pass counts the file as unreadable.
+#[cfg(unix)]
+#[test]
+fn a_gemini_file_that_cannot_be_read_counts_as_unreadable() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("gemini-unreadable");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("proj")).expect("folder");
+    // A link to a folder opens, but reading from it fails.
+    std::os::unix::fs::symlink(env!("CARGO_TARGET_TMPDIR"), dir.join("proj/s.jsonl"))
+        .expect("link");
+    let root = dir.to_str().expect("UTF-8 path");
+    let args = [
+        "polls",
+        "--agent",
+        "gemini",
+        "--gemini-root",
+        root,
+        "--since",
+        SINCE,
+    ];
+    let (code, stdout, stderr) = run(&[&args[..], &["--json"]].concat());
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let reason = "a file cannot be read: Is a directory (os error 21)";
+    assert_eq!(
+        (
+            &doc["roots"][0]["files"],
+            &doc["roots"][0]["unreadable_reasons"]
+        ),
+        (&json!(1), &json!([{"reason": reason, "count": 1}])),
+        "{doc}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn default_folders_that_cannot_be_listed_are_skipped_with_a_note() {
