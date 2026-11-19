@@ -1,5 +1,27 @@
 # v0.2.0
 
+BigSister is ShaphansAudit renamed, with 3 new report sections, 2 more agents, priced estimates and CSV output.
+
+## New since v0.1.0
+
+- `tools`: per tool, calls, the characters their results returned, errors, and image and document blocks; also runs of 3 or more errors in a row and calls repeated with the same input after erring twice (Claude, pi, OpenCode).
+- `cache`: cache write tokens split into new context and context cached again after an idle gap, a model switch or otherwise, priced at the cache write price (Claude).
+- `models`: input-side cost by model, reasoning effort and subagent type, and how many subagent sessions ran on their parent session's top-priced model (Claude).
+- pi's sessions (`~/.pi/agent/sessions`, `--pi-root`) for `pipes`, `polls`, `rereads` and `tools`, and OpenCode's database (`~/.local/share/opencode`, `--opencode-root`) for `pipes`, `polls`, `rereads` and `tools`. OpenCode's database is read from a copy in memory, without a lock or a file beside it.
+- Each `tokens est` column is followed by a `usd est` column: the estimate at the bundled price of the model that read it (every active Claude model, OpenAI's GPT-6, GPT-5.6 and Codex models, priced by prompt size where the price depends on it). `--usd-per-mtok USD` prices every estimate at one rate instead, and `--prices FILE` reads prices from a file with LiteLLM's field names.
+- `--csv` prints the report's sections as one CSV table, a value a record.
+- `schemas` also counts skills listed against skills used, and `polls` the characters every non-blank command's results returned, by verb class.
+- The run header gives the reason each unreadable file or folder was unreadable.
+- `--json` prints `schema_version` 2, which adds the dollar and unpriced columns.
+
+## Fixes
+
+- A Claude record copied into another transcript, as when a session is resumed, counts once, as does a reply another transcript holds under new uuids.
+- Codex commands are paired with the result records Codex writes as each ends; a command or read path that a cell builds from values is skipped rather than guessed.
+- A tool id that JSON escapes in its result's line is found.
+
+## Renamed from ShaphansAudit
+
 BigSister was called ShaphansAudit until 19 November 2026, and its repository moved from `yungSNAT/ShaphansAudit` to `yungSNAT/BigSister`; GitHub redirects the old address. This release renames the executable, so a v0.1.0 install needs these changes:
 
 - The executable is `bigsister` (`bigsister.exe` on Windows), not `shaphan`. Scripts that run `shaphan` run `bigsister` instead.
@@ -11,8 +33,6 @@ BigSister was called ShaphansAudit until 19 November 2026, and its repository mo
 
 BigSister keeps no configuration, cache or state file and reads no environment variable of its own, so nothing saved under the old name needs renaming.
 
-# v0.1.0
+## Licence
 
-First release of `shaphan`, which finds where a coding agent's tokens go, from the agent's own Claude Code and Codex transcripts. It prints names, paths, counts, sizes and times, never message text, tool inputs or tool outputs, and makes no network calls.
-
-There are executables for Linux (x86_64, statically linked) and Windows (x86_64), with `SHA256SUMS` and signed build provenance; on macOS, install from source with Cargo. The README's Install section gives the download and checksum steps.
+From this release BigSister is under Apache-2.0. v0.1.0 stays under FSL-1.1-ALv2, and becomes available under Apache-2.0 2 years after its release.
