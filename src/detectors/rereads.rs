@@ -305,4 +305,22 @@ mod tests {
         let c = d.totals[&(Agent::Claude, "main")];
         assert_eq!((c.rereads, c.reread_chars), (1, 0));
     }
+
+    #[test]
+    fn reads_with_no_path_are_not_reads() {
+        let read = |id| claude_tool_use(id, "Read", &json!({"file_path": ""}));
+        let boundary = json!({"type": "system", "subtype": "compact_boundary"});
+        let lines: Vec<(bool, String)> = [read("a"), boundary.to_string(), read("b")]
+            .into_iter()
+            .map(|l| (true, l))
+            .collect();
+        let s = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let mut d = Rereads::default();
+        replay(&mut d, &s, &lines);
+        let counts = d.totals.get(&(Agent::Claude, "main"));
+        assert_eq!(counts.map_or((0, 0), |c| (c.reads, c.rereads)), (0, 0));
+    }
 }
