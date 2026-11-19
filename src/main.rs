@@ -4,11 +4,11 @@ use std::process::ExitCode;
 use clap::Parser;
 
 fn main() -> ExitCode {
-    let cli = shaphansaudit::cli::Cli::parse();
-    let out = match shaphansaudit::run(&cli) {
+    let cli = bigsister::cli::Cli::parse();
+    let out = match bigsister::run(&cli) {
         Ok(out) => out,
         Err(e) => {
-            eprintln!("shaphan: {e}");
+            eprintln!("bigsister: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -16,7 +16,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) if e.kind() == ErrorKind::BrokenPipe => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("shaphan: cannot write output: {e}");
+            eprintln!("bigsister: cannot write output: {e}");
             ExitCode::FAILURE
         }
     }

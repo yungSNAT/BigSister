@@ -36,7 +36,7 @@ pub struct Session {
     pub lines: Vec<String>,
 }
 
-/// The tables `shaphan` reads. SQLite refuses a read of any other, among them those
+/// The tables `bigsister` reads. SQLite refuses a read of any other, among them those
 /// holding OpenCode's account tokens and credentials.
 const TABLES: [&str; 3] = ["session", "message", "part"];
 
@@ -140,7 +140,7 @@ impl Stamp {
 /// other than `TABLES` refused.
 ///
 /// No lock is taken and no file beside the database is opened, so another program,
-/// OpenCode included, opens, writes and checkpoints as it would were `shaphan` not
+/// OpenCode included, opens, writes and checkpoints as it would were `bigsister` not
 /// running. SQLite's own read-only reader is not used, because SQLite 3.54.1 creates the
 /// write-ahead log (`-wal`) when it is missing, and on Windows the log's index (`-shm`)
 /// too (`sqlite3WalOpen` and `winHandleOpen` in `sqlite3.c`). Instead the file is read
@@ -501,7 +501,7 @@ mod tests {
     /// Only `TABLES` can be read through the connection `open` gives.
     #[test]
     fn a_table_other_than_sessions_messages_and_parts_is_refused() {
-        let dir = std::env::temp_dir().join(format!("shaphan-opencode-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bigsister-opencode-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("folder");
         let db = dir.join("opencode.db");
         Connection::open(&db)
@@ -530,11 +530,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
 
-    /// OpenCode writing to its database whilst `shaphan` queries it changes nothing the
+    /// OpenCode writing to its database whilst `bigsister` queries it changes nothing the
     /// queries see: they read the copy `open` made.
     #[test]
     fn a_write_after_opening_is_not_seen() {
-        let dir = std::env::temp_dir().join(format!("shaphan-opencode-w-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bigsister-opencode-w-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("folder");
         let db = dir.join("opencode.db");
         let writer = Connection::open(&db).expect("database");
@@ -562,7 +562,7 @@ mod tests {
     /// the copy.
     #[test]
     fn a_file_changed_after_its_copy_does_not_hold_it() {
-        let dir = std::env::temp_dir().join(format!("shaphan-opencode-h-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bigsister-opencode-h-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("folder");
         let file = dir.join("f");
         let copy = vec![7u8; 70_000];
@@ -598,7 +598,7 @@ mod tests {
     /// A new folder `name` holding `opencode.db`, in WAL mode or not, with `SCHEMA`,
     /// closed, so that no file is beside it.
     fn database(name: &str, wal: bool) -> (PathBuf, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("shaphan-oc-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bigsister-oc-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("folder");
         let db = dir.join("opencode.db");
@@ -664,7 +664,7 @@ mod tests {
     /// checkpointed the whole log and found its database sound.
     const SOUND: &str = r#"readonly=Ok(false) write=Ok(()) busy=Ok(0) integrity=Ok("ok")"#;
 
-    /// Another program, as OpenCode is to `shaphan`: the test binary running `other` in a
+    /// Another program, as OpenCode is to `bigsister`: the test binary running `other` in a
     /// child process, which reports in lines starting `@`.
     struct Other {
         child: Child,
@@ -680,8 +680,8 @@ mod tests {
                     "--ignored",
                     "--nocapture",
                 ])
-                .env("SHAPHAN_TEST_DB", db)
-                .env("SHAPHAN_TEST_MODE", mode)
+                .env("BIGSISTER_TEST_DB", db)
+                .env("BIGSISTER_TEST_MODE", mode)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .spawn()
@@ -730,8 +730,8 @@ mod tests {
     #[ignore = "run as a child process by other tests"]
     fn other() {
         let (Some(db), Some(mode)) = (
-            std::env::var_os("SHAPHAN_TEST_DB"),
-            std::env::var_os("SHAPHAN_TEST_MODE"),
+            std::env::var_os("BIGSISTER_TEST_DB"),
+            std::env::var_os("BIGSISTER_TEST_MODE"),
         ) else {
             return;
         };

@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn path_lookups_need_a_runnable_file() {
-        let dir = std::env::temp_dir().join(format!("shaphan-programs-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bigsister-programs-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("docs")).expect("temp folder");
         let tool = dir.join(if cfg!(windows) {
             "mytool.exe"
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn share_paths_are_never_looked_up() {
-        let dir = std::env::temp_dir().join(format!("shaphan-share-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bigsister-share-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp folder");
         let script = dir.join("fsociety.ps1");
         std::fs::write(&script, "").expect("stub");

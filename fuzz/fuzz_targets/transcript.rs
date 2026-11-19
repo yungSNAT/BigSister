@@ -7,18 +7,18 @@ use std::rc::Rc;
 
 use jiff::Timestamp;
 use libfuzzer_sys::fuzz_target;
-use shaphansaudit::cli::Command;
-use shaphansaudit::detectors::build;
-use shaphansaudit::prices::Prices;
-use shaphansaudit::programs::Programs;
-use shaphansaudit::report::{self, Meta, Opts};
-use shaphansaudit::scan::{Agent, scan};
+use bigsister::cli::Command;
+use bigsister::detectors::build;
+use bigsister::prices::Prices;
+use bigsister::programs::Programs;
+use bigsister::report::{self, Meta, Opts};
+use bigsister::scan::{Agent, scan};
 
 thread_local! {
     static PROGRAMS: Rc<Programs> = Rc::new(Programs::from_env());
     /// A folder of its own for this process's transcripts.
     static DIR: PathBuf = {
-        let dir = std::env::temp_dir().join(format!("shaphan-fuzz-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bigsister-fuzz-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("fuzz folder");
         dir
     };

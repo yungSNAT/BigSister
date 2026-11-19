@@ -56,7 +56,7 @@ jobs:
           cargo build --locked --release
       - name: Run the release build on the fixtures
         run: >-
-          target/release/shaphan all --since 2026-11-01
+          target/release/bigsister all --since 2026-11-01
           --claude-root tests/fixtures/claude --codex-root tests/fixtures/codex
       - name: Keep the coverage report for the Codecov upload
         if: runner.os == 'Linux' && github.event_name == 'push'
