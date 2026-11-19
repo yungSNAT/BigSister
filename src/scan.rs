@@ -614,14 +614,12 @@ impl Feed<'_> {
     }
 
     fn line(&mut self, line: &str) {
+        if line.is_empty() {
+            return;
+        }
         let blob = self.session.agent == Agent::Claude && line.starts_with(CLAUDE_BLOB_PREFIX);
-        if line.is_empty()
-            || (blob
-                && !self
-                    .active
-                    .iter()
-                    .any(|&i| self.dets[i].reads_request_blobs()))
-        {
+        let wanting = self.wanting(line, blob);
+        if blob && wanting.is_empty() {
             return;
         }
         if !line.ends_with('}') {
@@ -629,15 +627,6 @@ impl Feed<'_> {
             return;
         }
         let reply = if blob { None } else { self.model(line) };
-        let wanting: Vec<usize> = self
-            .active
-            .iter()
-            .copied()
-            .filter(|&i| {
-                (!blob || self.dets[i].reads_request_blobs())
-                    && self.dets[i].wants(&self.session, line)
-            })
-            .collect();
         if wanting.is_empty() && reply.is_none() {
             if let Some(t) = raw_timestamp(line) {
                 self.last_time = Some(t);
@@ -675,6 +664,19 @@ impl Feed<'_> {
 }
 
 impl Feed<'_> {
+    /// The active detectors that want `line`; a request blob goes only to those that
+    /// read request blobs.
+    fn wanting(&self, line: &str, blob: bool) -> Vec<usize> {
+        self.active
+            .iter()
+            .copied()
+            .filter(|&i| {
+                (!blob || self.dets[i].reads_request_blobs())
+                    && self.dets[i].wants(&self.session, line)
+            })
+            .collect()
+    }
+
     /// Whether a parsed record copies an earlier file's record, or `None` when it
     /// repeats one of this file's. Claude Code can write a record again later in its
     /// file, with the same uuid; such a record counts nowhere. A resumed session's file
