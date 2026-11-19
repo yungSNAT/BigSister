@@ -2918,6 +2918,31 @@ fn gemini_and_qwen_output_never_contains_transcript_content() {
     }
 }
 
+/// A byte that is not UTF-8 spoils only the text it sits in, not the file.
+#[test]
+fn a_gemini_file_with_a_stray_byte_is_still_read() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("gemini-stray-byte");
+    let _ = std::fs::remove_dir_all(&root);
+    copy_tree(Path::new(GEMINI), &root);
+    let file = root.join("proj/chats/session-2026-11-09T06-00-0c1a2b3d.jsonl");
+    let mut bytes = std::fs::read(&file).expect("fixture");
+    let at = bytes
+        .windows(13)
+        .position(|w| w == b"SENTINEL_DESC")
+        .expect("a sentinel");
+    bytes[at] = 0xFF;
+    std::fs::write(&file, bytes).expect("write");
+    let doc = agent_report(
+        "gemini",
+        "--gemini-root",
+        root.to_str().expect("UTF-8 path"),
+    );
+    let roots = doc["roots"].as_array().expect("roots");
+    assert_eq!(roots[0]["unreadable"], json!(0), "{roots:?}");
+    let polls = find(rows(&doc, "polls", 0), &[("agent", json!("gemini"))]);
+    assert_eq!(polls["commands"], json!(3));
+}
+
 #[test]
 fn a_missing_gemini_or_qwen_folder_is_an_error_when_asked_for() {
     let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-agent-here");

@@ -324,6 +324,46 @@ mod tests {
         assert_eq!(parsed(&lines[1])["message"]["content"], json!([]));
     }
 
+    /// A record shape these readers do not know, or a list field that is not a list, counts
+    /// as skipped; the header and the `$set`, `$patch` and `$rewindTo` records do not.
+    #[test]
+    fn unknown_record_shapes_count_as_skipped() {
+        let text = concat!(
+            "{\"sessionId\":\"s\",\"projectHash\":\"h\",\"kind\":\"main\"}\n",
+            "{\"$set\":{}}\n{\"$patch\":{}}\n{\"$rewindTo\":\"x\"}\n",
+            "{\"$newKind\":{}}\n",
+            "{\"id\":\"g\",\"type\":\"gemini\",\"toolCalls\":{}}\n",
+            "{\"id\":\"h\",\"type\":\"gemini\",\"toolCalls\":[",
+            "{\"id\":\"c\",\"name\":\"read_file\",\"result\":\"x\"}]}\n",
+        );
+        assert_eq!(gemini(text).1, 3);
+        let text = "{\"uuid\":\"a\",\"type\":\"assistant\",\"message\":{\"parts\":{}}}\n";
+        assert_eq!(qwen(text).1, 1);
+    }
+
+    /// A cancelled call counts as an error, as Claude Code records a refused call.
+    #[test]
+    fn a_cancelled_call_is_an_error() {
+        let text = concat!(
+            "{\"id\":\"g\",\"type\":\"gemini\",\"toolCalls\":[{\"id\":\"c\",\"name\":\"x\",",
+            "\"status\":\"cancelled\",\"result\":[]}]}\n",
+        );
+        let (lines, _) = gemini(text);
+        assert_eq!(
+            parsed(&lines[1])["message"]["content"][0]["is_error"],
+            json!(true)
+        );
+        let text = concat!(
+            "{\"uuid\":\"r\",\"type\":\"tool_result\",\"message\":{\"parts\":[{\"functionResponse\":",
+            "{\"id\":\"c\",\"response\":{}}}]},\"toolCallResult\":{\"status\":\"cancelled\"}}\n",
+        );
+        let (lines, _) = qwen(text);
+        assert_eq!(
+            parsed(&lines[0])["message"]["content"][0]["is_error"],
+            json!(true)
+        );
+    }
+
     /// A record of another type with a reply's id neither replaces the reply nor is lost.
     #[test]
     fn an_id_shared_across_record_types_keeps_both_records() {
