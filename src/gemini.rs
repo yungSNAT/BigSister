@@ -18,9 +18,10 @@
 //! call, and each result a Claude `user` record holding one `tool_result` block, so that
 //! the Claude code paths count both agents' tool calls by the same rules. Every other
 //! record becomes a record holding only its time, which the detectors ignore. A call whose
-//! status is `error` or `cancelled` is an error. A record of a shape not listed here, a call
-//! or result without a non-empty string id (or, for a call, name), and a list field that
-//! is not a list count as skipped lines.
+//! status is `error` or `cancelled` is an error. A Gemini CLI line with no `id` that is not
+//! the header or a `$set`, `$patch` or `$rewindTo` record, a call or result without a
+//! non-empty string id (or, for a call, name), and a list field that is not a list count
+//! as skipped lines.
 //!
 //! Gemini CLI 0.69.0 and Qwen Code 0.28.0 wrote the files these rules were taken from, on
 //! 19 November 2026; other versions are unverified, and Gemini CLI's older `.json` session
