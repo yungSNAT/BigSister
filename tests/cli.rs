@@ -2943,6 +2943,28 @@ fn a_gemini_file_with_a_stray_byte_is_still_read() {
     assert_eq!(polls["commands"], json!(3));
 }
 
+/// A Gemini CLI line longer than the scan's line limit is skipped, not held, and the lines
+/// after it are still read.
+#[test]
+fn a_gemini_line_over_the_line_limit_is_skipped() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("gemini-long-line");
+    let _ = std::fs::remove_dir_all(&root);
+    copy_tree(Path::new(GEMINI), &root);
+    let file = root.join("proj/chats/session-2026-11-09T06-00-0c1a2b3d.jsonl");
+    let text = std::fs::read_to_string(&file).expect("fixture");
+    let (header, rest) = text.split_once('\n').expect("a header");
+    let long = format!(
+        "{{\"id\":\"long\",\"type\":\"user\",\"pad\":\"{}\"}}",
+        "a".repeat(64 << 20)
+    );
+    std::fs::write(&file, format!("{header}\n{long}\n{rest}")).expect("write");
+    let doc = agent_report("gemini", "--gemini-root", root.to_str().expect("UTF-8 path"));
+    let roots = doc["roots"].as_array().expect("roots");
+    assert_eq!(roots[0]["lines_skipped"], json!(1), "{roots:?}");
+    let polls = find(rows(&doc, "polls", 0), &[("agent", json!("gemini"))]);
+    assert_eq!(polls["commands"], json!(3));
+}
+
 #[test]
 fn a_missing_gemini_or_qwen_folder_is_an_error_when_asked_for() {
     let missing = Path::new(env!("CARGO_TARGET_TMPDIR")).join("no-agent-here");

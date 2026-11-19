@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn a_gemini_reply_written_again_counts_once_in_its_first_place() {
+    fn a_gemini_reply_written_again_counts_once_in_its_last_place() {
         let text = concat!(
             "{\"sessionId\":\"s\",\"kind\":\"main\"}\n",
             "{\"id\":\"g\",\"type\":\"gemini\",\"timestamp\":\"t1\",\"model\":\"m\"}\n",
@@ -291,12 +291,16 @@ mod tests {
         let (lines, bad) = gemini(text);
         assert_eq!(bad, 1);
         assert_eq!(lines.len(), 3, "{lines:?}");
-        assert!(
-            lines[0].contains("\"message\":{\"model\":\"m\""),
-            "{}",
-            lines[0]
+        assert_eq!(
+            parsed(&lines[0]),
+            json!({"type": "gemini", "timestamp": "t2"})
         );
-        let reply = parsed(&lines[0]);
+        assert!(
+            lines[1].contains("\"message\":{\"model\":\"m\""),
+            "{}",
+            lines[1]
+        );
+        let reply = parsed(&lines[1]);
         assert_eq!(
             reply["message"]["content"],
             json!([{"type": "tool_use", "id": "c", "name": "Bash", "input": {"command": "ls"}}])
@@ -305,15 +309,11 @@ mod tests {
             reply["message"]["usage"],
             json!({"input_tokens": 6, "cache_read_input_tokens": 4, "output_tokens": 2})
         );
-        let result = parsed(&lines[1]);
+        let result = parsed(&lines[2]);
         assert_eq!(result["uuid"], "g#0");
         assert_eq!(
             result["message"]["content"],
             json!([{"type": "tool_result", "tool_use_id": "c", "content": "no", "is_error": true}])
-        );
-        assert_eq!(
-            parsed(&lines[2]),
-            json!({"type": "gemini", "timestamp": "t2"})
         );
     }
 
