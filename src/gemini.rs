@@ -279,15 +279,17 @@ mod tests {
         );
     }
 
-    /// A tool call without a string id or name is not reported: it counts as skipped.
+    /// A tool call without a non-empty string id and name, or a result without such an
+    /// id, is not reported: it counts as skipped.
     #[test]
     fn a_call_without_an_id_or_name_is_skipped() {
         let text = concat!(
             "{\"id\":\"g\",\"type\":\"gemini\",\"model\":\"m\",\"toolCalls\":[{},",
-            "{\"id\":\"c\",\"name\":\"read_file\",\"args\":{}},{\"name\":\"x\"}]}\n",
+            "{\"id\":\"c\",\"name\":\"read_file\",\"args\":{}},{\"name\":\"x\"},",
+            "{\"id\":\"\",\"name\":\"read_file\"},{\"id\":\"d\",\"name\":\"\"}]}\n",
         );
         let (lines, bad) = gemini(text);
-        assert_eq!(bad, 2);
+        assert_eq!(bad, 4);
         assert_eq!(
             parsed(&lines[0])["message"]["content"]
                 .as_array()
@@ -296,12 +298,14 @@ mod tests {
         );
         let text = concat!(
             "{\"uuid\":\"a\",\"type\":\"assistant\",\"message\":{\"parts\":[{\"functionCall\":{}},",
-            "{\"functionCall\":{\"id\":\"c\",\"name\":\"edit\"}}]}}\n",
+            "{\"functionCall\":{\"id\":\"c\",\"name\":\"edit\"}},",
+            "{\"functionCall\":{\"id\":\"\",\"name\":\"edit\"}}]}}\n",
             "{\"uuid\":\"r\",\"type\":\"tool_result\",\"message\":{\"parts\":[",
-            "{\"functionResponse\":{\"response\":{}}}]}}\n",
+            "{\"functionResponse\":{\"response\":{}}},",
+            "{\"functionResponse\":{\"id\":\"\",\"response\":{}}}]}}\n",
         );
         let (lines, bad) = qwen(text);
-        assert_eq!(bad, 2);
+        assert_eq!(bad, 4);
         assert_eq!(
             parsed(&lines[0])["message"]["content"]
                 .as_array()
