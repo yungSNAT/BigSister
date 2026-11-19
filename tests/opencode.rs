@@ -709,3 +709,20 @@ fn a_window_past_the_last_instant_still_counts_an_unreadable_database() {
     );
     assert_eq!(utc_roots(&dir, "9999-12-31"), day_before);
 }
+
+/// A folder without `opencode.db`, as before OpenCode first runs, has no sessions and
+/// nothing unreadable.
+#[test]
+fn a_folder_without_a_database_reads_as_empty() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("opencode-no-db");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("folder");
+    let (stdout, _) = report(&dir, &["--json"]);
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(
+        [&doc["roots"][0]["files"], &doc["roots"][0]["unreadable"]],
+        [&json!(0), &json!(0)],
+        "{}",
+        doc["roots"]
+    );
+}

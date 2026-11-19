@@ -421,6 +421,13 @@ mod tests {
         assert_eq!(qwen(text).1, 1);
     }
 
+    #[test]
+    fn blank_lines_are_not_skipped_records() {
+        let text = "\n  \n{\"sessionId\":\"s\",\"projectHash\":\"h\",\"kind\":\"main\"}\n\t\n";
+        assert_eq!(gemini(text), (Vec::new(), 0));
+        assert_eq!(qwen("\n \n"), (Vec::new(), 0));
+    }
+
     /// A result part without a `functionResponse` counts as skipped, and a call whose result
     /// holds only such parts gets no result, rather than an empty successful one.
     #[test]

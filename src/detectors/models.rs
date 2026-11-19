@@ -652,6 +652,8 @@ mod tests {
         assert_eq!(skipped(&[("a", &bad, true), ("a", &bad, true)]), (1, 0));
         // A later readable block of the reply counts it, not skipped.
         assert_eq!(skipped(&[("a", &bad, true), ("a", &good, true)]), (0, 1));
+        // An unreadable block of a reply already counted adds nothing.
+        assert_eq!(skipped(&[("a", &good, true), ("a", &bad, true)]), (0, 1));
         // An unreadable reply superseded by another reply, and one outside the window.
         assert_eq!(
             skipped(&[("a", &bad, true), ("b", &good, true), ("c", &bad, false)]),

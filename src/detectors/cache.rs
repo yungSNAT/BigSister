@@ -623,7 +623,9 @@ mod tests {
         let skipped = |records: &[Value]| run(records).skipped;
         assert_eq!(skipped(&[a.clone(), b_bad.clone(), c.clone()]), 1);
         assert_eq!(skipped(&[a.clone(), b_bad.clone(), b_good, c.clone()]), 0);
-        assert_eq!(skipped(&[a.clone(), b_bad.clone(), c_bad, c]), 1);
+        assert_eq!(skipped(&[a.clone(), b_bad.clone(), c_bad, c.clone()]), 1);
+        // A second unreadable block of the same reply is the same skipped reply.
+        assert_eq!(skipped(&[a.clone(), b_bad.clone(), b_bad.clone(), c]), 1);
         // Still unreadable when the session ends.
         assert_eq!(skipped(&[a.clone(), b_bad.clone()]), 1);
         // Outside the window, a skipped reply is not counted.

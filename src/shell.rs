@@ -940,6 +940,8 @@ mod tests {
         assert_eq!(vc("ssh 'me@sentinel host' ls"), "ssh ls");
         assert_eq!(vc("ssh $HOST ls"), "ssh ls");
         assert_eq!(vc("ssh ll -- cargo test"), "ssh cargo");
+        // A flag that takes no value is passed over alone, one that takes one with it.
+        assert_eq!(vc("ssh -t -p 22 ll git status"), "ssh git");
         assert_eq!(vc(r#"RUST_LOG="a b" cargo test"#), "cargo");
     }
 
@@ -1089,6 +1091,10 @@ mod tests {
         assert_eq!(hl("rtk hook claude"), "rtk");
         assert_eq!(hl("node x.js --config=C:/secret/dir"), "x.js");
         assert_eq!(hl(""), "(empty)");
+        // An interpreter with no inline-code option, such as `uv` or `cmd`, runs its
+        // script argument.
+        assert_eq!(hl("uv run -q hooks/check.py --fast"), "check.py");
+        assert_eq!(hl("cmd /c guard.cmd"), "guard.cmd");
     }
 
     #[test]
