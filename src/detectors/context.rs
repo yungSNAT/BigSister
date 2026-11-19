@@ -5,7 +5,8 @@
 //! extends (`base`), how many of that request's messages it keeps (`keep`) and the hashes
 //! of the messages it adds (`tail`). A message's hash is the SHA-256 of `{role, content}`
 //! as compact JSON with sorted keys. A message the transcript does not hold as it was sent
-//! is written as an `api-request-blob`; the rest are user records or the blocks of a reply.
+//! is written as an `api-request-blob`; the rest are user records, the blocks of a reply,
+//! or a run of consecutive user records sent as one message.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -65,6 +66,15 @@ const LARGEST_COLUMNS: [&str; 15] = [
 /// Characters by part.
 type Parts = [u64; PARTS.len()];
 
+/// Most consecutive user records read together as one message.
+///
+/// shortcut: Claude Code sends a run of user records with no reply between them as one
+/// message, which no record or blob holds; runs of up to 16 records are matched (the
+/// longest seen in 40 transcripts on 19 November 2026 held 6), each longer run hashed again
+/// in full, so a run costs up to 16 times its records' size. A longer run's message is not
+/// found. Hashing a run as it grows would be the upgrade.
+const MAX_RUN: usize = 16;
+
 /// A shape's system prompt and loaded tools, with the MCP tools' characters by server.
 struct Shape {
     parts: Parts,
@@ -100,6 +110,8 @@ struct File {
     not_rebuilt: u64,
     /// The reply being read: its message id and its blocks so far.
     reply: Option<(String, Vec<Value>)>,
+    /// The blocks of the user records since the last reply, and how many records.
+    run: (Vec<Value>, usize),
 }
 
 impl File {
@@ -112,16 +124,46 @@ impl File {
     }
 
     /// Holds a message's parts under its hash, unless a message with that hash is held.
-    fn add_message(&mut self, hash: [u8; 32], message: &Value) {
+    fn add_message(&mut self, hash: [u8; 32], role: &Value, content: &Value) {
         let i = self.id(hash) as usize;
         if self.messages[i].is_none() {
-            self.messages[i] = Some(message_parts(message));
+            self.messages[i] = Some(message_parts(role, content));
         }
     }
 
     fn add_sent(&mut self, role: &Value, content: &Value) {
-        let message = json!({"role": role, "content": content});
-        self.add_message(hash_of(&message), &message);
+        self.add_message(hash_of(role, content), role, content);
+    }
+
+    /// Holds a user record's message as it can be sent: as written; with text content as
+    /// one text block; and with the records before it since the last reply, as one message.
+    fn add_user(&mut self, role: &Value, content: &Value) {
+        self.add_sent(role, content);
+        let blocks = match content {
+            Value::String(s) => {
+                let blocks = json!([{"type": "text", "text": s}]);
+                self.add_sent(role, &blocks);
+                blocks
+            }
+            Value::Array(_) => content.clone(),
+            _ => Value::Null,
+        };
+        let (Value::Array(blocks), Some("user")) = (blocks, role.as_str()) else {
+            self.run = (Vec::new(), 0);
+            return;
+        };
+        if self.run.1 == MAX_RUN {
+            self.run = (Vec::new(), 0);
+        }
+        self.run.0.extend(blocks);
+        self.run.1 += 1;
+        if self.run.1 > 1 {
+            let merged = Value::Array(std::mem::take(&mut self.run.0));
+            self.add_sent(role, &merged);
+            if let Value::Array(blocks) = merged {
+                self.run.0 = blocks;
+            }
+        }
     }
 
     /// Ends the reply being read: its blocks together are the message a later request sends.
@@ -164,6 +206,8 @@ struct Measured {
     tokens: Option<u64>,
     messages: usize,
     parts: Parts,
+    /// The recorded input tokens split across `parts` ([`apportion`]); 0s without tokens.
+    est: Parts,
     servers: BTreeMap<String, u64>,
 }
 
@@ -172,19 +216,45 @@ impl Measured {
         self.parts.iter().sum()
     }
 
-    /// `chars` characters' share of the request's recorded input tokens, rounded to the
-    /// nearest token; 0 when the request has no tokens or no characters.
-    fn est_tokens(&self, chars: u64) -> u64 {
-        let total = self.total();
-        match self.tokens {
-            Some(t) if total > 0 => {
-                let n = (u128::from(t) * u128::from(chars) * 2 + u128::from(total))
-                    / (u128::from(total) * 2);
-                u64::try_from(n).unwrap_or(u64::MAX)
-            }
-            _ => 0,
+    /// The MCP tools' estimated tokens split across their servers, by printed name.
+    fn server_tokens(&self) -> Vec<(String, u64, u64)> {
+        let mut chars: BTreeMap<String, u64> = BTreeMap::new();
+        for (server, n) in &self.servers {
+            *chars.entry(printed(server)).or_default() += n;
         }
+        let weights: Vec<u64> = chars.values().copied().collect();
+        let est = apportion(self.est[MCP_TOOLS], &weights);
+        chars
+            .into_iter()
+            .zip(est)
+            .map(|((server, n), e)| (server, n, e))
+            .collect()
     }
+}
+
+/// `total` split across `weights` by their shares, by largest remainder: each share is
+/// rounded down, then each token left goes to the next largest remainder, the earlier on a
+/// tie, so the shares add up to `total`. All 0 when every weight is.
+fn apportion(total: u64, weights: &[u64]) -> Vec<u64> {
+    let sum: u128 = weights.iter().map(|&w| u128::from(w)).sum();
+    if sum == 0 {
+        return vec![0; weights.len()];
+    }
+    let t = u128::from(total);
+    let mut out: Vec<u64> = weights
+        .iter()
+        .map(|&w| u64::try_from(t * u128::from(w) / sum).unwrap_or(u64::MAX))
+        .collect();
+    let mut order: Vec<usize> = (0..weights.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(t * u128::from(weights[i]) % sum));
+    let left = total.saturating_sub(out.iter().sum());
+    for &i in order
+        .iter()
+        .take(usize::try_from(left).unwrap_or(usize::MAX))
+    {
+        out[i] += 1;
+    }
+    out
 }
 
 /// What each request's input held, by part.
@@ -193,6 +263,7 @@ pub struct Context {
     cur: File,
     measured: Vec<Measured>,
     not_rebuilt: u64,
+    partly_rebuilt: u64,
     not_found: u64,
 }
 
@@ -224,7 +295,8 @@ impl Detector for Context {
                 if let (Some(hash), Some(message)) =
                     (str_field("hash").and_then(hex32), v.get("message"))
                 {
-                    f.add_message(hash, message);
+                    let field = |k| message.get(k).unwrap_or(&Value::Null);
+                    f.add_message(hash, field("role"), field("content"));
                 }
             }
             "api-request-shape" => {
@@ -237,13 +309,14 @@ impl Detector for Context {
             "user" => {
                 if let Some(m) = v.get("message").filter(|m| m.is_object()) {
                     let field = |k| m.get(k).unwrap_or(&Value::Null);
-                    f.add_sent(field("role"), field("content"));
+                    f.add_user(field("role"), field("content"));
                 }
             }
             "assistant" => {
                 let Some(m) = v.get("message").filter(|m| m.is_object()) else {
                     return;
                 };
+                f.run = (Vec::new(), 0);
                 let id = m.get("id").and_then(Value::as_str).unwrap_or("").to_owned();
                 if f.reply.as_ref().is_none_or(|(cur, _)| *cur != id) {
                     f.close_reply();
@@ -275,6 +348,7 @@ impl Detector for Context {
             }
             let shape = &f.shape_list[req.shape];
             let mut parts = shape.parts;
+            let mut found = true;
             f.each_message(i, |m| match f.messages[m as usize] {
                 Some(p) => {
                     for (total, n) in parts.iter_mut().zip(p) {
@@ -282,13 +356,20 @@ impl Detector for Context {
                     }
                 }
                 None => {
+                    found = false;
                     missing.insert(m);
                 }
             });
+            if !found {
+                self.partly_rebuilt += 1;
+                continue;
+            }
             let tokens = f.request_refs[i]
                 .as_ref()
                 .and_then(|id| f.tokens.get(id))
                 .copied();
+            let mut est = [0; PARTS.len()];
+            est.copy_from_slice(&apportion(tokens.unwrap_or(0), &parts));
             self.measured.push(Measured {
                 time: req.time,
                 scope: s.scope(),
@@ -296,6 +377,7 @@ impl Detector for Context {
                 tokens,
                 messages: f.len(i),
                 parts,
+                est,
                 servers: shape.servers.clone(),
             });
         }
@@ -315,9 +397,9 @@ impl Detector for Context {
             notes: vec![
                 "Requests come from the request log Claude Code writes in its transcripts (api-request, api-request-shape and api-request-blob records); a transcript without one adds none.".to_owned(),
                 "Characters: text blocks count their text, thinking blocks their thinking text, other blocks and loaded tool schemas their compact JSON; reminders are user text blocks starting <system-reminder>.".to_owned(),
-                "est input tokens split each request's recorded input tokens (uncached, cache writes and cache reads, from the first reply that names the request) across its parts by their share of its characters, so they are estimates: tokens per character differ between parts.".to_owned(),
+                "est input tokens split each request's recorded input tokens (uncached, cache writes and cache reads, from the first reply that names the request) across its parts by their share of its characters, by largest remainder so that they add up to its input tokens, and the MCP tools' across their servers; they are estimates, as tokens per character differ between parts.".to_owned(),
                 "Medians by part are over every rebuilt request, a request without the part counting 0; by MCP server, over the requests that loaded its tools.".to_owned(),
-                "A message not found is one a rebuilt request lists that no request blob, user record or reply in its transcript matches, counted once a transcript; its characters count nowhere. A request not rebuilt names a base request or shape its transcript does not hold, or has a base, keep or tail field it cannot read.".to_owned(),
+                "A request not rebuilt names a base request or shape its transcript does not hold, or has a base, keep or tail field it cannot read. A request partly rebuilt lists a message not found: one that no request blob, user record, run of consecutive user records or reply in its transcript matches, counted once a transcript. Neither counts in any table.".to_owned(),
             ],
         }
     }
@@ -329,6 +411,10 @@ impl Context {
         vec![
             ("requests_rebuilt".to_owned(), json!(self.measured.len())),
             ("requests_not_rebuilt".to_owned(), json!(self.not_rebuilt)),
+            (
+                "requests_partly_rebuilt".to_owned(),
+                json!(self.partly_rebuilt),
+            ),
             ("requests_with_tokens".to_owned(), json!(tokens.len())),
             ("messages_not_found".to_owned(), json!(self.not_found)),
             (
@@ -359,12 +445,7 @@ impl Context {
                 json!(median(&v)),
                 json!(v.iter().max().copied().unwrap_or(0)),
                 ratio(v.iter().sum(), all),
-                json!(
-                    self.measured
-                        .iter()
-                        .map(|m| m.est_tokens(m.parts[i]))
-                        .sum::<u64>()
-                ),
+                json!(self.measured.iter().map(|m| m.est[i]).sum::<u64>()),
             ]);
         }
         t
@@ -373,14 +454,10 @@ impl Context {
     fn by_server(&self) -> Table {
         let mut servers: BTreeMap<String, (Vec<u64>, u64)> = BTreeMap::new();
         for m in &self.measured {
-            let mut printed_chars: BTreeMap<String, u64> = BTreeMap::new();
-            for (server, n) in &m.servers {
-                *printed_chars.entry(printed(server)).or_default() += n;
-            }
-            for (server, n) in printed_chars {
+            for (server, n, est) in m.server_tokens() {
                 let e = servers.entry(server).or_default();
                 e.0.push(n);
-                e.1 += m.est_tokens(n);
+                e.1 += est;
             }
         }
         let mut rows: Vec<(u64, Vec<Value>)> = servers
@@ -432,7 +509,7 @@ impl Context {
                 json!(m.tokens),
                 json!(m.messages),
             ];
-            row.extend(m.parts.iter().map(|&n| json!(m.est_tokens(n))));
+            row.extend(m.est.iter().map(|&n| json!(n)));
             t.rows.push(row);
         }
         t
@@ -488,8 +565,10 @@ fn add_request(f: &mut File, v: &Value, in_window: bool) {
 
 /// The SHA-256 of a message as Claude Code hashes it: compact JSON with sorted keys, as
 /// `serde_json` writes a `Value` whose objects keep their keys sorted.
-fn hash_of(message: &Value) -> [u8; 32] {
-    Sha256::digest(message.to_string().as_bytes()).into()
+/// The hash of message `{role, content}`: the SHA-256 of its compact JSON with sorted keys,
+/// written out here so that the content is not copied.
+fn hash_of(role: &Value, content: &Value) -> [u8; 32] {
+    Sha256::digest(format!("{{\"content\":{content},\"role\":{role}}}").as_bytes()).into()
 }
 
 /// 64 hexadecimal digits as 32 bytes, or `None` for anything else.
@@ -510,15 +589,19 @@ fn hex32(s: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-fn message_parts(m: &Value) -> Parts {
+fn message_parts(role: &Value, content: &Value) -> Parts {
     let mut p = [0; PARTS.len()];
-    let role = m.get("role").and_then(Value::as_str).unwrap_or("");
-    let blocks: Vec<Value> = match m.get("content") {
-        Some(Value::String(s)) => vec![json!({"type": "text", "text": s})],
-        Some(Value::Array(a)) => a.clone(),
-        _ => Vec::new(),
+    let role = role.as_str().unwrap_or("");
+    let text;
+    let blocks: &[Value] = match content {
+        Value::String(s) => {
+            text = [json!({"type": "text", "text": s})];
+            &text
+        }
+        Value::Array(a) => a,
+        _ => &[],
     };
-    for b in &blocks {
+    for b in blocks {
         let kind = b.get("type").and_then(Value::as_str);
         let text = |k: &str| b.get(k).and_then(Value::as_str);
         let (part, n) = match (kind, text("text")) {
@@ -609,7 +692,9 @@ mod tests {
     fn user_records_match_as_sent_alone_and_in_runs() {
         let role = json!("user");
         let text = |t: &str| json!({"type": "text", "text": t});
-        let held = |f: &File, blocks: Vec<Value>| f.ids.contains_key(&hash_of(&role, &Value::Array(blocks)));
+        let held = |f: &File, blocks: Vec<Value>| {
+            f.ids.contains_key(&hash_of(&role, &Value::Array(blocks)))
+        };
         let mut f = File::default();
         f.add_user(&role, &json!("a"));
         f.add_user(&role, &json!([text("b")]));
@@ -677,7 +762,7 @@ mod tests {
             serde_json::from_str(r#"{"role":"user","content":"Find the sentinel-prompt file."}"#)
                 .expect("valid JSON");
         assert_eq!(
-            hash_of(&m),
+            hash_of(&m["role"], &m["content"]),
             hex32("f90cf44c749421a11b1900b7762b044b9477e3bb6bf90ad40849adf1a2884654").expect("hex")
         );
     }
@@ -700,7 +785,7 @@ mod tests {
                 {"type":"document","source":{}}]}"#,
         )
         .expect("valid JSON");
-        let p = message_parts(&m);
+        let p = message_parts(&m["role"], &m["content"]);
         assert_eq!(p[REMINDERS], 38);
         assert_eq!(p[TEXT], 2);
         assert_eq!(p[TOOL_RESULTS], 54);
