@@ -520,6 +520,20 @@ mod tests {
         assert!(flat(&p, "m").is_some_and(|usd| usd > 0.0));
     }
 
+    /// Fields the prices do not use may hold any JSON value, a negative whole number
+    /// included, as price lists write -1 for an unknown limit.
+    #[test]
+    fn other_fields_of_any_json_type_are_read() {
+        let p = Prices::from_file(
+            r#"{"m": {"input_cost_per_token": 1e-6, "max_tokens": -1, "max_input_tokens": 8,
+                      "supports_vision": false, "notes": null, "modes": ["chat"],
+                      "ratio": 0.5}}"#,
+            "p.json",
+        )
+        .expect("prices");
+        assert_eq!(flat(&p, "m"), Some(1.0));
+    }
+
     #[test]
     fn a_price_is_the_decimal_the_file_gives_so_cents_round_as_written() {
         let p = Prices::from_file(r#"{"m": {"input_cost_per_token": 1e-7}}"#, "p.json")

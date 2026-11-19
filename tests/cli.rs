@@ -3679,3 +3679,38 @@ fn no_transcript_folder_points_to_the_sample() {
     assert!(stderr.contains("transcript folder not found"), "{stderr}");
     assert!(stderr.contains("bigsister all --sample"), "{stderr}");
 }
+
+/// A reader that has gone, as when the output is piped to `head`, is no failure.
+#[test]
+fn output_to_a_closed_pipe_exits_0() {
+    let (reader, writer) = std::io::pipe().expect("pipe");
+    drop(reader);
+    let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
+        .args(["all", "--sample"])
+        .stdout(writer)
+        .output()
+        .expect("binary runs");
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(out.stderr.is_empty(), "{out:?}");
+}
+
+/// Output that cannot be written, as to a full disc, fails and says why.
+#[cfg(target_os = "linux")]
+#[test]
+fn output_that_cannot_be_written_fails_naming_the_error() {
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .expect("/dev/full");
+    let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
+        .args(["all", "--sample"])
+        .stdout(full)
+        .output()
+        .expect("binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.starts_with("bigsister: cannot write output: No space left on device"),
+        "{stderr}"
+    );
+}
