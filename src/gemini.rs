@@ -25,14 +25,16 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 /// The Claude Code records for a Gemini CLI session file's `text`, one a line, and the
-/// number of its lines that are not JSON objects.
+/// number of its lines that are not JSON objects and of its tool calls without a string id
+/// or name, which are left out.
 ///
 /// shortcut: the whole file is held in memory, as a reply's last version can come any
 /// number of lines after its first; Gemini CLI's files hold one session each.
 #[must_use]
 pub fn gemini(text: &str) -> (Vec<String>, u64) {
     let mut order = Vec::new();
-    let mut last: HashMap<String, Value> = HashMap::new();
+    // By type and id: only a record of the same type stands for an earlier one.
+    let mut last: HashMap<(String, String), Value> = HashMap::new();
     let mut bad = 0;
     for line in text.lines().filter(|l| !l.trim().is_empty()) {
         let Some(v) = object(line) else {
@@ -40,47 +42,50 @@ pub fn gemini(text: &str) -> (Vec<String>, u64) {
             continue;
         };
         if let Some(id) = v.get("id").and_then(Value::as_str) {
-            if !last.contains_key(id) {
-                order.push(id.to_owned());
+            let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+            let key = (kind.to_owned(), id.to_owned());
+            if !last.contains_key(&key) {
+                order.push(key.clone());
             }
-            last.insert(id.to_owned(), v);
+            last.insert(key, v);
         }
     }
     let mut out = Vec::new();
-    for id in &order {
-        gemini_record(id, &last[id], &mut out);
+    for key in &order {
+        bad += gemini_record(&key.1, &last[key], &mut out);
     }
     (out, bad)
 }
 
-/// Appends the Claude Code records for Gemini CLI record `v`, the last with id `id`: a
-/// reply and a result for each of its tool calls that has one, or a record holding only
-/// its time.
-fn gemini_record(id: &str, v: &Value, out: &mut Vec<String>) {
+/// Appends the Claude Code records for Gemini CLI record `v`, the last of its type with id
+/// `id`: a reply and a result for each of its tool calls that has one, or a record holding
+/// only its time. Returns how many of its tool calls have no string id or name, which are
+/// left out.
+fn gemini_record(id: &str, v: &Value, out: &mut Vec<String>) -> u64 {
     let ts = v.get("timestamp").cloned().unwrap_or(Value::Null);
     if v.get("type").and_then(Value::as_str) != Some("gemini") {
         out.push(json!({"type": "gemini", "timestamp": ts}).to_string());
-        return;
+        return 0;
     }
-    let calls = v.get("toolCalls").and_then(Value::as_array);
-    let uses = calls.into_iter().flatten().map(|c| {
-        tool_use(
-            c.get("id"),
-            c.get("name").and_then(Value::as_str),
-            c.get("args"),
-        )
-    });
+    let all = v.get("toolCalls").and_then(Value::as_array);
+    let calls: Vec<(&Value, Value)> = all
+        .into_iter()
+        .flatten()
+        .filter_map(|c| tool_use(c).map(|u| (c, u)))
+        .collect();
+    let skipped = all.map_or(0, Vec::len) - calls.len();
     let tokens = v.get("tokens");
     let count = |k: &str| tokens.and_then(|t| t.get(k)).and_then(Value::as_u64);
     let usage = usage(count("input"), count("cached"), count("output"));
+    let uses = calls.iter().map(|(_, u)| u.clone()).collect();
     out.push(assistant(
         &Value::from(id),
         v.get("model"),
-        uses.collect(),
+        uses,
         &usage,
         &ts,
     ));
-    for (n, c) in calls.into_iter().flatten().enumerate() {
+    for (n, (c, u)) in calls.iter().enumerate() {
         let Some(result) = c.get("result").and_then(Value::as_array) else {
             continue;
         };
@@ -91,13 +96,15 @@ fn gemini_record(id: &str, v: &Value, out: &mut Vec<String>) {
             .map(response_text)
             .collect::<Vec<_>>()
             .join("\n");
-        let block = tool_result(c.get("id"), &Value::from(text), error);
+        let block = tool_result(&u["id"], &Value::from(text), error);
         out.push(user(&Value::from(format!("{id}#{n}")), vec![block], &ts));
     }
+    skipped as u64
 }
 
 /// The Claude Code records for a Qwen Code session file's `text`, one a line, and the
-/// number of its lines that are not JSON objects.
+/// number of its lines that are not JSON objects and of its tool calls and results that
+/// have no string id (or, for a call, name), which are left out.
 #[must_use]
 pub fn qwen(text: &str) -> (Vec<String>, u64) {
     let mut out = Vec::new();
@@ -113,13 +120,9 @@ pub fn qwen(text: &str) -> (Vec<String>, u64) {
         let parts = parts.into_iter().flatten();
         match v.get("type").and_then(Value::as_str) {
             Some("assistant") => {
-                let uses = parts.filter_map(|p| p.get("functionCall")).map(|c| {
-                    tool_use(
-                        c.get("id"),
-                        c.get("name").and_then(Value::as_str),
-                        c.get("args"),
-                    )
-                });
+                let calls: Vec<&Value> = parts.filter_map(|p| p.get("functionCall")).collect();
+                let uses: Vec<Value> = calls.iter().copied().filter_map(tool_use).collect();
+                bad += (calls.len() - uses.len()) as u64;
                 let u = v.get("usageMetadata");
                 let count = |k: &str| u.and_then(|u| u.get(k)).and_then(Value::as_u64);
                 let usage = usage(
@@ -127,21 +130,19 @@ pub fn qwen(text: &str) -> (Vec<String>, u64) {
                     count("cachedContentTokenCount"),
                     count("candidatesTokenCount"),
                 );
-                out.push(assistant(
-                    &uuid,
-                    v.get("model"),
-                    uses.collect(),
-                    &usage,
-                    &ts,
-                ));
+                out.push(assistant(&uuid, v.get("model"), uses, &usage, &ts));
             }
             Some("tool_result") => {
                 let error =
                     v.pointer("/toolCallResult/status").and_then(Value::as_str) == Some("error");
-                let blocks = parts
-                    .filter_map(|p| p.get("functionResponse"))
-                    .map(|r| tool_result(r.get("id"), &Value::from(response_text(r)), error))
+                let responses: Vec<&Value> =
+                    parts.filter_map(|p| p.get("functionResponse")).collect();
+                let blocks: Vec<Value> = responses
+                    .iter()
+                    .filter(|r| r.get("id").is_some_and(Value::is_string))
+                    .map(|r| tool_result(&r["id"], &Value::from(response_text(r)), error))
                     .collect();
+                bad += (responses.len() - blocks.len()) as u64;
                 out.push(user(&uuid, blocks, &ts));
             }
             _ => out.push(json!({"type": "qwen", "timestamp": ts}).to_string()),
@@ -179,25 +180,26 @@ fn user(uuid: &Value, content: Vec<Value>, ts: &Value) -> String {
     .to_string()
 }
 
-/// A tool call as a Claude `tool_use` block, with the 2 CLIs' built-in tools named as
-/// Claude Code's: `run_shell_command` runs `command` as `Bash` does, `read_file` reads
-/// `file_path` as `Read` does, and `replace` (Gemini CLI), `edit` (Qwen Code) and
-/// `write_file` change a file. Their arguments already carry Claude Code's names.
-fn tool_use(id: Option<&Value>, name: Option<&str>, args: Option<&Value>) -> Value {
-    let name = match name.unwrap_or("") {
+/// Tool call `c` (its `id`, `name` and `args`) as a Claude `tool_use` block, or `None`
+/// without a string id and name. The 2 CLIs' built-in tools are named as Claude Code's:
+/// `run_shell_command` runs `command` as `Bash` does, `read_file` reads `file_path` as
+/// `Read` does, and `replace` (Gemini CLI), `edit` (Qwen Code) and `write_file` change a
+/// file. Their arguments already carry Claude Code's names.
+fn tool_use(c: &Value) -> Option<Value> {
+    let id = c.get("id").filter(|id| id.is_string())?;
+    let name = match c.get("name").and_then(Value::as_str)? {
         "run_shell_command" => "Bash",
         "read_file" => "Read",
         "replace" | "edit" => "Edit",
         "write_file" => "Write",
         other => other,
     };
-    json!({"type": "tool_use", "id": id.cloned().unwrap_or(Value::Null),
-           "name": name, "input": args.cloned().unwrap_or(Value::Null)})
+    let input = c.get("args").cloned().unwrap_or(Value::Null);
+    Some(json!({"type": "tool_use", "id": id, "name": name, "input": input}))
 }
 
-fn tool_result(id: Option<&Value>, content: &Value, error: bool) -> Value {
-    json!({"type": "tool_result", "tool_use_id": id.cloned().unwrap_or(Value::Null),
-           "content": content, "is_error": error})
+fn tool_result(id: &Value, content: &Value, error: bool) -> Value {
+    json!({"type": "tool_result", "tool_use_id": id, "content": content, "is_error": error})
 }
 
 /// A `functionResponse` part's text: its response's `output` or `error` when that is

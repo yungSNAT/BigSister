@@ -2870,6 +2870,13 @@ fn gemini_and_qwen_sessions_feed_pipes_polls_and_tools() {
             [&json!(3), &json!(1)],
             "{agent}"
         );
+        // No compaction record is read for either, so rereads does not read them.
+        assert!(
+            rows(&doc, "rereads", 0)
+                .iter()
+                .all(|r| r["agent"] != json!(agent)),
+            "{agent}"
+        );
         let roots = doc["roots"].as_array().expect("roots");
         assert_eq!(roots.len(), 1, "{agent}: {roots:?}");
         assert_eq!(roots[0]["agent"], json!(agent));
