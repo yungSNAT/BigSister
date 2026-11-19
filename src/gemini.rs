@@ -25,8 +25,8 @@ use std::collections::HashMap;
 use serde_json::{Value, json};
 
 /// The Claude Code records for a Gemini CLI session file's `text`, one a line, and the
-/// number of its lines that are not JSON objects and of its tool calls without a string id
-/// or name, which are left out.
+/// number of its lines that are not JSON objects and of its tool calls without a non-empty
+/// string id or name, which are left out.
 ///
 /// shortcut: the whole file is held in memory, as a reply's last version can come any
 /// number of lines after its first; Gemini CLI's files hold one session each.
@@ -59,8 +59,8 @@ pub fn gemini(text: &str) -> (Vec<String>, u64) {
 
 /// Appends the Claude Code records for Gemini CLI record `v`, the last of its type with id
 /// `id`: a reply and a result for each of its tool calls that has one, or a record holding
-/// only its time. Returns how many of its tool calls have no string id or name, which are
-/// left out.
+/// only its time. Returns how many of its tool calls have no non-empty string id or name,
+/// which are left out.
 fn gemini_record(id: &str, v: &Value, out: &mut Vec<String>) -> u64 {
     let ts = v.get("timestamp").cloned().unwrap_or(Value::Null);
     if v.get("type").and_then(Value::as_str) != Some("gemini") {
@@ -104,7 +104,7 @@ fn gemini_record(id: &str, v: &Value, out: &mut Vec<String>) -> u64 {
 
 /// The Claude Code records for a Qwen Code session file's `text`, one a line, and the
 /// number of its lines that are not JSON objects and of its tool calls and results that
-/// have no string id (or, for a call, name), which are left out.
+/// have no non-empty string id (or, for a call, name), which are left out.
 #[must_use]
 pub fn qwen(text: &str) -> (Vec<String>, u64) {
     let mut out = Vec::new();
@@ -139,7 +139,7 @@ pub fn qwen(text: &str) -> (Vec<String>, u64) {
                     parts.filter_map(|p| p.get("functionResponse")).collect();
                 let blocks: Vec<Value> = responses
                     .iter()
-                    .filter(|r| r.get("id").is_some_and(Value::is_string))
+                    .filter(|r| r.get("id").is_some_and(non_empty))
                     .map(|r| tool_result(&r["id"], &Value::from(response_text(r)), error))
                     .collect();
                 bad += (responses.len() - blocks.len()) as u64;
@@ -181,13 +181,17 @@ fn user(uuid: &Value, content: Vec<Value>, ts: &Value) -> String {
 }
 
 /// Tool call `c` (its `id`, `name` and `args`) as a Claude `tool_use` block, or `None`
-/// without a string id and name. The 2 CLIs' built-in tools are named as Claude Code's:
+/// without a non-empty string id and name. The 2 CLIs' built-in tools are named as Claude Code's:
 /// `run_shell_command` runs `command` as `Bash` does, `read_file` reads `file_path` as
 /// `Read` does, and `replace` (Gemini CLI), `edit` (Qwen Code) and `write_file` change a
 /// file. Their arguments already carry Claude Code's names.
 fn tool_use(c: &Value) -> Option<Value> {
-    let id = c.get("id").filter(|id| id.is_string())?;
-    let name = match c.get("name").and_then(Value::as_str)? {
+    let id = c.get("id").filter(|id| non_empty(id))?;
+    let name = match c
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|n| !n.is_empty())?
+    {
         "run_shell_command" => "Bash",
         "read_file" => "Read",
         "replace" | "edit" => "Edit",
@@ -196,6 +200,11 @@ fn tool_use(c: &Value) -> Option<Value> {
     };
     let input = c.get("args").cloned().unwrap_or(Value::Null);
     Some(json!({"type": "tool_use", "id": id, "name": name, "input": input}))
+}
+
+/// Whether `v` is a string holding at least one character.
+fn non_empty(v: &Value) -> bool {
+    v.as_str().is_some_and(|s| !s.is_empty())
 }
 
 fn tool_result(id: &Value, content: &Value, error: bool) -> Value {
