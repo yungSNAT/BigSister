@@ -48,46 +48,52 @@ pub fn gemini(text: &str) -> (Vec<String>, u64) {
     }
     let mut out = Vec::new();
     for id in &order {
-        let v = &last[id];
-        let ts = v.get("timestamp").cloned().unwrap_or(Value::Null);
-        if v.get("type").and_then(Value::as_str) != Some("gemini") {
-            out.push(json!({"type": "gemini", "timestamp": ts}).to_string());
-            continue;
-        }
-        let calls = v.get("toolCalls").and_then(Value::as_array);
-        let uses = calls.into_iter().flatten().map(|c| {
-            tool_use(
-                c.get("id"),
-                c.get("name").and_then(Value::as_str),
-                c.get("args"),
-            )
-        });
-        let tokens = v.get("tokens");
-        let count = |k: &str| tokens.and_then(|t| t.get(k)).and_then(Value::as_u64);
-        let usage = usage(count("input"), count("cached"), count("output"));
-        out.push(assistant(
-            &Value::from(id.as_str()),
-            v.get("model"),
-            uses.collect(),
-            &usage,
-            &ts,
-        ));
-        for (n, c) in calls.into_iter().flatten().enumerate() {
-            let Some(result) = c.get("result").and_then(Value::as_array) else {
-                continue;
-            };
-            let error = c.get("status").and_then(Value::as_str) == Some("error");
-            let text = result
-                .iter()
-                .filter_map(|p| p.get("functionResponse"))
-                .map(response_text)
-                .collect::<Vec<_>>()
-                .join("\n");
-            let block = tool_result(c.get("id"), &Value::from(text), error);
-            out.push(user(&Value::from(format!("{id}#{n}")), vec![block], &ts));
-        }
+        gemini_record(id, &last[id], &mut out);
     }
     (out, bad)
+}
+
+/// Appends the Claude Code records for Gemini CLI record `v`, the last with id `id`: a
+/// reply and a result for each of its tool calls that has one, or a record holding only
+/// its time.
+fn gemini_record(id: &str, v: &Value, out: &mut Vec<String>) {
+    let ts = v.get("timestamp").cloned().unwrap_or(Value::Null);
+    if v.get("type").and_then(Value::as_str) != Some("gemini") {
+        out.push(json!({"type": "gemini", "timestamp": ts}).to_string());
+        return;
+    }
+    let calls = v.get("toolCalls").and_then(Value::as_array);
+    let uses = calls.into_iter().flatten().map(|c| {
+        tool_use(
+            c.get("id"),
+            c.get("name").and_then(Value::as_str),
+            c.get("args"),
+        )
+    });
+    let tokens = v.get("tokens");
+    let count = |k: &str| tokens.and_then(|t| t.get(k)).and_then(Value::as_u64);
+    let usage = usage(count("input"), count("cached"), count("output"));
+    out.push(assistant(
+        &Value::from(id),
+        v.get("model"),
+        uses.collect(),
+        &usage,
+        &ts,
+    ));
+    for (n, c) in calls.into_iter().flatten().enumerate() {
+        let Some(result) = c.get("result").and_then(Value::as_array) else {
+            continue;
+        };
+        let error = c.get("status").and_then(Value::as_str) == Some("error");
+        let text = result
+            .iter()
+            .filter_map(|p| p.get("functionResponse"))
+            .map(response_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let block = tool_result(c.get("id"), &Value::from(text), error);
+        out.push(user(&Value::from(format!("{id}#{n}")), vec![block], &ts));
+    }
 }
 
 /// The Claude Code records for a Qwen Code session file's `text`, one a line, and the
