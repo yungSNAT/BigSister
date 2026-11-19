@@ -593,6 +593,16 @@ mod tests {
         out
     }
 
+    /// Each request's estimated tokens add up to its recorded tokens; a tie in remainders
+    /// gives the token to the earlier part.
+    #[test]
+    fn apportion_splits_by_largest_remainder() {
+        assert_eq!(apportion(300, &[37, 153, 37]), [49, 202, 49]);
+        assert_eq!(apportion(2, &[1, 1, 1]), [1, 1, 0]);
+        assert_eq!(apportion(5, &[0, 0]), [0, 0]);
+        assert_eq!(apportion(0, &[3, 4]), [0, 0]);
+    }
+
     /// Claude Code sends text content as one text block, and consecutive user records as
     /// one message holding their blocks, up to `MAX_RUN` records; a reply ends a run.
     #[test]
