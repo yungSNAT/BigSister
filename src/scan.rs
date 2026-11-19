@@ -1012,6 +1012,38 @@ mod tests {
     }
 
     #[test]
+    fn blank_lines_in_a_pi_session_are_passed_over() {
+        let lines = [
+            r#"{"type":"session","id":"s","timestamp":"2026-11-09T06:00:00.000Z"}"#,
+            "",
+            r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-11-09T06:00:01.000Z","message":{"role":"user","content":"hi"}}"#,
+        ]
+        .join("\n");
+        let reader = Box::new(io::Cursor::new(lines.into_bytes()));
+        let (records, skipped) = scan_one(Agent::Pi, reader);
+        assert_eq!(skipped, 0);
+        assert!(records > 0);
+    }
+
+    #[test]
+    fn a_file_s_first_time_is_its_first_record_with_a_valid_timestamp() {
+        let lines = [
+            "not json",
+            r#"{"type":"summary"}"#,
+            r#"{"timestamp":"yesterday"}"#,
+            r#"{"timestamp":"2026-11-08T01:00:00Z"}"#,
+            r#"{"timestamp":"2026-11-08T02:00:00Z"}"#,
+        ]
+        .join("\n");
+        let reader = Box::new(io::Cursor::new(lines.into_bytes()));
+        assert_eq!(first_time_in(reader), parse_ts("2026-11-08T01:00:00Z"));
+        assert_eq!(
+            first_time_in(Box::new(io::Cursor::new(b"{}\n".to_vec()))),
+            None
+        );
+    }
+
+    #[test]
     fn a_transcript_of_one_over_long_line_counts_it_as_skipped() {
         let long = io::repeat(b'a').take(MAX_LINE + 10);
         assert_eq!(

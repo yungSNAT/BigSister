@@ -726,3 +726,35 @@ fn a_folder_without_a_database_reads_as_empty() {
         doc["roots"]
     );
 }
+
+/// A database without OpenCode's `session` or `message` table is one unreadable file,
+/// with SQLite's reason.
+#[test]
+fn a_database_missing_a_table_names_it() {
+    for (table, schema) in [
+        ("session", "CREATE TABLE other (x integer);"),
+        (
+            "message",
+            "CREATE TABLE session (id text PRIMARY KEY, parent_id text,
+               time_created integer NOT NULL, time_updated integer NOT NULL);",
+        ),
+    ] {
+        let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("opencode-no-{table}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("folder");
+        let conn = Connection::open(dir.join("opencode.db")).expect("database");
+        conn.execute_batch(schema).expect("schema");
+        drop(conn);
+        let (stdout, _) = report(&dir, &["--json"]);
+        let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+        let root = &doc["roots"][0];
+        assert_eq!(
+            (&root["files"], &root["unreadable_reasons"]),
+            (
+                &json!(1),
+                &json!([{"reason": format!("no such table: {table}"), "count": 1}])
+            ),
+            "{root}"
+        );
+    }
+}
