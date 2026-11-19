@@ -649,8 +649,7 @@ fn scan_file(
     // A Codex turn's model reads its results; a Claude result no reply read stays
     // unpriced.
     if agent == Agent::Codex {
-        let price = feed.codex_price(|| None);
-        feed.read_by(price);
+        feed.read_by(feed.codex_price(|| None));
     }
     for &i in active {
         feed.dets[i].end(&session);
