@@ -1159,7 +1159,7 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[1]["files"], 2);
     assert_eq!(doc["schema_version"], 2);
     assert_eq!(doc["tool"], "bigsister");
-    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(9));
+    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(10));
 }
 
 /// `bigsister all` over the Claude transcripts in a fixture folder, which must hold 2.
@@ -3302,9 +3302,9 @@ fn context_lists_the_largest_requests_first() {
     assert_eq!(
         context_cells(&doc, 2, &columns),
         parsed(
-            r#"[["2026-11-08T01:04:00Z","main","claude-opus-5-5",1215,7,55,118,394,30,87,117,132,48,99,135],
-            ["2026-11-08T01:01:00Z","main","claude-opus-5-5",1010,3,71,153,508,39,112,0,0,0,127,0],
-            ["2026-11-08T01:11:00Z","subagent","claude-haiku-5-5",300,1,49,203,0,0,0,0,0,0,49,0]]"#
+            r#"[["2026-11-08T01:04:00+00:00","main","claude-opus-5-5",1215,7,55,118,394,30,87,117,132,48,99,135],
+            ["2026-11-08T01:01:00+00:00","main","claude-opus-5-5",1010,3,71,153,508,39,112,0,0,0,127,0],
+            ["2026-11-08T01:11:00+00:00","subagent","claude-haiku-5-5",300,1,49,203,0,0,0,0,0,0,49,0]]"#
         )
     );
 }
