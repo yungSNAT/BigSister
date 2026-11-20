@@ -39,7 +39,7 @@ struct Counts {
     reread_priced: Priced,
 }
 
-/// Re-reads per compaction, for both agents.
+/// Re-reads per compaction.
 #[derive(Default)]
 pub struct Rereads {
     before: HashSet<String>,
@@ -58,7 +58,13 @@ pub struct Rereads {
 
 impl Detector for Rereads {
     fn agents(&self) -> &'static [Agent] {
-        &[Agent::Claude, Agent::Codex, Agent::Pi, Agent::OpenCode]
+        &[
+            Agent::Claude,
+            Agent::Codex,
+            Agent::Pi,
+            Agent::OpenCode,
+            Agent::Qwen,
+        ]
     }
 
     fn wants(&self, s: &Session, line: &str) -> bool {

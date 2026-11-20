@@ -2990,19 +2990,49 @@ fn gemini_and_qwen_sessions_feed_pipes_polls_and_tools() {
             [&json!(3), &json!(1)],
             "{agent}"
         );
-        // No compaction record is read for either, so rereads does not read them.
-        assert!(
-            rows(&doc, "rereads", 0)
-                .iter()
-                .all(|r| r["agent"] != json!(agent)),
-            "{agent}"
-        );
+        let rereads = rows(&doc, "rereads", 0);
+        if agent == "qwen" {
+            let row = find(rereads, &[("agent", json!("qwen"))]);
+            assert_eq!(row["reads"], json!(1));
+            assert_eq!(row["compactions"], json!(0));
+        } else {
+            assert!(
+                rereads.iter().all(|r| r["agent"] != json!(agent)),
+                "{agent}"
+            );
+        }
         let roots = doc["roots"].as_array().expect("roots");
         assert_eq!(roots.len(), 1, "{agent}: {roots:?}");
         assert_eq!(roots[0]["agent"], json!(agent));
         assert_eq!(roots[0]["files"], json!(1), "{agent}");
         assert_eq!(roots[0]["lines_skipped"], json!(0), "{agent}");
     }
+}
+
+#[test]
+fn qwen_rereads_count_only_compression_records_with_replacement_history() {
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/qwen-rereads");
+    let args = [
+        "rereads",
+        "--agent",
+        "qwen",
+        "--qwen-root",
+        root,
+        "--since",
+        SINCE,
+        "--json",
+    ];
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!stdout.contains("SENTINEL_SUMMARY"));
+    assert!(!stderr.contains("SENTINEL_SUMMARY"));
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let row = find(rows(&doc, "rereads", 0), &[("agent", json!("qwen"))]);
+    assert_eq!(row["sessions_compacted"], json!(1));
+    assert_eq!(row["compactions"], json!(1));
+    assert_eq!(row["reads"], json!(4));
+    assert_eq!(row["rereads"], json!(1));
+    assert_eq!(row["reread_chars"], json!(6));
 }
 
 /// Gemini CLI writes a reply again under the same id as its tool calls progress: only the
