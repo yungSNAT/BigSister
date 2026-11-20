@@ -115,7 +115,7 @@ pub enum Command {
     Pipes,
     /// Commands repeated with no edit in between (Claude, Codex, pi, OpenCode, Gemini, Qwen)
     Polls,
-    /// Files read again after a context compaction (Claude, Codex, pi, OpenCode)
+    /// Files read again after a context compaction (Claude, Codex, pi, OpenCode, Qwen)
     Rereads,
     /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi, OpenCode, Gemini, Qwen)
     Tools,

@@ -16,8 +16,9 @@
 //!
 //! A reply becomes a Claude `assistant` record holding a `tool_use` block for each tool
 //! call, and each result a Claude `user` record holding one `tool_result` block, so that
-//! the Claude code paths count both agents' tool calls by the same rules. Every other
-//! record becomes a record holding only its time, which the detectors ignore. A call whose
+//! the Claude code paths count both agents' tool calls by the same rules. Qwen Code's
+//! `chat_compression` records with replacement history become compaction boundaries.
+//! Other records hold only their time, which the detectors ignore. A call whose
 //! status is `error` or `cancelled` is an error. A Gemini CLI line with no `id` that is not
 //! the header or a `$set`, `$patch` or `$rewindTo` record, a call or result without a
 //! non-empty string id (or, for a call, name), a Gemini CLI result part without a
@@ -26,10 +27,8 @@
 //!
 //! Gemini CLI 0.69.0 and Qwen Code 0.28.0 wrote the files these rules were taken from, on
 //! 19 November 2026; other versions are unverified, and Gemini CLI's older `.json` session
-//! files are not read. Neither reader reads compaction (Gemini CLI's `$patch` removals and
-//! `$rewindTo` rollbacks, Qwen Code's `chat_compression` system records), so `rereads`
-//! reads neither agent, nor a subagent's header field or parent record, so every session
-//! counts as a main session.
+//! files are not read. Gemini CLI's compaction records are unread. Subagent headers and
+//! parent records are unread, so every session counts as a main session.
 
 use std::collections::HashMap;
 
@@ -196,6 +195,15 @@ fn qwen(line: &str, out: &mut Vec<String>) -> u64 {
                 .collect();
             bad += (responses.len() - blocks.len()) as u64;
             out.push(user(&uuid, blocks, &ts));
+        }
+        Some("system")
+            if v["subtype"] == "chat_compression"
+                && v["systemPayload"]["compressedHistory"].is_array() =>
+        {
+            out.push(
+                json!({"type": "system", "subtype": "compact_boundary", "uuid": uuid, "timestamp": ts})
+                    .to_string(),
+            );
         }
         _ => out.push(json!({"type": "qwen", "timestamp": ts}).to_string()),
     }

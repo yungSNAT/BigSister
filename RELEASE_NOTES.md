@@ -10,6 +10,7 @@ BigSister is ShaphansAudit renamed, with 4 new report sections, 4 more agents, p
 - `models`: input-side cost by model, reasoning effort and subagent type, and how many subagent sessions ran on their parent session's top-priced model (Claude).
 - pi's sessions (`~/.pi/agent/sessions`, `--pi-root`) for `pipes`, `polls`, `rereads` and `tools`, and OpenCode's database (`~/.local/share/opencode`, `--opencode-root`) for `pipes`, `polls`, `rereads` and `tools`. OpenCode's database is read from a copy in memory, without a lock or a file beside it; `--agent pi` and `--agent opencode` read one of them alone.
 - Gemini CLI's sessions (`~/.gemini/tmp`, `--gemini-root`) and Qwen Code's (`~/.qwen/projects`, `--qwen-root`) for `pipes`, `polls` and `tools`; `--agent gemini` and `--agent qwen` read one of them alone.
+- `rereads` also counts files read again after a recorded Qwen Code compaction.
 - Each `tokens est` column is followed by a `usd est` column: the estimate at the bundled price of the model that read it (every active Claude model, OpenAI's GPT-6, GPT-5.6 and Codex models, priced by prompt size where the price depends on it). `--usd-per-mtok USD` prices every estimate at one rate instead, and `--prices FILE` reads prices from a file with LiteLLM's field names.
 - `--csv` prints the report's sections as one CSV table, a value a record.
 - `--sample` runs any section on sample transcripts built into `bigsister`, so a first run gives a full report before there are transcripts to read; with no transcript folder, the error suggests it.
