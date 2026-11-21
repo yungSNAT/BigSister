@@ -2291,9 +2291,10 @@ fn a_codex_record_that_holds_a_turn_context_starts_no_turn() {
                "payload": {"id": "c-held", "cwd": "/work"}}),
         codex_turn("gpt-6.1-sol"),
         // Only a record whose own type is `turn_context` starts a turn and names its
-        // model; this one merely holds one.
+        // model; this one merely holds one beside a model name.
         json!({"timestamp": "2026-11-09T04:00:40.000Z", "type": "event_msg",
-               "payload": {"type": "note", "turn": codex_turn("gpt-5.3-codex")}}),
+               "payload": {"type": "note", "model": "gpt-5.3-codex",
+                           "turn": codex_turn("gpt-5.3-codex")}}),
     ];
     codex_git_status(&mut lines, "c0", 4, None);
     codex_git_status(&mut lines, "c1", 40_000, None);
