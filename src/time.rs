@@ -201,6 +201,11 @@ mod tests {
             parse_since("1969-12-31T23:59:59Z", now()),
             Err("--since: '1969-12-31T23:59:59Z' is before 1970".to_owned())
         );
+        // Its local midnight is before the first instant jiff holds, in every time zone.
+        assert_eq!(
+            parse_since("-9999-01-01", now()),
+            Err("--since: '-9999-01-01' is before 1970".to_owned())
+        );
         assert_eq!(
             parse_since("1970-01-01T00:00:00Z", now()),
             Ok(parse_ts("1970-01-01T00:00:00Z"))

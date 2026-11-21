@@ -904,3 +904,51 @@ fn commands_built_from_values_are_not_polls_of_each_other() {
     ]);
     assert_eq!(polls(&lines), (counts(0, 0, 0), json!(0)));
 }
+
+#[test]
+fn an_item_naming_no_command_still_stops_results_pairing_by_position() {
+    // Codex recorded an item whilst the cell ran, so the order its results are printed
+    // in is not known, even though the item names no command to tie.
+    let lines = in_window(&[
+        exec_at("a", &commands(&["git status", "git diff"]), T),
+        json!({"type": "event_msg", "payload": {
+            "type": "item_completed", "started_at_ms": T + 1,
+            "item": {"type": "CommandExecution", "exit_code": 0, "aggregated_output": "s"}
+        }})
+        .to_string(),
+        output("a", &[(0, json!("s")), (0, json!("d"))]),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(1), json!(2)));
+}
+
+#[test]
+fn an_output_with_an_empty_call_id_leaves_a_call_without_an_id_open() {
+    // A malformed output names no call, so the cell without an id stays open and could
+    // still have run git status: the later item ties to neither cell.
+    let no_id = json!({"type": "response_item", "payload": {
+        "type": "function_call_output", "call_id": "", "output": "b"
+    }});
+    let lines = in_window(&[
+        exec_at("b", &commands(&["git log"]), T),
+        exec_at("", &commands(&["git status"]), T + 1),
+        no_id.to_string(),
+        output("b", &[(0, json!("l"))]),
+        exec_at("a", &commands(&["git status"]), T + 3),
+        ran("git status", 1, "e", T + 4),
+        done("a"),
+    ]);
+    assert_eq!(not_paired(&lines), (json!(2), json!(2)));
+}
+
+#[test]
+fn a_blank_command_keeps_its_place_when_results_pair_by_position() {
+    // The blank command's failure is printed first; git status passed, so its poll
+    // does not follow a failure.
+    let lines = in_window(&[
+        exec("a", &commands(&["  ", "git status"])),
+        output("a", &[(1, json!("bad")), (0, json!("clean"))]),
+        exec("b", &commands(&["git status"])),
+        output("b", &[(0, json!("clean"))]),
+    ]);
+    assert_eq!(polls(&lines), (counts(1, 0, 5), json!(0)));
+}

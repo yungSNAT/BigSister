@@ -579,6 +579,8 @@ mod tests {
         std::fs::write(&file, &changed).expect("file");
         assert!(!holds(&file, &copy));
         assert!(!holds(&dir.join("missing"), &copy));
+        // A folder opens on Unix, but reading it fails: it holds not even an empty copy.
+        assert!(!holds(&dir, &[]));
         std::fs::remove_dir_all(&dir).expect("clean up");
     }
 

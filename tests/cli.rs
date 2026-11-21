@@ -2280,6 +2280,45 @@ fn a_codex_result_is_priced_once_and_one_left_at_the_end_stays_unpriced() {
     assert_eq!(row["unpriced_tokens_est"], json!(20000), "{row}");
 }
 
+#[test]
+fn a_codex_record_that_holds_a_turn_context_starts_no_turn() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("codex-held-turn");
+    let _ = std::fs::remove_dir_all(&dir);
+    let day = dir.join("2026/11/09");
+    std::fs::create_dir_all(&day).expect("folder");
+    let mut lines = vec![
+        json!({"timestamp": "2026-11-09T04:00:00.000Z", "type": "session_meta",
+               "payload": {"id": "c-held", "cwd": "/work"}}),
+        codex_turn("gpt-6.1-sol"),
+        // Only a record whose own type is `turn_context` starts a turn and names its
+        // model; this one merely holds one.
+        json!({"timestamp": "2026-11-09T04:00:40.000Z", "type": "event_msg",
+               "payload": {"type": "note", "turn": codex_turn("gpt-5.3-codex")}}),
+    ];
+    codex_git_status(&mut lines, "c0", 4, None);
+    codex_git_status(&mut lines, "c1", 40_000, None);
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(day.join("rollout-held.jsonl"), text).expect("transcript");
+    let codex = dir.to_str().expect("UTF-8 path");
+    let (code, stdout, stderr) = run(&[
+        "polls",
+        "--codex-root",
+        codex,
+        "--claude-root",
+        CLAUDE,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let row = find(rows(&doc, "polls", 0), &[("agent", json!("codex"))]);
+    assert_eq!(row["polls"], json!(1), "{row}");
+    // GPT-6.1 Sol's price depends on the prompt, which no usage record gives, so the
+    // poll's 10,000 tokens est stay unpriced; GPT-5.3 Codex would have priced them.
+    assert_eq!(row["unpriced_tokens_est"], json!(10000), "{row}");
+}
+
 /// A Claude transcript of `calls`, each a tool name, its input, its result's content and
 /// whether the result is an error; each call is made by a reply of Claude Opus 5.5, which
 /// reads the result before it.

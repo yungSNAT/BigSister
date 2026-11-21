@@ -724,6 +724,9 @@ mod tests {
         let on = || (reply("a", &good), Some(5.0), true);
         let skipped = |id| (reply(id, &bad), Some(9.0), true);
         assert_eq!(ranks(&[top()], &[&[on()]]), ["on top"]);
+        // A subagent reply on a cheaper model ranks the session below its parent.
+        let cheaper = (reply("c", &good), Some(1.0), true);
+        assert_eq!(ranks(&[top()], &[&[on(), cheaper]]), ["below"]);
         // The subagent's skipped reply may have been on a cheaper model.
         assert_eq!(ranks(&[top()], &[&[on(), skipped("b")]]), ["indeterminate"]);
         // A subagent session whose every reply is skipped is still a session.
