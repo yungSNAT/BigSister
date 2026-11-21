@@ -9,7 +9,8 @@
 
 <div align="center">
 
-[![CI](https://img.shields.io/github/actions/workflow/status/yungSNAT/BigSister/ci.yml?branch=main&style=flat&label=CI&labelColor=000000)](https://github.com/yungSNAT/BigSister/actions/workflows/ci.yml?query=branch%3Amain) [![coverage](https://img.shields.io/codecov/c/github/yungSNAT/BigSister?branch=main&style=flat&label=coverage&labelColor=000000)](https://app.codecov.io/gh/yungSNAT/BigSister) [![licence: Apache-2.0](.github/assets/badges/licence.svg)](#licence)
+[![CI](https://github.com/yungSNAT/BigSister/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/yungSNAT/BigSister/actions/workflows/ci.yml?query=branch%3Amain) [![Codecov](https://codecov.io/gh/yungSNAT/BigSister/branch/main/graph/badge.svg)](https://app.codecov.io/gh/yungSNAT/BigSister/tree/main) [![CodeQL](https://github.com/yungSNAT/BigSister/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/yungSNAT/BigSister/actions/workflows/codeql.yml?query=branch%3Amain) [![OSV-Scanner](https://github.com/yungSNAT/BigSister/actions/workflows/osv-scanner.yml/badge.svg?branch=main)](https://github.com/yungSNAT/BigSister/actions/workflows/osv-scanner.yml?query=branch%3Amain) [![SonarCloud](https://sonarcloud.io/api/project_badges/measure?project=yungSNAT_ShaphansAudit&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=yungSNAT_ShaphansAudit)<br>
+[![SLSA build provenance](.github/assets/badges/slsa.svg)](https://github.com/yungSNAT/BigSister/attestations) [![Latest release](https://img.shields.io/github/v/release/yungSNAT/BigSister?style=flat&label=release&labelColor=000000&color=66023C)](https://github.com/yungSNAT/BigSister/releases/latest) [![licence: Apache-2.0](.github/assets/badges/licence.svg)](#licence)
 
 [Install](#install) · [Use](#use) · [Privacy](#privacy) · [Limits](#limits) · [Development](#development) · [Credits](#credits) · [Licence](#licence)
 
