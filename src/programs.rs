@@ -216,7 +216,10 @@ mod tests {
         } else {
             Vec::new()
         };
-        let p = Programs::scan(&[dir.clone(), PathBuf::new()], exts);
+        let p = Programs::scan(
+            &[dir.join("missing-path-entry"), dir.clone(), PathBuf::new()],
+            exts,
+        );
         let full = |n: &str| dir.join(n).display().to_string();
         assert!(p.has("mytool"));
         assert!(p.has(&full("mytool")));
