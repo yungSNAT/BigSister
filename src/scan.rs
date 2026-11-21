@@ -148,6 +148,17 @@ impl RootStats {
         self.unreadable += 1;
         *self.unreadable_reasons.entry(reason).or_default() += 1;
     }
+
+    /// The value read, or `None` once a failure to read it is counted as `what`.
+    fn readable<T>(&mut self, read: std::io::Result<T>, what: &str) -> Option<T> {
+        match read {
+            Ok(value) => Some(value),
+            Err(e) => {
+                self.count_unreadable(format!("{what}: {e}"));
+                None
+            }
+        }
+    }
 }
 
 /// The start of a Claude Code request blob: a message as a request sent it, which only
@@ -357,21 +368,17 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = match fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(e) => {
-                st.count_unreadable(format!("a folder cannot be listed: {e}"));
-                continue;
-            }
+        let Some(entries) = st.readable(fs::read_dir(&dir), "a folder cannot be listed") else {
+            continue;
         };
-        for entry in entries {
-            let (entry, ft) = match entry.and_then(|e| e.file_type().map(|ft| (e, ft))) {
-                Ok(read) => read,
-                Err(e) => {
-                    st.count_unreadable(format!("a folder entry cannot be read: {e}"));
-                    continue;
-                }
-            };
+        // Collected first, so the loop below can count into `st` too.
+        let entries: Vec<_> = entries
+            .filter_map(|entry| {
+                let read = entry.and_then(|e| e.file_type().map(|ft| (e, ft)));
+                st.readable(read, "a folder entry cannot be read")
+            })
+            .collect();
+        for (entry, ft) in entries {
             let path = entry.path();
             if ft.is_dir() {
                 stack.push(path);

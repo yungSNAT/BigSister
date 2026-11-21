@@ -731,12 +731,12 @@ mod tests {
     #[test]
     #[ignore = "run as a child process by other tests"]
     fn other() {
-        let (Some(db), Some(mode)) = (
+        let vars = (
             std::env::var_os("BIGSISTER_TEST_DB"),
             std::env::var_os("BIGSISTER_TEST_MODE"),
-        ) else {
-            return;
-        };
+        );
+        // Run directly, without its variables, it has nothing to do.
+        let (Some(db), Some(mode)) = vars else { return };
         let say = |report: &str| {
             println!("@{report}");
             std::io::stdout().flush().expect("flush");
@@ -774,11 +774,11 @@ mod tests {
                 wait();
                 say(&write(&conn));
             }
-            "churn" => {
+            other => {
+                assert_eq!(other, "churn", "no mode {other}");
                 say("churning");
                 churn(&conn);
             }
-            unknown => panic!("no mode {unknown}"),
         }
     }
 
@@ -849,13 +849,12 @@ mod tests {
             let before = files(&dir);
             let result = read(&db, since);
             let after = files(&dir);
-            if after != before {
-                let names: Vec<_> = after.iter().map(|f| (&f.0, f.1)).collect();
-                wrong.push(format!("{case}: the folder changed to {names:?}"));
-            }
-            if result.is_ok() == (case == "journal") {
-                wrong.push(format!("{case}: {:?}", result.as_ref().err()));
-            }
+            // Messages are built every time, so no line runs only when a case fails.
+            let names: Vec<_> = after.iter().map(|f| (&f.0, f.1)).collect();
+            let changed = format!("{case}: the folder changed to {names:?}");
+            wrong.extend((after != before).then_some(changed));
+            let failed = format!("{case}: {:?}", result.as_ref().err());
+            wrong.extend((result.is_ok() == (case == "journal")).then_some(failed));
             if let Some(mut other) = live {
                 assert_eq!(other.go(), "Ok(())");
                 other.end();
@@ -971,9 +970,8 @@ mod tests {
                 .expect("change");
             });
             let got = read.err().unwrap_or_default();
-            if !got.contains(reason) {
-                wrong.push(format!("{change}: {got:?}"));
-            }
+            let missing = format!("{change}: {got:?}");
+            wrong.extend((!got.contains(reason)).then_some(missing));
             std::fs::remove_dir_all(&dir).expect("clean up");
         }
         assert!(wrong.is_empty(), "{wrong:#?}");

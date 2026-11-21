@@ -354,12 +354,12 @@ mod tests {
             parsed(&lines[0]),
             json!({"type": "gemini", "timestamp": "t2"})
         );
+        let reply_line = &lines[1];
         assert!(
-            lines[1].contains("\"message\":{\"model\":\"m\""),
-            "{}",
-            lines[1]
+            reply_line.contains("\"message\":{\"model\":\"m\""),
+            "{reply_line}"
         );
-        let reply = parsed(&lines[1]);
+        let reply = parsed(reply_line);
         assert_eq!(
             reply["message"]["content"],
             json!([{"type": "tool_use", "id": "c", "name": "Bash", "input": {"command": "ls"}}])
