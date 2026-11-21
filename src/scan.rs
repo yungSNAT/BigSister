@@ -958,6 +958,42 @@ mod tests {
     }
 
     #[test]
+    fn unselected_agents_are_absent_from_disk_and_sample_reports() {
+        let prices = Prices::bundled();
+        let since = Some(Timestamp::MIN);
+        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count(Default::default()))];
+        let root = PathBuf::from("unselected-gemini-root");
+        let roots = [(Agent::Gemini, root)];
+        assert!(scan(&roots, since, &prices, &mut dets).is_empty());
+
+        let files = [Memory {
+            agent: Agent::Gemini,
+            path: "session.jsonl",
+            text: "{}",
+        }];
+        assert!(scan_memory(&files, "sample", since, &prices, &mut dets).is_empty());
+    }
+
+    #[test]
+    fn a_gemini_transcript_that_changes_between_passes_is_reported() {
+        let dir = std::env::temp_dir().join(format!("bigsister-reopen-{}", std::process::id()));
+        fs::create_dir(&dir).expect("create test directory");
+        let path = dir.join("transcript.jsonl.zst");
+        let first_pass = || Box::new(io::Cursor::new(b"{}\n")) as Box<dyn BufRead>;
+        fs::write(&path, b"replacement").expect("write changed transcript");
+        let changed = indexed(first_pass(), &path)
+            .err()
+            .expect("reject the replacement");
+        fs::remove_file(&path).expect("remove transcript");
+        let removed = indexed(first_pass(), &path)
+            .err()
+            .expect("report a missing transcript");
+        fs::remove_dir(&dir).expect("remove test directory");
+        assert_eq!(changed, "it changed whilst it was read");
+        assert!(removed.starts_with("a file cannot be opened:"), "{removed}");
+    }
+
+    #[test]
     fn a_claude_record_written_again_with_its_uuid_is_read_once() {
         let lines = [
             r#"{"type":"assistant","uuid":"u1","message":{}}"#,
