@@ -1677,6 +1677,27 @@ fn each_reason_a_transcript_is_unreadable_prints_with_its_count() {
     );
 }
 
+/// A folder that can be listed but not searched gives each file's name and kind but not
+/// its time, so its transcript counts as unreadable.
+#[cfg(unix)]
+#[test]
+fn a_transcript_whose_time_cannot_be_read_counts_as_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("unsearchable");
+    let sub = dir.join("proj");
+    let mode = |m| std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(m));
+    let _ = mode(0o755);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&sub).expect("folder");
+    std::fs::write(sub.join("a.jsonl"), "{}\n").expect("transcript");
+    mode(0o444).expect("chmod");
+    let (doc, _) = claude_root_report(&dir);
+    mode(0o755).expect("chmod");
+    assert_eq!(doc["roots"][0]["unreadable"], 1, "{doc}");
+    let reason = doc["roots"][0]["unreadable_reasons"][0]["reason"].to_string();
+    assert!(reason.contains("a file's time cannot be read:"), "{reason}");
+}
+
 /// Gemini CLI files are read twice, to index them first; a read that fails in the
 /// first pass counts the file as unreadable.
 #[cfg(unix)]

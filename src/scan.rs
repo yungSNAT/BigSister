@@ -1131,31 +1131,6 @@ mod tests {
         assert_eq!(st.unreadable, 0);
     }
 
-    /// A folder that can be listed but not searched gives each file's name and kind but
-    /// not its time.
-    #[cfg(unix)]
-    #[test]
-    fn a_file_whose_time_cannot_be_read_counts_as_unreadable() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir =
-            std::env::temp_dir().join(format!("bigsister-unsearchable-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(dir.join("sub")).expect("temp folder");
-        fs::write(dir.join("sub/a.jsonl"), "{}\n").expect("stub");
-        fs::set_permissions(dir.join("sub"), fs::Permissions::from_mode(0o444)).expect("chmod");
-        let mut st = RootStats::new(Agent::Claude, dir.clone());
-        let got = list_files(&dir, SystemTime::UNIX_EPOCH, &mut st);
-        fs::set_permissions(dir.join("sub"), fs::Permissions::from_mode(0o755)).expect("chmod");
-        fs::remove_dir_all(&dir).expect("clean up");
-        assert!(got.is_empty(), "{got:?}");
-        assert_eq!(st.unreadable, 1);
-        let reasons: Vec<_> = st.unreadable_reasons.keys().collect();
-        assert!(
-            reasons[0].starts_with("a file's time cannot be read:"),
-            "{reasons:?}"
-        );
-    }
-
     #[test]
     fn raw_timestamps_for_both_agents() {
         let codex = r#"{"timestamp":"2026-11-08T01:00:00Z","type":"x","payload":{"timestamp":"2020-01-01T00:00:00Z"}}"#;
