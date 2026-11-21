@@ -113,3 +113,47 @@ jobs:
       run:
         shell: bash
     steps: *check-steps
+
+  # Each release target that no leg above tests, built and tested as release-policy's
+  # release-binary.yml does at release.yml's pin: native runner, the musl C toolchain
+  # for Linux, a static C runtime for Windows. Like the macOS leg, it runs for pushes
+  # to main and manual runs only, so a break shows before a tag rather than at it.
+  release-targets:
+    name: test ${{ matrix.target }}
+    if: github.event_name != 'pull_request'
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the musl C toolchain
+        if: endsWith(matrix.target, '-linux-musl')
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends musl-tools
+      - name: Link the C runtime statically
+        if: endsWith(matrix.target, '-windows-msvc')
+        run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
+      - name: Test and build for the target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          rustup toolchain install
+          rustup target add "$TARGET"
+          cargo test --locked --target "$TARGET"
+          cargo build --locked --release --target "$TARGET"
+          "target/$TARGET/release/bigsister" --version
