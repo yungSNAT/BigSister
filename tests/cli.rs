@@ -1677,6 +1677,27 @@ fn each_reason_a_transcript_is_unreadable_prints_with_its_count() {
     );
 }
 
+/// A folder that can be listed but not searched gives each file's name and kind but not
+/// its time, so its transcript counts as unreadable.
+#[cfg(unix)]
+#[test]
+fn a_transcript_whose_time_cannot_be_read_counts_as_unreadable() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("unsearchable");
+    let sub = dir.join("proj");
+    let mode = |m| std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(m));
+    let _ = mode(0o755);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&sub).expect("folder");
+    std::fs::write(sub.join("a.jsonl"), "{}\n").expect("transcript");
+    mode(0o444).expect("chmod");
+    let (doc, _) = claude_root_report(&dir);
+    mode(0o755).expect("chmod");
+    assert_eq!(doc["roots"][0]["unreadable"], 1, "{doc}");
+    let reason = doc["roots"][0]["unreadable_reasons"][0]["reason"].to_string();
+    assert!(reason.contains("a file's time cannot be read:"), "{reason}");
+}
+
 /// Gemini CLI files are read twice, to index them first; a read that fails in the
 /// first pass counts the file as unreadable.
 #[cfg(unix)]
@@ -2278,6 +2299,46 @@ fn a_codex_result_is_priced_once_and_one_left_at_the_end_stays_unpriced() {
     // 40,000 tokens est at US$2, once, and 20,000 unpriced.
     assert_eq!(row["poll_usd_est"], json!(0.08), "{row}");
     assert_eq!(row["unpriced_tokens_est"], json!(20000), "{row}");
+}
+
+#[test]
+fn a_codex_record_that_holds_a_turn_context_starts_no_turn() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("codex-held-turn");
+    let _ = std::fs::remove_dir_all(&dir);
+    let day = dir.join("2026/11/09");
+    std::fs::create_dir_all(&day).expect("folder");
+    let mut lines = vec![
+        json!({"timestamp": "2026-11-09T04:00:00.000Z", "type": "session_meta",
+               "payload": {"id": "c-held", "cwd": "/work"}}),
+        codex_turn("gpt-6.1-sol"),
+        // Only a record whose own type is `turn_context` starts a turn and names its
+        // model; this one merely holds one beside a model name.
+        json!({"timestamp": "2026-11-09T04:00:40.000Z", "type": "event_msg",
+               "payload": {"type": "note", "model": "gpt-5.3-codex",
+                           "turn": codex_turn("gpt-5.3-codex")}}),
+    ];
+    codex_git_status(&mut lines, "c0", 4, None);
+    codex_git_status(&mut lines, "c1", 40_000, None);
+    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+    std::fs::write(day.join("rollout-held.jsonl"), text).expect("transcript");
+    let codex = dir.to_str().expect("UTF-8 path");
+    let (code, stdout, stderr) = run(&[
+        "polls",
+        "--codex-root",
+        codex,
+        "--claude-root",
+        CLAUDE,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let row = find(rows(&doc, "polls", 0), &[("agent", json!("codex"))]);
+    assert_eq!(row["polls"], json!(1), "{row}");
+    // GPT-6.1 Sol's price depends on the prompt, which no usage record gives, so the
+    // poll's 10,000 tokens est stay unpriced; GPT-5.3 Codex would have priced them.
+    assert_eq!(row["unpriced_tokens_est"], json!(10000), "{row}");
 }
 
 /// A Claude transcript of `calls`, each a tool name, its input, its result's content and

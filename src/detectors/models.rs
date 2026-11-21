@@ -612,7 +612,8 @@ mod tests {
 
     /// The section with model `m` at US$5 per million input tokens.
     fn models() -> Models {
-        let prices = r#"{"m": {"input_cost_per_token": 5e-06}}"#;
+        let prices =
+            r#"{"m": {"input_cost_per_token": 5e-06}, "cheap": {"input_cost_per_token": 1e-06}}"#;
         Models::new(Rc::new(Prices::from_file(prices, "test").expect("prices")))
     }
 
@@ -724,6 +725,13 @@ mod tests {
         let on = || (reply("a", &good), Some(5.0), true);
         let skipped = |id| (reply(id, &bad), Some(9.0), true);
         assert_eq!(ranks(&[top()], &[&[on()]]), ["on top"]);
+        // A subagent reply on a cheaper model ranks the session below its parent.
+        let mut cheaper = reply("c", &good);
+        cheaper["message"]["model"] = json!("cheap");
+        assert_eq!(
+            ranks(&[top()], &[&[on(), (cheaper, Some(1.0), true)]]),
+            ["below"]
+        );
         // The subagent's skipped reply may have been on a cheaper model.
         assert_eq!(ranks(&[top()], &[&[on(), skipped("b")]]), ["indeterminate"]);
         // A subagent session whose every reply is skipped is still a session.

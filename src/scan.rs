@@ -939,8 +939,9 @@ fn raw_timestamp(line: &str) -> Option<Timestamp> {
 mod tests {
     use super::*;
 
-    /// Counts the records it is given.
-    struct Count(std::rc::Rc<std::cell::Cell<u64>>);
+    /// Counts the records it is given, and reports the count.
+    #[derive(Default)]
+    struct Count(u64);
 
     impl Detector for Count {
         fn agents(&self) -> &'static [Agent] {
@@ -950,18 +951,33 @@ mod tests {
             true
         }
         fn record(&mut self, _s: &Session, _r: &Record<'_>) {
-            self.0.set(self.0.get() + 1);
+            self.0 += 1;
         }
         fn section(&self, _opts: &Opts) -> Section {
-            Section::default()
+            Section {
+                summary: vec![("records".to_owned(), self.0.into())],
+                ..Section::default()
+            }
         }
+    }
+
+    /// The records `Count`, the first of `dets`, reports.
+    fn counted(dets: &[Box<dyn Detector>]) -> Value {
+        let opts = Opts {
+            limit: 0,
+            paths: false,
+            home: None,
+            usd_per_mtok: None,
+            prices_file: None,
+        };
+        dets[0].section(&opts).summary.swap_remove(0).1
     }
 
     #[test]
     fn unselected_agents_are_absent_from_disk_and_sample_reports() {
         let prices = Prices::bundled();
         let since = Some(Timestamp::MIN);
-        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count(Default::default()))];
+        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count::default())];
         let root = PathBuf::from("unselected-gemini-root");
         let roots = [(Agent::Gemini, root)];
         assert!(scan(&roots, since, &prices, &mut dets).is_empty());
@@ -972,6 +988,7 @@ mod tests {
             text: "{}",
         }];
         assert!(scan_memory(&files, "sample", since, &prices, &mut dets).is_empty());
+        assert_eq!(counted(&dets), 0);
     }
 
     #[test]
@@ -1014,8 +1031,7 @@ mod tests {
     /// lines skipped.
     fn scan_one(agent: Agent, reader: Box<dyn BufRead>) -> (u64, u64) {
         let mut st = RootStats::new(agent, PathBuf::new());
-        let n = std::rc::Rc::default();
-        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count(std::rc::Rc::clone(&n)))];
+        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count::default())];
         scan_file(
             reader,
             None,
@@ -1030,7 +1046,8 @@ mod tests {
             &mut Earlier::default(),
         )
         .expect("read");
-        (n.get(), st.bad_lines)
+        let n = counted(&dets).as_u64().expect("a count");
+        (n, st.bad_lines)
     }
 
     #[test]

@@ -323,6 +323,20 @@ mod tests {
         prices.usd_per_mtok(model, || panic!("{model} is not priced by prompt size"))
     }
 
+    /// The key check takes every value JSON has; given another kind, such as bytes from a
+    /// non-JSON reader, it says what it expects.
+    #[test]
+    fn the_key_check_names_what_it_expects() {
+        let bytes = de::value::BytesDeserializer::<de::value::Error>::new(b"x");
+        let err = UniqueKeys::deserialize(bytes)
+            .err()
+            .expect("bytes are refused");
+        assert_eq!(
+            err.to_string(),
+            "invalid type: byte array, expected a JSON value"
+        );
+    }
+
     #[test]
     fn only_listed_model_ids_have_a_price() {
         let p = Prices::bundled();
