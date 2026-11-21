@@ -12,7 +12,7 @@ clap = { version = "4", features = ["derive"] }
 jiff = { version = "1.0.0", default-features = false, features = ["std", "tz-system", "tzdb-bundle-platform", "tzdb-zoneinfo"] }
 regex = "1"
 ruzstd = "0.9"
-rusqlite = { version = "0.41.1", features = ["bundled", "hooks", "serialize"] }
+rusqlite = { version = "0.42.0", features = ["bundled", "hooks", "serialize"] }
 serde = "1"
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = { version = "0.11", default-features = false }
