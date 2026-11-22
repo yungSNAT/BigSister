@@ -1,6 +1,6 @@
 # Security
 
-BigSister reads the transcripts your coding agents save on your machine. It promises to print names, paths, counts, sizes and times, never message text, tool inputs or tool outputs, and to make no network calls, so a flaw that breaks either promise matters.
+BigSister reads the transcripts your coding agents save on your machine. Its report is limited to names, paths, counts, sizes and times, leaving out message text, tool inputs and tool outputs, and it makes no network calls, so a flaw that breaks either limit matters.
 
 Please report a vulnerability privately through this repository's private vulnerability reporting (Security tab, 'Report a vulnerability', or <https://github.com/yungSNAT/BigSister/security/advisories/new>), not in a public issue. Include the version or commit, your platform, what you did and what you saw, with any transcript content removed. You will get an acknowledgement, and a fix or a decision, as soon as the maintainer can review it; there is no fixed response time.
 
