@@ -1,0 +1,37 @@
+name: VirusTotal upload host probe (temporary)
+
+# Asks VirusTotal for one large-file upload URL and prints only its scheme and host, to
+# diagnose why the shared scan workflow refuses the URL. Runs only on this branch, which is
+# never merged. The URL itself is single-use and is not printed or used.
+on:
+  push:
+    branches: [ryan/virustotal-upload-host-probe-2026-11-22]
+
+permissions: {}
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Print the upload URL's scheme and host
+        env:
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          if [[ ! $VT_API_KEY =~ ^[0-9a-f]{64}$ ]]; then
+            echo "VT_API_KEY is not a 64-character lower-case hexadecimal key" >&2
+            exit 1
+          fi
+          # Keep the key off curl's command line.
+          printf 'header = "x-apikey: %s"\n' "$VT_API_KEY" > "$RUNNER_TEMP/vt.curl"
+          trap 'rm -f "$RUNNER_TEMP/vt.curl" "$RUNNER_TEMP/vt.json"' EXIT
+          code=$(curl --disable --proto '=https' --silent --config "$RUNNER_TEMP/vt.curl" \
+            --output "$RUNNER_TEMP/vt.json" --write-out '%{http_code}' \
+            https://www.virustotal.com/api/v3/files/upload_url)
+          echo "http=$code"
+          jq -r '.data | type' "$RUNNER_TEMP/vt.json" | sed 's/^/data type: /'
+          jq -r '.data | strings | capture("^(?<origin>[a-z]+://[^/?#]+)") | .origin' "$RUNNER_TEMP/vt.json" | sed 's/^/origin: /'
+          jq -r '.data | strings | test("[[:space:][:cntrl:]]")' "$RUNNER_TEMP/vt.json" | sed 's/^/has space or control: /'
