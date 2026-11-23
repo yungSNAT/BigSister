@@ -1569,9 +1569,17 @@ mod tests {
         assert!(lines.next_line().expect("read").is_none());
     }
 
+    fn test_dir(name: &str) -> PathBuf {
+        std::env::current_exe()
+            .expect("test binary")
+            .parent()
+            .expect("test dir")
+            .join(format!("bigsister-{name}-{}", std::process::id()))
+    }
+
     #[test]
     fn parallel_scan_preserves_counts_errors_and_order_across_files() {
-        let dir = std::env::temp_dir().join(format!("bigsister-par-{}", std::process::id()));
+        let dir = test_dir("par");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp folder");
         fs::write(
@@ -1607,7 +1615,7 @@ mod tests {
 
     #[test]
     fn early_finish_and_pi_parallel_paths_record_errors_and_bad_lines() {
-        let dir = std::env::temp_dir().join(format!("bigsister-par-err-{}", std::process::id()));
+        let dir = test_dir("par-err");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("early")).expect("temp folder");
         fs::create_dir_all(dir.join("pi")).expect("temp folder");
@@ -1734,7 +1742,7 @@ mod tests {
 
     #[test]
     fn parallel_prep_coalesces_timestamps_and_streams_when_over_budget() {
-        let dir = std::env::temp_dir().join(format!("bigsister-budget-{}", std::process::id()));
+        let dir = test_dir("budget");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp folder");
         let body = [
@@ -1832,7 +1840,7 @@ mod tests {
 
     #[test]
     fn legacy_done_detector_and_spaced_codex_rules_match_sequential() {
-        let dir = std::env::temp_dir().join(format!("bigsister-s3-{}", std::process::id()));
+        let dir = test_dir("s3");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp folder");
         fs::write(dir.join("s.jsonl"), "{\"type\":\"summary\"}\nnot-json\n").expect("write");
@@ -1942,7 +1950,7 @@ mod tests {
         );
         assert_dynamic_blob(&mem_dets);
 
-        let dir = std::env::temp_dir().join(format!("bigsister-blob-{}", std::process::id()));
+        let dir = test_dir("blob");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp folder");
         fs::write(dir.join("b.jsonl"), blob_text).expect("blob file");
@@ -1963,7 +1971,7 @@ mod tests {
 
     #[test]
     fn pi_branch_events_count_toward_prep_budget() {
-        let dir = std::env::temp_dir().join(format!("bigsister-pi-budget-{}", std::process::id()));
+        let dir = test_dir("pi-budget");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp folder");
         let path = dir.join("p.jsonl");
@@ -2047,7 +2055,7 @@ mod tests {
 
     #[test]
     fn parallel_scan_preserves_cross_file_order_and_deduplication_trace() {
-        let dir = std::env::temp_dir().join(format!("bigsister-trace-{}", std::process::id()));
+        let dir = test_dir("trace");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("temp folder");
         fs::write(
