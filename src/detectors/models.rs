@@ -35,6 +35,13 @@ struct Cost {
     weighted_usd: f64,
 }
 
+/// A Git branch as printed: segments [`printed`] prints as they are, joined by `/`, up
+/// to 128 characters; anything else is `(other)`.
+fn printed_branch(name: &str) -> String {
+    let fits = name.len() <= 128 && name.split('/').all(|part| printed(part) == part);
+    if fits { name } else { "(other)" }.to_owned()
+}
+
 /// A label `v` records under `key`, if it is a string other than empty; anything else
 /// counts as unrecorded rather than skipping the reply.
 fn optional<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
@@ -278,7 +285,7 @@ impl Detector for Models {
             .or_default()
             .add(&reply, weighted, price);
         self.branches
-            .entry(shown(reply.branch))
+            .entry(reply.branch.map_or_else(|| NONE.to_owned(), printed_branch))
             .or_default()
             .add(&reply, weighted, price);
         if price.is_none() {
@@ -356,7 +363,7 @@ fn notes(opts: &Opts) -> Vec<String> {
         "Each model is ranked at its base input price (its price for the shortest prompt, so a model priced by prompt size ranks the same whatever the prompt), from the bundled prices or the price file's with --prices, whatever --usd-per-mtok gives: a subagent session is on its parent's top model when the cheapest model of its replies in the window costs at least the dearest of its parent session's, so the same model on both sides is on top, and below when cheaper. It is indeterminate when the parent session (the main session whose id its records carry) was not read or had no reply in the window, or it or the subagent had a reply in the window skipped or on a model without a price (a skipped one without a session id, or whose blocks name different sessions, counts against every session its file's records in the window name, and against none, counting only in replies skipped, when no record names one), as such a reply's model may be dearer or cheaper. On top input usd est sums those sessions' input usd est.".to_owned(),
     ];
     if opts.by_branch {
-        notes.push(format!("By Git branch (--by-branch) groups the same replies by the gitBranch Claude Code records on each reply, the branch checked out in its working folder when it was written, not the branch its work was later merged to; {NONE} marks a reply that records none, an empty one or one that is not text. Its dollars are the same estimate as above."));
+        notes.push(format!("By Git branch (--by-branch) groups the same replies by the gitBranch Claude Code records on each reply, the branch checked out in its working folder when it was written, not the branch its work was later merged to; {NONE} marks a reply that records none, an empty one or one that is not text, and (other) a branch whose name holds characters other than letters, digits and _, -, ., : or / between non-empty parts, or is over 128 characters long. Its dollars are the same estimate as above."));
     }
     notes
 }
@@ -578,6 +585,14 @@ fn group_table<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_branch_prints_as_its_slash_separated_names_or_other() {
+        assert_eq!(printed_branch("ryan/fix-1.2"), "ryan/fix-1.2");
+        for odd in ["a//b", "/a", "a b", "a/\u{1b}[31m", &"x".repeat(129)] {
+            assert_eq!(printed_branch(odd), "(other)", "{odd}");
+        }
+    }
 
     /// A reply of session `s` on model `m` with `input` uncached input tokens, 1 output
     /// token and no cache use.
