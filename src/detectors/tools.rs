@@ -144,6 +144,16 @@ impl Detector for Tools {
         line.contains("\"tool_use\"") || self.claude.wants(line)
     }
 
+    fn scans_whole_file(&self) -> bool {
+        true
+    }
+
+    fn prefilter(&self) -> Option<crate::scan::Prefilter> {
+        Some(crate::scan::Prefilter::Superset(|_, line| {
+            line.contains("\"tool_use\"") || line.contains("\"tool_result\"")
+        }))
+    }
+
     fn begin(&mut self, _s: &Session) {
         self.end_run();
         self.failing.clear();

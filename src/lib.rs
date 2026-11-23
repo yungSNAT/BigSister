@@ -24,6 +24,9 @@ use scan::Agent;
 /// # Errors
 /// Returns a message when `--since` is invalid or no transcript folder can be read.
 pub fn run(cli: &Cli) -> Result<String, String> {
+    if let cli::Command::Completions { shell } = cli.command {
+        return Ok(completions(shell));
+    }
     let since = window_start(cli)?;
     let home = std::env::home_dir().map(|h| report::display_path(&h.display().to_string(), None));
     let prices = std::rc::Rc::new(read_prices(cli, home.as_deref())?);
@@ -65,13 +68,28 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         skipped_roots: &skipped,
         home: home.as_deref(),
     };
-    Ok(if cli.json {
-        report::json(&meta, &sections)
+    Ok(render_report(cli, &meta, &sections))
+}
+
+fn render_report(cli: &Cli, meta: &Meta<'_>, sections: &[report::Section]) -> String {
+    if cli.json {
+        report::json(meta, sections)
     } else if cli.csv {
-        report::csv(&sections)
+        report::csv(sections)
     } else {
-        report::text(&meta, &sections)
-    })
+        report::text(meta, sections)
+    }
+}
+
+fn completions(shell: clap_complete::Shell) -> String {
+    let mut script = Vec::new();
+    clap_complete::generate(
+        shell,
+        &mut <Cli as clap::CommandFactory>::command(),
+        "bigsister",
+        &mut script,
+    );
+    String::from_utf8_lossy(&script).into_owned()
 }
 
 /// Where the window starts: `--since`, or the sample's own start with `--sample`.

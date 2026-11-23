@@ -93,16 +93,28 @@ pub fn group_of(tool: &str) -> String {
     }
 }
 
+fn schemas_wants(_s: &Session, line: &str) -> bool {
+    line.contains("\"type\":\"api-request-shape\"")
+        || line.contains("\"tool_use\"")
+        || line.contains("\"type\":\"skill_listing\"")
+        || line.contains(SLASH)
+}
+
 impl Detector for Schemas {
     fn agents(&self) -> &'static [Agent] {
         &[Agent::Claude]
     }
 
-    fn wants(&self, _s: &Session, line: &str) -> bool {
-        line.contains("\"type\":\"api-request-shape\"")
-            || line.contains("\"tool_use\"")
-            || line.contains("\"type\":\"skill_listing\"")
-            || line.contains(SLASH)
+    fn wants(&self, s: &Session, line: &str) -> bool {
+        schemas_wants(s, line)
+    }
+
+    fn scans_whole_file(&self) -> bool {
+        true
+    }
+
+    fn prefilter(&self) -> Option<crate::scan::Prefilter> {
+        Some(crate::scan::Prefilter::Exact(schemas_wants))
     }
 
     fn begin(&mut self, _s: &Session) {

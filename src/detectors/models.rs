@@ -163,13 +163,25 @@ fn label<'a>(object: &'a Value, key: &'static str) -> Result<Option<&'a str>, &'
     object.get(key).map(|v| v.as_str().ok_or(key)).transpose()
 }
 
+fn models_wants(_s: &Session, line: &str) -> bool {
+    line.contains("\"type\":\"assistant\"")
+}
+
 impl Detector for Models {
     fn agents(&self) -> &'static [Agent] {
         &[Agent::Claude]
     }
 
-    fn wants(&self, _s: &Session, line: &str) -> bool {
-        line.contains("\"type\":\"assistant\"")
+    fn wants(&self, s: &Session, line: &str) -> bool {
+        models_wants(s, line)
+    }
+
+    fn scans_whole_file(&self) -> bool {
+        true
+    }
+
+    fn prefilter(&self) -> Option<crate::scan::Prefilter> {
+        Some(crate::scan::Prefilter::Exact(models_wants))
     }
 
     fn begin(&mut self, _s: &Session) {
