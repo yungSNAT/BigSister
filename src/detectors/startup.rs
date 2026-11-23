@@ -69,10 +69,6 @@ impl Detector for Startup {
         s.subagent || self.cur.replied || self.cur.started_in_window == Some(false)
     }
 
-    fn may_finish_early(&self) -> bool {
-        true
-    }
-
     fn begin(&mut self, _s: &Session) {
         self.cur = Current::default();
     }

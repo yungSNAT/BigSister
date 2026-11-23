@@ -176,6 +176,10 @@ impl Detector for Models {
         models_wants(s, line)
     }
 
+    fn scans_whole_file(&self) -> bool {
+        true
+    }
+
     fn prefilter(&self) -> Option<crate::scan::Prefilter> {
         Some(crate::scan::Prefilter::Exact(models_wants))
     }

@@ -109,6 +109,10 @@ impl Detector for Schemas {
         schemas_wants(s, line)
     }
 
+    fn scans_whole_file(&self) -> bool {
+        true
+    }
+
     fn prefilter(&self) -> Option<crate::scan::Prefilter> {
         Some(crate::scan::Prefilter::Exact(schemas_wants))
     }

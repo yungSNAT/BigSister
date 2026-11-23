@@ -108,8 +108,8 @@ pub trait Detector {
     fn done(&self, _s: &Session) -> bool {
         false
     }
-    /// Whether `done` can become true before the end of a file.
-    fn may_finish_early(&self) -> bool {
+    /// Whether `done` always returns `false`, so the whole file can be prepared in parallel.
+    fn scans_whole_file(&self) -> bool {
         false
     }
     fn end(&mut self, _s: &Session) {}
@@ -293,6 +293,9 @@ pub enum Prefilter {
 
 /// Files prepared in parallel per batch, bounding peak memory on large corpora.
 const PARALLEL_BATCH: usize = 16;
+/// Maximum prepared events or raw-buffer bytes per file before falling back to streaming.
+const MAX_PREP_EVENTS: usize = 65_536;
+const MAX_PREP_RAW_BYTES: usize = 32 << 20;
 
 /// Why opening or indexing a transcript failed before lines were read.
 enum OpenError {
@@ -330,20 +333,22 @@ fn record_open_error(st: &mut RootStats, err: &OpenError) {
 
 struct PrepareOpts<'a> {
     agent: Agent,
-    reads_blobs: bool,
+    skip_blobs: bool,
     prefilters: Option<&'a [Prefilter]>,
     prices: &'a Prices,
+    max_events: usize,
+    max_raw_bytes: usize,
 }
 
 enum PreparedFile {
     OpenErr(OpenError),
     Empty(u64),
+    TooLarge,
     Ready(ReadyFile),
 }
 
 struct ReadyFile {
     session: Session,
-    pi_parent: Option<String>,
     bad_lines: u64,
     raw_buf: String,
     events: Vec<PreparedEvent>,
@@ -351,6 +356,7 @@ struct ReadyFile {
 }
 
 enum PreparedEvent {
+    PiParent(Option<String>),
     Branch(Vec<PreparedEvent>),
     Timestamp(Timestamp),
     Candidate(Candidate),
@@ -359,6 +365,7 @@ enum PreparedEvent {
 struct Candidate {
     raw: std::ops::Range<usize>,
     blob: bool,
+    codex_model: bool,
     exact_mask: u64,
     check_mask: u64,
     reply: Option<Option<f64>>,
@@ -388,14 +395,13 @@ impl<'a> Prep<'a> {
         }
     }
 
+    fn over_budget(&self) -> bool {
+        self.events.len() > self.opts.max_events || self.raw_buf.len() > self.opts.max_raw_bytes
+    }
+
     fn drain_into(&mut self, line: &str, feed: &mut Feed<'_>) {
         self.raw_buf.clear();
         self.take(line);
-        if feed.pi_parent.is_none()
-            && let Some(parent) = self.pi.as_ref().and_then(|t| t.parent.as_ref())
-        {
-            feed.pi_parent = Some(parent.clone());
-        }
         feed.st.bad_lines += std::mem::take(&mut self.bad_lines);
         for event in &self.events {
             feed.apply_event(event, &self.raw_buf);
@@ -423,10 +429,15 @@ impl<'a> Prep<'a> {
         if line.is_empty() {
             return;
         }
+        let prev_parent = tree.parent.clone();
         let Some(read) = tree.read(line) else {
             self.bad_lines += 1;
             return;
         };
+        if tree.parent != prev_parent {
+            self.events
+                .push(PreparedEvent::PiParent(tree.parent.clone()));
+        }
         if let Some(path) = read.branch {
             let mut branch = Vec::new();
             for old in &path {
@@ -471,27 +482,28 @@ impl<'a> Prep<'a> {
             return;
         }
         let blob = self.session.agent == Agent::Claude && line.starts_with(CLAUDE_BLOB_PREFIX);
-        if blob && !self.opts.reads_blobs {
+        if blob && self.opts.skip_blobs {
             return;
         }
-        if !line.ends_with('}') {
+        if !blob && !line.ends_with('}') {
             self.bad_lines += 1;
             return;
         }
         let (exact_mask, check_mask) = self.match_masks(line, blob);
-        let is_codex_model = self.session.agent == Agent::Codex && codex_model_line(line);
+        let codex_model = self.session.agent == Agent::Codex && codex_model_line(line);
         let claude_model = if !blob && self.session.agent.claude_shaped() {
             claude_model_name(line)
         } else {
             None
         };
-        if exact_mask == 0 && check_mask == 0 && !is_codex_model && claude_model.is_none() {
-            if let Some(t) = raw_timestamp(line) {
-                out.push(PreparedEvent::Timestamp(t));
-            }
+        if exact_mask == 0 && check_mask == 0 && !codex_model && claude_model.is_none() {
+            push_timestamp(out, line);
             return;
         }
-        let parsed = serde_json::from_str::<Value>(line).ok();
+        let parsed = line
+            .ends_with('}')
+            .then(|| serde_json::from_str::<Value>(line).ok())
+            .flatten();
         let reply = claude_model.map(|model| {
             self.opts.prices.usd_per_mtok(model, || {
                 parsed
@@ -509,11 +521,22 @@ impl<'a> Prep<'a> {
         out.push(PreparedEvent::Candidate(Candidate {
             raw,
             blob,
+            codex_model,
             exact_mask,
             check_mask,
             reply,
             parsed,
         }));
+    }
+}
+
+fn push_timestamp(out: &mut Vec<PreparedEvent>, line: &str) {
+    let Some(t) = raw_timestamp(line) else {
+        return;
+    };
+    match out.last_mut() {
+        Some(PreparedEvent::Timestamp(prev)) => *prev = t,
+        _ => out.push(PreparedEvent::Timestamp(t)),
     }
 }
 
@@ -535,6 +558,9 @@ fn prepare_file(path: &Path, opts: &PrepareOpts<'_>) -> PreparedFile {
     let mut prep = Prep::new(session, opts, rewrite);
     prep.take(&first);
     let read_err = loop {
+        if prep.over_budget() {
+            return PreparedFile::TooLarge;
+        }
         match lines.next_line() {
             Ok(Some(line)) => prep.take(line.trim_end()),
             Ok(None) => break None,
@@ -544,12 +570,30 @@ fn prepare_file(path: &Path, opts: &PrepareOpts<'_>) -> PreparedFile {
     prep.bad_lines += lines.over_long;
     PreparedFile::Ready(ReadyFile {
         session,
-        pi_parent: prep.pi.and_then(|t| t.parent),
         bad_lines: prep.bad_lines,
         raw_buf: prep.raw_buf,
         events: prep.events,
         read_err,
     })
+}
+
+fn scan_path(
+    path: &Path,
+    window: &Window<'_>,
+    dets: &mut [Box<dyn Detector>],
+    active: &[usize],
+    st: &mut RootStats,
+    earlier: &mut Earlier,
+) {
+    match open_for_agent(path, st.agent) {
+        Ok((reader, rewrite)) => {
+            st.files += 1;
+            if let Err(e) = scan_file(reader, rewrite, path, window, dets, active, st, earlier) {
+                st.count_unreadable(read_error(&e));
+            }
+        }
+        Err(err) => record_open_error(st, &err),
+    }
 }
 
 fn apply_prepared(
@@ -571,6 +615,10 @@ fn apply_prepared(
             st.bad_lines += over_long;
             return;
         }
+        PreparedFile::TooLarge => {
+            scan_path(path, window, dets, active, st, earlier);
+            return;
+        }
         PreparedFile::Ready(ready) => ready,
     };
     st.files += 1;
@@ -579,15 +627,7 @@ fn apply_prepared(
     for &i in active {
         dets[i].begin(&session);
     }
-    let mut feed = Feed::new(
-        session,
-        window,
-        earlier,
-        ready.pi_parent.clone(),
-        dets,
-        active,
-        st,
-    );
+    let mut feed = Feed::new(session, window, earlier, dets, active, st);
     for event in &ready.events {
         feed.apply_event(event, &ready.raw_buf);
     }
@@ -604,29 +644,49 @@ fn scan_files(
     st: &mut RootStats,
     earlier: &mut Earlier,
 ) {
-    if active.iter().all(|&i| dets[i].may_finish_early()) {
+    scan_files_with_budget(
+        files,
+        window,
+        dets,
+        active,
+        st,
+        earlier,
+        MAX_PREP_EVENTS,
+        MAX_PREP_RAW_BYTES,
+    );
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "testable memory budget for parallel prep"
+)]
+fn scan_files_with_budget(
+    files: Vec<PathBuf>,
+    window: &Window<'_>,
+    dets: &mut [Box<dyn Detector>],
+    active: &[usize],
+    st: &mut RootStats,
+    earlier: &mut Earlier,
+    max_events: usize,
+    max_raw_bytes: usize,
+) {
+    if !active.iter().any(|&i| dets[i].scans_whole_file()) {
         for path in files {
-            match open_for_agent(&path, st.agent) {
-                Ok((reader, rewrite)) => {
-                    st.files += 1;
-                    if let Err(e) =
-                        scan_file(reader, rewrite, &path, window, dets, active, st, earlier)
-                    {
-                        st.count_unreadable(read_error(&e));
-                    }
-                }
-                Err(err) => record_open_error(st, &err),
-            }
+            scan_path(&path, window, dets, active, st, earlier);
         }
         return;
     }
-    let reads_blobs = active.iter().any(|&i| dets[i].reads_request_blobs());
-    let prefilters: Option<Vec<Prefilter>> = active.iter().map(|&i| dets[i].prefilter()).collect();
+    let prefilters: Option<Vec<Prefilter>> = (active.len() <= 64)
+        .then(|| active.iter().map(|&i| dets[i].prefilter()).collect())
+        .flatten();
+    let skip_blobs = prefilters.is_some() && !active.iter().any(|&i| dets[i].reads_request_blobs());
     let opts = PrepareOpts {
         agent: st.agent,
-        reads_blobs,
+        skip_blobs,
         prefilters: prefilters.as_deref(),
         prices: window.prices,
+        max_events,
+        max_raw_bytes,
     };
     for chunk in files.chunks(PARALLEL_BATCH) {
         let prepared: Vec<_> = chunk
@@ -953,19 +1013,23 @@ fn scan_file(
         agent,
         subagent: is_subagent(agent, path, &first),
     };
-    let reads_blobs = active.iter().any(|&i| dets[i].reads_request_blobs());
-    let prefilters: Option<Vec<Prefilter>> = active.iter().map(|&i| dets[i].prefilter()).collect();
-    let opts = PrepareOpts {
-        agent,
-        reads_blobs,
-        prefilters: prefilters.as_deref(),
-        prices: window.prices,
-    };
+    let prefilters: Option<Vec<Prefilter>> = (active.len() <= 64)
+        .then(|| active.iter().map(|&i| dets[i].prefilter()).collect())
+        .flatten();
     for &i in active {
         dets[i].begin(&session);
     }
+    let skip_blobs = prefilters.is_some() && !active.iter().any(|&i| dets[i].reads_request_blobs());
+    let opts = PrepareOpts {
+        agent,
+        skip_blobs,
+        prefilters: prefilters.as_deref(),
+        prices: window.prices,
+        max_events: usize::MAX,
+        max_raw_bytes: usize::MAX,
+    };
     let mut prep = Prep::new(session, &opts, rewrite);
-    let mut feed = Feed::new(session, window, earlier, None, dets, active, st);
+    let mut feed = Feed::new(session, window, earlier, dets, active, st);
     prep.drain_into(&first, &mut feed);
     let result = loop {
         if feed.active.iter().all(|&i| feed.dets[i].done(&session)) {
@@ -1028,7 +1092,6 @@ impl<'a> Feed<'a> {
         session: Session,
         window: &Window<'a>,
         earlier: &'a Earlier,
-        pi_parent: Option<String>,
         dets: &'a mut [Box<dyn Detector>],
         active: &'a [usize],
         st: &'a mut RootStats,
@@ -1042,7 +1105,7 @@ impl<'a> Feed<'a> {
             uuids: HashSet::new(),
             replies: HashSet::new(),
             earlier,
-            pi_parent,
+            pi_parent: None,
             replaying: false,
             dets,
             active,
@@ -1053,6 +1116,7 @@ impl<'a> Feed<'a> {
 
     fn apply_event(&mut self, event: &PreparedEvent, raw_buf: &str) {
         match event {
+            PreparedEvent::PiParent(parent) => self.pi_parent = parent.clone(),
             PreparedEvent::Branch(path) => {
                 for &i in self.active {
                     self.dets[i].branch(&self.session);
@@ -1067,7 +1131,10 @@ impl<'a> Feed<'a> {
             PreparedEvent::Candidate(c) => {
                 let raw = &raw_buf[c.raw.clone()];
                 self.fill_wanting(raw, c.blob, c.exact_mask, c.check_mask);
-                if self.session.agent == Agent::Codex
+                if c.blob && self.wanting_buf.is_empty() {
+                    return;
+                }
+                if c.codex_model
                     && let Some(value) = c.parsed.as_ref()
                 {
                     self.codex_model(value);
@@ -1138,9 +1205,10 @@ impl<'a> Feed<'a> {
     fn fill_wanting(&mut self, line: &str, blob: bool, exact_mask: u64, check_mask: u64) {
         self.wanting_buf.clear();
         for (slot, &i) in self.active.iter().enumerate() {
-            let bit = 1u64 << slot;
-            if exact_mask & bit != 0
-                || (check_mask & bit != 0
+            let exact = slot < 64 && exact_mask & (1u64 << slot) != 0;
+            let check = slot >= 64 || check_mask & (1u64 << slot) != 0;
+            if exact
+                || (check
                     && (!blob || self.dets[i].reads_request_blobs())
                     && self.dets[i].wants(&self.session, line))
             {
@@ -1517,7 +1585,7 @@ mod tests {
 
         let prices = Prices::bundled();
         let since = Some(Timestamp::MIN);
-        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count::default())];
+        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(WholeCount(0))];
         let stats = scan(&[(Agent::Claude, dir.clone())], since, &prices, &mut dets);
         assert_eq!(stats.len(), 1);
         assert_eq!(stats[0].files, 3);
@@ -1631,5 +1699,296 @@ mod tests {
                 }
             }
         }
+    }
+
+    struct WholeCount(u64);
+    impl Detector for WholeCount {
+        fn agents(&self) -> &'static [Agent] {
+            &[Agent::Claude, Agent::Codex]
+        }
+        fn scans_whole_file(&self) -> bool {
+            true
+        }
+        fn wants(&self, _s: &Session, _line: &str) -> bool {
+            true
+        }
+        fn record(&mut self, _s: &Session, _r: &Record<'_>) {
+            self.0 += 1;
+        }
+        fn section(&self, _opts: &Opts) -> Section {
+            Section {
+                summary: vec![("records".to_owned(), self.0.into())],
+                ..Section::default()
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_prep_coalesces_timestamps_and_streams_when_over_budget() {
+        let dir = std::env::temp_dir().join(format!("bigsister-budget-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp folder");
+        let body = [
+            r#"{"type":"progress","timestamp":"2026-11-08T01:00:00Z"}"#,
+            r#"{"type":"progress","timestamp":"2026-11-08T02:00:00Z"}"#,
+            r#"{"type":"assistant","uuid":"u1","message":{"model":"claude-sonnet-4-6"}}"#,
+            r#"{"type":"assistant","uuid":"u2","message":{"model":"claude-sonnet-4-6"}}"#,
+        ]
+        .join("\n");
+        let file = dir.join("a.jsonl");
+        fs::write(&file, format!("{body}\n")).expect("write");
+
+        let prices = Prices::bundled();
+        let window = Window {
+            since: parse_ts("2026-11-08T01:30:00Z"),
+            prices: &prices,
+        };
+        let programs = std::rc::Rc::new(crate::programs::Programs::from_env());
+        let rc_prices = std::rc::Rc::new(Prices::bundled());
+        let mut dets = crate::detectors::build(crate::cli::Command::Models, &programs, &rc_prices);
+        let mut st = RootStats::new(Agent::Claude, dir.clone());
+        let mut earlier = Earlier::default();
+        scan_files_with_budget(
+            vec![file],
+            &window,
+            &mut dets,
+            &[0],
+            &mut st,
+            &mut earlier,
+            1,
+            MAX_PREP_RAW_BYTES,
+        );
+        assert_eq!(st.files, 1);
+        assert_eq!(st.unreadable, 0);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn more_than_64_active_detectors_do_not_overflow_bitmasks() {
+        let prices = Prices::bundled();
+        let mut dets: Vec<Box<dyn Detector>> = (0..65)
+            .map(|_| Box::new(WholeCount(0)) as Box<dyn Detector>)
+            .collect();
+        let files = [Memory {
+            agent: Agent::Claude,
+            path: "s.jsonl",
+            text: r#"{"type":"summary"}"#,
+        }];
+        let stats = scan_memory(&files, "mem", Some(Timestamp::MIN), &prices, &mut dets);
+        assert_eq!(stats[0].files, 1);
+        assert_eq!(counted(&dets[64..]), 1);
+    }
+
+    struct StopAfterOne(u64);
+    impl Detector for StopAfterOne {
+        fn agents(&self) -> &'static [Agent] {
+            &[Agent::Claude]
+        }
+        fn wants(&self, _s: &Session, _line: &str) -> bool {
+            true
+        }
+        fn record(&mut self, _s: &Session, _r: &Record<'_>) {
+            self.0 += 1;
+        }
+        fn done(&self, _s: &Session) -> bool {
+            self.0 >= 1
+        }
+        fn section(&self, _opts: &Opts) -> Section {
+            Section {
+                summary: vec![("seen".to_owned(), self.0.into())],
+                ..Section::default()
+            }
+        }
+    }
+
+    struct PriceLog(Vec<Option<f64>>);
+    impl Detector for PriceLog {
+        fn agents(&self) -> &'static [Agent] {
+            &[Agent::Codex]
+        }
+        fn wants(&self, _s: &Session, _line: &str) -> bool {
+            true
+        }
+        fn record(&mut self, _s: &Session, _r: &Record<'_>) {}
+        fn read_by(&mut self, _s: &Session, p: Option<f64>) {
+            self.0.push(p);
+        }
+        fn section(&self, _opts: &Opts) -> Section {
+            Section {
+                summary: vec![("calls".to_owned(), (self.0.len() as u64).into())],
+                ..Section::default()
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_done_detector_and_spaced_codex_rules_match_sequential() {
+        let dir = std::env::temp_dir().join(format!("bigsister-s3-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp folder");
+        fs::write(dir.join("s.jsonl"), "{\"type\":\"summary\"}\nnot-json\n").expect("write");
+        let prices = Prices::bundled();
+        let mut stop: Vec<Box<dyn Detector>> = vec![Box::new(StopAfterOne(0))];
+        let st = scan(
+            &[(Agent::Claude, dir.clone())],
+            Some(Timestamp::MIN),
+            &prices,
+            &mut stop,
+        );
+        assert_eq!(st[0].bad_lines, 0);
+        assert_eq!(counted(&stop), 1);
+
+        let mut pl: Vec<Box<dyn Detector>> = vec![Box::new(PriceLog(Vec::new()))];
+        let cm = [Memory {
+            agent: Agent::Codex,
+            path: "c.jsonl",
+            text: "{\"type\": \"turn_context\", \"payload\": {\"model\": \"gpt-5.4\"}}\n",
+        }];
+        let _ = scan_memory(&cm, "mem", Some(Timestamp::MIN), &prices, &mut pl);
+        assert_eq!(counted(&pl), 1);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    struct DynamicBlob {
+        enabled: bool,
+        seen: Vec<bool>,
+    }
+    impl Detector for DynamicBlob {
+        fn agents(&self) -> &'static [Agent] {
+            &[Agent::Claude]
+        }
+        fn reads_request_blobs(&self) -> bool {
+            self.enabled
+        }
+        fn begin(&mut self, _s: &Session) {
+            self.enabled = true;
+        }
+        fn wants(&self, _s: &Session, line: &str) -> bool {
+            line.contains("\"keep\"")
+        }
+        fn record(&mut self, _s: &Session, r: &Record<'_>) {
+            self.seen.push(r.in_window);
+        }
+        fn section(&self, _opts: &Opts) -> Section {
+            Section {
+                summary: vec![(
+                    "in_window".to_owned(),
+                    (self.seen.iter().filter(|&&w| w).count() as u64).into(),
+                )],
+                ..Section::default()
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_blob_detector_receives_wanted_blobs_and_ignores_rejected_ones() {
+        let blob_text = concat!(
+            r#"{"type":"api-request-blob","timestamp":"2026-11-10T00:00:00Z","drop":true}"#,
+            "\n",
+            r#"{"type":"api-request-blob","broken":true"#,
+            "\n",
+            r#"{"type":"api-request-blob","keep":true}"#,
+            "\n",
+        );
+        let prices = Prices::bundled();
+        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(DynamicBlob {
+            enabled: false,
+            seen: Vec::new(),
+        })];
+        let mem = [Memory {
+            agent: Agent::Claude,
+            path: "b.jsonl",
+            text: blob_text,
+        }];
+        let st = scan_memory(
+            &mem,
+            "mem",
+            parse_ts("2026-11-09T00:00:00Z"),
+            &prices,
+            &mut dets,
+        );
+        assert_eq!(st[0].bad_lines, 0);
+        assert_eq!(counted(&dets), 0);
+    }
+
+    struct Trace(Vec<(String, bool)>);
+    impl Detector for Trace {
+        fn agents(&self) -> &'static [Agent] {
+            &[Agent::Claude]
+        }
+        fn scans_whole_file(&self) -> bool {
+            true
+        }
+        fn wants(&self, _s: &Session, _line: &str) -> bool {
+            true
+        }
+        fn record(&mut self, _s: &Session, r: &Record<'_>) {
+            let id = r
+                .value
+                .get("uuid")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            self.0.push((id, r.in_window));
+        }
+        fn section(&self, _opts: &Opts) -> Section {
+            Section {
+                summary: self
+                    .0
+                    .iter()
+                    .map(|(id, w)| (id.clone(), (*w).into()))
+                    .collect(),
+                ..Section::default()
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_scan_preserves_cross_file_order_and_deduplication_trace() {
+        let dir = std::env::temp_dir().join(format!("bigsister-trace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp folder");
+        fs::write(
+            dir.join("a-later.jsonl"),
+            concat!(
+                r#"{"type":"assistant","uuid":"u1","timestamp":"2026-11-08T02:00:00Z","message":{"id":"m1"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"u3","timestamp":"2026-11-08T02:01:00Z","message":{"id":"m1"}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"u2","timestamp":"2026-11-08T02:02:00Z","message":{}}"#,
+                "\n",
+            ),
+        )
+        .expect("later");
+        fs::write(
+            dir.join("z-earlier.jsonl"),
+            r#"{"type":"assistant","uuid":"u1","timestamp":"2026-11-08T01:00:00Z","message":{"id":"m1"}}"#,
+        )
+        .expect("earlier");
+        let prices = Prices::bundled();
+        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Trace(Vec::new()))];
+        let _ = scan(
+            &[(Agent::Claude, dir.clone())],
+            Some(Timestamp::MIN),
+            &prices,
+            &mut dets,
+        );
+        let opts = Opts {
+            limit: 0,
+            paths: false,
+            home: None,
+            usd_per_mtok: None,
+            prices_file: None,
+        };
+        assert_eq!(
+            dets[0].section(&opts).summary,
+            vec![
+                ("u1".to_owned(), true.into()),
+                ("u1".to_owned(), false.into()),
+                ("u3".to_owned(), false.into()),
+                ("u2".to_owned(), true.into()),
+            ]
+        );
+        fs::remove_dir_all(&dir).expect("clean up");
     }
 }

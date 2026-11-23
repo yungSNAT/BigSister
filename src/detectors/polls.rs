@@ -131,6 +131,10 @@ impl Detector for Polls {
         }
     }
 
+    fn scans_whole_file(&self) -> bool {
+        true
+    }
+
     fn prefilter(&self) -> Option<crate::scan::Prefilter> {
         Some(crate::scan::Prefilter::Superset(super::tool_prefilter))
     }

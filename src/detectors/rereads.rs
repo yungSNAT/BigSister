@@ -89,6 +89,10 @@ impl Detector for Rereads {
         }
     }
 
+    fn scans_whole_file(&self) -> bool {
+        true
+    }
+
     fn prefilter(&self) -> Option<crate::scan::Prefilter> {
         Some(crate::scan::Prefilter::Superset(rereads_prefilter))
     }
