@@ -237,13 +237,21 @@ pub(super) fn read_usage(usage: &Value) -> Result<Usage, &'static str> {
     })
 }
 
+fn cache_wants(_s: &Session, line: &str) -> bool {
+    line.contains("\"type\":\"assistant\"") || line.contains("\"compact_boundary\"")
+}
+
 impl Detector for Cache {
     fn agents(&self) -> &'static [Agent] {
         &[Agent::Claude]
     }
 
-    fn wants(&self, _s: &Session, line: &str) -> bool {
-        line.contains("\"type\":\"assistant\"") || line.contains("\"compact_boundary\"")
+    fn wants(&self, s: &Session, line: &str) -> bool {
+        cache_wants(s, line)
+    }
+
+    fn prefilter(&self) -> Option<crate::scan::Prefilter> {
+        Some(crate::scan::Prefilter::Exact(cache_wants))
     }
 
     fn begin(&mut self, _s: &Session) {

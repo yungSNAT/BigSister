@@ -269,15 +269,23 @@ pub struct Context {
     not_found: u64,
 }
 
+fn context_wants(_s: &Session, line: &str) -> bool {
+    line.contains("\"type\":\"api-request")
+        || line.contains("\"type\":\"assistant\"")
+        || line.contains("\"type\":\"user\"")
+}
+
 impl Detector for Context {
     fn agents(&self) -> &'static [Agent] {
         &[Agent::Claude]
     }
 
-    fn wants(&self, _s: &Session, line: &str) -> bool {
-        line.contains("\"type\":\"api-request")
-            || line.contains("\"type\":\"assistant\"")
-            || line.contains("\"type\":\"user\"")
+    fn wants(&self, s: &Session, line: &str) -> bool {
+        context_wants(s, line)
+    }
+
+    fn prefilter(&self) -> Option<crate::scan::Prefilter> {
+        Some(crate::scan::Prefilter::Exact(context_wants))
     }
 
     fn reads_request_blobs(&self) -> bool {

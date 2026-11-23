@@ -131,6 +131,10 @@ impl Detector for Polls {
         }
     }
 
+    fn prefilter(&self) -> Option<crate::scan::Prefilter> {
+        Some(crate::scan::Prefilter::Superset(super::tool_prefilter))
+    }
+
     fn begin(&mut self, _s: &Session) {
         self.last_seen.clear();
         self.edits = 0;

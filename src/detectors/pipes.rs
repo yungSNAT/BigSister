@@ -79,6 +79,10 @@ impl Detector for Pipes {
         }
     }
 
+    fn prefilter(&self) -> Option<crate::scan::Prefilter> {
+        Some(crate::scan::Prefilter::Superset(super::tool_prefilter))
+    }
+
     fn begin(&mut self, _s: &Session) {
         self.claude.clear();
     }

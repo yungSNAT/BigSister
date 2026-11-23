@@ -37,13 +37,21 @@ impl Hooks {
     }
 }
 
+fn hooks_wants(_s: &Session, line: &str) -> bool {
+    line.contains("\"type\":\"hook_")
+}
+
 impl Detector for Hooks {
     fn agents(&self) -> &'static [Agent] {
         &[Agent::Claude]
     }
 
-    fn wants(&self, _s: &Session, line: &str) -> bool {
-        line.contains("\"type\":\"hook_")
+    fn wants(&self, s: &Session, line: &str) -> bool {
+        hooks_wants(s, line)
+    }
+
+    fn prefilter(&self) -> Option<crate::scan::Prefilter> {
+        Some(crate::scan::Prefilter::Exact(hooks_wants))
     }
 
     fn record(&mut self, _s: &Session, r: &Record<'_>) {

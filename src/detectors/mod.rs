@@ -191,6 +191,21 @@ pub fn codex_call_line(line: &str) -> bool {
     line.contains("\"custom_tool_call\"") || line.contains("\"function_call\"")
 }
 
+/// Stateless superset of `CodexCalls::wants` for parallel pre-parsing.
+pub(super) fn codex_result_line(line: &str) -> bool {
+    line.contains("\"custom_tool_call_output\"")
+        || line.contains("\"function_call_output\"")
+        || line.contains("\"CommandExecution\"")
+}
+
+/// Stateless superset of `wants` for detectors reading Claude and Codex tool calls.
+pub(super) fn tool_prefilter(s: &crate::scan::Session, line: &str) -> bool {
+    match s.agent {
+        crate::scan::Agent::Codex => codex_call_line(line) || codex_result_line(line),
+        _ => line.contains("\"tool_use\"") || line.contains("\"tool_result\""),
+    }
+}
+
 /// Reads a Codex `exec` cell or a `function_call` with a `cmd` argument.
 #[must_use]
 pub fn codex_call(r: &Record<'_>) -> Option<CodexCall> {

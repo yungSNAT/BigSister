@@ -37,9 +37,13 @@ jobs:
           tool: cargo-llvm-cov@0.9.1
           fallback: none
       # rustup installs the toolchain pinned in rust-toolchain.toml.
+      - name: Install the Rust toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Check the crate
         run: |
-          rustup toolchain install
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
           if [ "$RUNNER_OS" != macOS ]; then
@@ -171,12 +175,20 @@ jobs:
       - name: Link the C runtime statically
         if: endsWith(matrix.target, '-windows-msvc')
         run: echo "RUSTFLAGS=-C target-feature=+crt-static" >> "$GITHUB_ENV"
-      - name: Test and build for the target
+      - name: Install the Rust toolchain and target
         env:
           TARGET: ${{ matrix.target }}
         run: |
           rustup toolchain install
           rustup target add "$TARGET"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: ${{ matrix.target }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Test and build for the target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
           cargo test --locked --target "$TARGET"
           cargo build --locked --release --target "$TARGET"
           "target/$TARGET/release/bigsister" --version

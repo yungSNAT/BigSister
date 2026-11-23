@@ -56,6 +56,13 @@ pub struct Rereads {
     unread: Vec<(Agent, &'static str, u64)>,
 }
 
+fn rereads_prefilter(s: &Session, line: &str) -> bool {
+    match s.agent {
+        Agent::Codex => line.contains("\"type\":\"compacted\"") || super::tool_prefilter(s, line),
+        _ => line.contains("\"compact_boundary\"") || super::tool_prefilter(s, line),
+    }
+}
+
 impl Detector for Rereads {
     fn agents(&self) -> &'static [Agent] {
         &[
@@ -80,6 +87,10 @@ impl Detector for Rereads {
                     || self.codex.wants(line)
             }
         }
+    }
+
+    fn prefilter(&self) -> Option<crate::scan::Prefilter> {
+        Some(crate::scan::Prefilter::Superset(rereads_prefilter))
     }
 
     fn begin(&mut self, _s: &Session) {
