@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use jiff::Timestamp;
+use rayon::prelude::*;
 use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
 use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
 use serde_json::Value;
@@ -90,6 +91,11 @@ pub trait Detector {
     /// both agents write it. A writer that adds spaces would make every line fail
     /// them; parsing each line first would be the upgrade, at several times the cost.
     fn wants(&self, s: &Session, line: &str) -> bool;
+    /// A stateless line filter for parallel pre-parsing, or `None` when any line may be
+    /// wanted.
+    fn prefilter(&self) -> Option<Prefilter> {
+        None
+    }
     fn begin(&mut self, _s: &Session) {}
     /// A pi session continues from an earlier entry than the last: the state of the path
     /// left behind is dropped, and the path to the branch point is replayed as copies.
@@ -100,6 +106,10 @@ pub trait Detector {
     fn record(&mut self, s: &Session, r: &Record<'_>);
     /// Whether the rest of this file can change nothing the detector reports.
     fn done(&self, _s: &Session) -> bool {
+        false
+    }
+    /// Whether `done` always returns `false`, so the whole file can be prepared in parallel.
+    fn scans_whole_file(&self) -> bool {
         false
     }
     fn end(&mut self, _s: &Session) {}
@@ -201,7 +211,10 @@ pub fn scan(
             // A copied record keeps its time, so reading by each file's first time reads
             // an original before a copy of part of it, whose first record is later. A pi
             // fork's header is written when it is made, after the entries it copies.
-            files.sort_by_cached_key(|p| first_time(p));
+            let mut timed: Vec<(Option<Timestamp>, PathBuf)> =
+                files.into_par_iter().map(|p| (first_time(&p), p)).collect();
+            timed.sort_by_key(|(t, _)| *t);
+            files = timed.into_iter().map(|(_, p)| p).collect();
         }
         scan_files(files, &window, dets, &active, &mut st, &mut earlier);
         out.push(st);
@@ -269,6 +282,372 @@ pub fn scan_memory(
     out
 }
 
+/// Stateless line filter a detector can offer for parallel pre-parsing.
+#[derive(Clone, Copy)]
+pub enum Prefilter {
+    /// Identical to `wants`, so workers can decide membership without re-scanning.
+    Exact(fn(&Session, &str) -> bool),
+    /// A superset of `wants`: matching lines are parsed in parallel, then checked with `wants`.
+    Superset(fn(&Session, &str) -> bool),
+}
+
+/// Files prepared in parallel per batch, bounding peak memory on large corpora.
+const PARALLEL_BATCH: usize = 16;
+/// Maximum prepared events or raw-buffer bytes per file before falling back to streaming.
+const MAX_PREP_EVENTS: usize = 65_536;
+const MAX_PREP_RAW_BYTES: usize = 32 << 20;
+
+/// Why opening or indexing a transcript failed before lines were read.
+enum OpenError {
+    NotZstd,
+    Unreadable(String),
+}
+
+fn open_for_agent(
+    path: &Path,
+    agent: Agent,
+) -> Result<(Box<dyn BufRead>, Option<Rewrite>), OpenError> {
+    let reader = match open(path) {
+        Ok(r) => r,
+        Err(Open::NotZstd) => return Err(OpenError::NotZstd),
+        Err(Open::Io(reason)) => return Err(OpenError::Unreadable(reason)),
+    };
+    match agent {
+        Agent::Gemini => indexed(reader, path)
+            .map(|(r, index)| (r, Some(Rewrite::Gemini(index))))
+            .map_err(OpenError::Unreadable),
+        Agent::Qwen => Ok((reader, Some(Rewrite::Qwen))),
+        _ => Ok((reader, None)),
+    }
+}
+
+fn record_open_error(st: &mut RootStats, err: &OpenError) {
+    match err {
+        OpenError::NotZstd => st.compressed += 1,
+        OpenError::Unreadable(reason) => {
+            st.files += 1;
+            st.count_unreadable(reason.clone());
+        }
+    }
+}
+
+struct PrepareOpts<'a> {
+    agent: Agent,
+    prefilters: Option<&'a [Prefilter]>,
+    prices: &'a Prices,
+    max_events: usize,
+    max_raw_bytes: usize,
+}
+
+enum PreparedFile {
+    OpenErr(OpenError),
+    Empty(u64),
+    TooLarge,
+    Ready(ReadyFile),
+}
+
+struct ReadyFile {
+    session: Session,
+    bad_lines: u64,
+    raw_buf: String,
+    events: Vec<PreparedEvent>,
+    read_err: Option<String>,
+}
+
+enum PreparedEvent {
+    PiParent(Option<String>),
+    Branch(Vec<PreparedEvent>),
+    Timestamp(Timestamp),
+    Candidate(Candidate),
+}
+
+struct Candidate {
+    raw: std::ops::Range<usize>,
+    blob: bool,
+    codex_model: bool,
+    exact_mask: u64,
+    check_mask: u64,
+    reply: Option<Option<f64>>,
+    parsed: Option<Value>,
+}
+
+struct Prep<'a> {
+    session: Session,
+    opts: &'a PrepareOpts<'a>,
+    pi: Option<crate::pi::Tree>,
+    rewrite: Option<Rewrite>,
+    bad_lines: u64,
+    raw_buf: String,
+    events: Vec<PreparedEvent>,
+    event_count: usize,
+}
+
+impl<'a> Prep<'a> {
+    fn new(session: Session, opts: &'a PrepareOpts<'a>, rewrite: Option<Rewrite>) -> Self {
+        Prep {
+            session,
+            opts,
+            pi: (session.agent == Agent::Pi).then(crate::pi::Tree::default),
+            rewrite,
+            bad_lines: 0,
+            raw_buf: String::new(),
+            events: Vec::new(),
+            event_count: 0,
+        }
+    }
+
+    fn over_budget(&self) -> bool {
+        self.event_count > self.opts.max_events || self.raw_buf.len() > self.opts.max_raw_bytes
+    }
+
+    fn drain_into(&mut self, line: &str, feed: &mut Feed<'_>) {
+        self.raw_buf.clear();
+        self.take(line);
+        feed.st.bad_lines += std::mem::take(&mut self.bad_lines);
+        for event in &self.events {
+            feed.apply_event(event, &self.raw_buf);
+        }
+        self.events.clear();
+        self.event_count = 0;
+    }
+
+    fn take(&mut self, line: &str) {
+        if let Some(rewrite) = self.rewrite.as_mut() {
+            let mut out = Vec::new();
+            self.bad_lines += rewrite.read(line, &mut out);
+            for l in &out {
+                let mut events = std::mem::take(&mut self.events);
+                self.push_line(l, &mut events);
+                self.events = events;
+            }
+            return;
+        }
+        let Some(tree) = self.pi.as_mut() else {
+            let mut events = std::mem::take(&mut self.events);
+            self.push_line(line, &mut events);
+            self.events = events;
+            return;
+        };
+        if line.is_empty() {
+            return;
+        }
+        let prev_parent = tree.parent.clone();
+        let Some(read) = tree.read(line) else {
+            self.bad_lines += 1;
+            return;
+        };
+        if tree.parent != prev_parent {
+            self.events
+                .push(PreparedEvent::PiParent(tree.parent.clone()));
+            self.event_count += 1;
+        }
+        if let Some(path) = read.branch {
+            let mut branch = Vec::new();
+            for old in &path {
+                if self.over_budget() {
+                    return;
+                }
+                self.push_line(old, &mut branch);
+            }
+            self.events.push(PreparedEvent::Branch(branch));
+            self.event_count += 1;
+        }
+        let mut events = std::mem::take(&mut self.events);
+        self.push_line(&read.line, &mut events);
+        self.events = events;
+    }
+
+    fn match_masks(&self, line: &str, blob: bool) -> (u64, u64) {
+        let Some(prefilters) = self.opts.prefilters else {
+            return (0, u64::MAX);
+        };
+        let (mut exact, mut check) = (0u64, 0u64);
+        for (slot, pf) in prefilters.iter().enumerate() {
+            let bit = 1u64 << slot;
+            match *pf {
+                Prefilter::Exact(f) => {
+                    if f(&self.session, line) {
+                        if blob {
+                            check |= bit;
+                        } else {
+                            exact |= bit;
+                        }
+                    }
+                }
+                Prefilter::Superset(f) => {
+                    if f(&self.session, line) {
+                        check |= bit;
+                    }
+                }
+            }
+        }
+        (exact, check)
+    }
+
+    fn push_line(&mut self, line: &str, out: &mut Vec<PreparedEvent>) {
+        if line.is_empty() {
+            return;
+        }
+        let blob = self.session.agent == Agent::Claude && line.starts_with(CLAUDE_BLOB_PREFIX);
+        if !blob && !line.ends_with('}') {
+            self.bad_lines += 1;
+            return;
+        }
+        let (exact_mask, check_mask) = self.match_masks(line, blob);
+        let codex_model = self.session.agent == Agent::Codex && codex_model_line(line);
+        let claude_model = if !blob && self.session.agent.claude_shaped() {
+            claude_model_name(line)
+        } else {
+            None
+        };
+        if exact_mask == 0 && check_mask == 0 && !codex_model && claude_model.is_none() {
+            if !blob && push_timestamp(out, line) {
+                self.event_count += 1;
+            }
+            return;
+        }
+        let parsed = line
+            .ends_with('}')
+            .then(|| serde_json::from_str::<Value>(line).ok())
+            .flatten();
+        let reply = claude_model.map(|model| {
+            self.opts.prices.usd_per_mtok(model, || {
+                parsed
+                    .as_ref()
+                    .and_then(crate::detectors::startup::input_tokens)
+            })
+        });
+        let raw = if check_mask != 0 || (exact_mask == 0 && reply.is_none()) {
+            let start = self.raw_buf.len();
+            self.raw_buf.push_str(line);
+            start..self.raw_buf.len()
+        } else {
+            0..0
+        };
+        out.push(PreparedEvent::Candidate(Candidate {
+            raw,
+            blob,
+            codex_model,
+            exact_mask,
+            check_mask,
+            reply,
+            parsed,
+        }));
+        self.event_count += 1;
+    }
+}
+
+fn push_timestamp(out: &mut Vec<PreparedEvent>, line: &str) -> bool {
+    let Some(t) = raw_timestamp(line) else {
+        return false;
+    };
+    match out.last_mut() {
+        Some(PreparedEvent::Timestamp(prev)) => {
+            *prev = t;
+            false
+        }
+        _ => {
+            out.push(PreparedEvent::Timestamp(t));
+            true
+        }
+    }
+}
+
+fn prepare_file(path: &Path, opts: &PrepareOpts<'_>) -> PreparedFile {
+    let (reader, rewrite) = match open_for_agent(path, opts.agent) {
+        Ok(pair) => pair,
+        Err(err) => return PreparedFile::OpenErr(err),
+    };
+    let mut lines = Lines::new(reader);
+    let first = match lines.next_line() {
+        Ok(Some(line)) => line.trim_start_matches('\u{feff}').trim_end().to_owned(),
+        Ok(None) => return PreparedFile::Empty(lines.over_long),
+        Err(e) => return PreparedFile::OpenErr(OpenError::Unreadable(read_error(&e))),
+    };
+    let session = Session {
+        agent: opts.agent,
+        subagent: is_subagent(opts.agent, path, &first),
+    };
+    let mut prep = Prep::new(session, opts, rewrite);
+    prep.take(&first);
+    let read_err = loop {
+        if prep.over_budget() {
+            return PreparedFile::TooLarge;
+        }
+        match lines.next_line() {
+            Ok(Some(line)) => prep.take(line.trim_end()),
+            Ok(None) => break None,
+            Err(e) => break Some(read_error(&e)),
+        }
+    };
+    prep.bad_lines += lines.over_long;
+    PreparedFile::Ready(ReadyFile {
+        session,
+        bad_lines: prep.bad_lines,
+        raw_buf: prep.raw_buf,
+        events: prep.events,
+        read_err,
+    })
+}
+
+fn scan_path(
+    path: &Path,
+    window: &Window<'_>,
+    dets: &mut [Box<dyn Detector>],
+    active: &[usize],
+    st: &mut RootStats,
+    earlier: &mut Earlier,
+) {
+    match open_for_agent(path, st.agent) {
+        Ok((reader, rewrite)) => {
+            st.files += 1;
+            if let Err(e) = scan_file(reader, rewrite, path, window, dets, active, st, earlier) {
+                st.count_unreadable(read_error(&e));
+            }
+        }
+        Err(err) => record_open_error(st, &err),
+    }
+}
+
+fn apply_prepared(
+    path: &Path,
+    file: &PreparedFile,
+    window: &Window<'_>,
+    dets: &mut [Box<dyn Detector>],
+    active: &[usize],
+    st: &mut RootStats,
+    earlier: &mut Earlier,
+) {
+    let ready = match file {
+        PreparedFile::OpenErr(err) => {
+            record_open_error(st, err);
+            return;
+        }
+        PreparedFile::Empty(over_long) => {
+            st.files += 1;
+            st.bad_lines += over_long;
+            return;
+        }
+        PreparedFile::TooLarge => {
+            scan_path(path, window, dets, active, st, earlier);
+            return;
+        }
+        PreparedFile::Ready(ready) => ready,
+    };
+    st.files += 1;
+    st.bad_lines += ready.bad_lines;
+    let session = ready.session;
+    for &i in active {
+        dets[i].begin(&session);
+    }
+    let mut feed = Feed::new(session, window, earlier, dets, active, st);
+    for event in &ready.events {
+        feed.apply_event(event, &ready.raw_buf);
+    }
+    let (uuids, replies) = feed.finish(0, ready.read_err.as_deref());
+    earlier.add(session.agent, path, uuids, replies);
+}
+
 /// Reads each of `files`, a root's transcripts.
 fn scan_files(
     files: Vec<PathBuf>,
@@ -278,34 +657,57 @@ fn scan_files(
     st: &mut RootStats,
     earlier: &mut Earlier,
 ) {
-    for path in files {
-        let reader = match open(&path) {
-            Ok(r) => r,
-            Err(Open::NotZstd) => {
-                st.compressed += 1;
-                continue;
-            }
-            Err(Open::Io(reason)) => {
-                st.files += 1;
-                st.count_unreadable(reason);
-                continue;
-            }
-        };
-        st.files += 1;
-        let (reader, rewrite) = match st.agent {
-            Agent::Gemini => match indexed(reader, &path) {
-                Ok((reader, index)) => (reader, Some(Rewrite::Gemini(index))),
-                Err(reason) => {
-                    st.count_unreadable(reason);
-                    continue;
-                }
-            },
-            Agent::Qwen => (reader, Some(Rewrite::Qwen)),
-            _ => (reader, None),
-        };
-        if let Err(e) = scan_file(reader, rewrite, &path, window, dets, active, st, earlier) {
-            st.count_unreadable(read_error(&e));
+    scan_files_with_budget(
+        files,
+        window,
+        dets,
+        active,
+        st,
+        earlier,
+        MAX_PREP_EVENTS,
+        MAX_PREP_RAW_BYTES,
+    );
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "testable memory budget for parallel prep"
+)]
+fn scan_files_with_budget(
+    files: Vec<PathBuf>,
+    window: &Window<'_>,
+    dets: &mut [Box<dyn Detector>],
+    active: &[usize],
+    st: &mut RootStats,
+    earlier: &mut Earlier,
+    max_events: usize,
+    max_raw_bytes: usize,
+) {
+    if !active.iter().any(|&i| dets[i].scans_whole_file()) {
+        for path in files {
+            scan_path(&path, window, dets, active, st, earlier);
         }
+        return;
+    }
+    let prefilters: Option<Vec<Prefilter>> = (active.len() <= 64)
+        .then(|| active.iter().map(|&i| dets[i].prefilter()).collect())
+        .flatten();
+    let opts = PrepareOpts {
+        agent: st.agent,
+        prefilters: prefilters.as_deref(),
+        prices: window.prices,
+        max_events,
+        max_raw_bytes,
+    };
+    for chunk in files.chunks(PARALLEL_BATCH) {
+        let prepared: Vec<_> = chunk
+            .par_iter()
+            .map(|path| prepare_file(path, &opts))
+            .collect();
+        for (path, file) in chunk.iter().zip(&prepared) {
+            apply_prepared(path, file, window, dets, active, st, earlier);
+        }
+        prepared.into_par_iter().for_each(drop);
     }
 }
 
@@ -622,46 +1024,34 @@ fn scan_file(
         agent,
         subagent: is_subagent(agent, path, &first),
     };
+    let prefilters: Option<Vec<Prefilter>> = (active.len() <= 64)
+        .then(|| active.iter().map(|&i| dets[i].prefilter()).collect())
+        .flatten();
     for &i in active {
         dets[i].begin(&session);
     }
-    let mut feed = Feed {
-        session,
-        since: window.since,
+    let opts = PrepareOpts {
+        agent,
+        prefilters: prefilters.as_deref(),
         prices: window.prices,
-        last_time: None,
-        codex_model: None,
-        uuids: HashSet::new(),
-        replies: HashSet::new(),
-        earlier,
-        pi: (agent == Agent::Pi).then(crate::pi::Tree::default),
-        rewrite,
-        replaying: false,
-        dets,
-        active,
-        st,
+        max_events: usize::MAX,
+        max_raw_bytes: usize::MAX,
     };
-    feed.take(&first);
+    let mut prep = Prep::new(session, &opts, rewrite);
+    let mut feed = Feed::new(session, window, earlier, dets, active, st);
+    prep.drain_into(&first, &mut feed);
     let result = loop {
         if feed.active.iter().all(|&i| feed.dets[i].done(&session)) {
             break Ok(());
         }
         match lines.next_line() {
-            Ok(Some(line)) => feed.take(line.trim_end()),
+            Ok(Some(line)) => prep.drain_into(line.trim_end(), &mut feed),
             Ok(None) => break Ok(()),
             Err(e) => break Err(e),
         }
     };
-    feed.st.bad_lines += lines.over_long;
-    // A Codex turn's model reads its results; a Claude result no reply read stays
-    // unpriced.
-    if agent == Agent::Codex {
-        feed.read_by(feed.codex_price(|| None));
-    }
-    for &i in active {
-        feed.dets[i].end(&session);
-    }
-    earlier.add(agent, path, feed.uuids, feed.replies);
+    let (uuids, replies) = feed.finish(lines.over_long, None);
+    earlier.add(agent, path, uuids, replies);
     result
 }
 
@@ -696,75 +1086,85 @@ struct Feed<'a> {
     /// The message id of each Claude Code reply parsed so far in the file.
     replies: HashSet<String>,
     earlier: &'a Earlier,
-    /// A pi session's tree; `None` for other agents.
-    pi: Option<crate::pi::Tree>,
-    /// A Gemini CLI or Qwen Code session's rewrite; `None` for other agents.
-    rewrite: Option<Rewrite>,
+    /// A pi session's parent file name, when its header named one.
+    pi_parent: Option<String>,
     /// Whether the lines fed are a pi path given again, which count nowhere.
     replaying: bool,
     dets: &'a mut [Box<dyn Detector>],
     active: &'a [usize],
+    wanting_buf: Vec<usize>,
     st: &'a mut RootStats,
 }
 
-impl Feed<'_> {
-    /// Feeds one line, a pi entry as the Claude Code record it is rewritten to, after
-    /// the path it branches from, and a Gemini CLI or Qwen Code line as the records it is
-    /// rewritten to.
-    fn take(&mut self, line: &str) {
-        if let Some(rewrite) = self.rewrite.as_mut() {
-            let mut out = Vec::new();
-            self.st.bad_lines += rewrite.read(line, &mut out);
-            return out.iter().for_each(|l| self.line(l));
+impl<'a> Feed<'a> {
+    fn new(
+        session: Session,
+        window: &Window<'a>,
+        earlier: &'a Earlier,
+        dets: &'a mut [Box<dyn Detector>],
+        active: &'a [usize],
+        st: &'a mut RootStats,
+    ) -> Self {
+        Feed {
+            session,
+            since: window.since,
+            prices: window.prices,
+            last_time: None,
+            codex_model: None,
+            uuids: HashSet::new(),
+            replies: HashSet::new(),
+            earlier,
+            pi_parent: None,
+            replaying: false,
+            dets,
+            active,
+            wanting_buf: Vec::with_capacity(active.len()),
+            st,
         }
-        let Some(tree) = self.pi.as_mut() else {
-            return self.line(line);
-        };
-        if line.is_empty() {
-            return;
-        }
-        let Some(read) = tree.read(line) else {
-            self.st.bad_lines += 1;
-            return;
-        };
-        if let Some(path) = read.branch {
-            for &i in self.active {
-                self.dets[i].branch(&self.session);
-            }
-            self.replaying = true;
-            for old in &path {
-                self.line(old);
-            }
-            self.replaying = false;
-        }
-        self.line(&read.line);
     }
 
-    fn line(&mut self, line: &str) {
-        if line.is_empty() {
-            return;
-        }
-        let blob = self.session.agent == Agent::Claude && line.starts_with(CLAUDE_BLOB_PREFIX);
-        let wanting = self.wanting(line, blob);
-        if blob && wanting.is_empty() {
-            return;
-        }
-        if !line.ends_with('}') {
-            self.st.bad_lines += 1;
-            return;
-        }
-        let reply = if blob { None } else { self.model(line) };
-        if wanting.is_empty() && reply.is_none() {
-            if let Some(t) = raw_timestamp(line) {
-                self.last_time = Some(t);
+    fn apply_event(&mut self, event: &PreparedEvent, raw_buf: &str) {
+        match event {
+            PreparedEvent::PiParent(parent) => self.pi_parent = parent.clone(),
+            PreparedEvent::Branch(path) => {
+                for &i in self.active {
+                    self.dets[i].branch(&self.session);
+                }
+                self.replaying = true;
+                for ev in path {
+                    self.apply_event(ev, raw_buf);
+                }
+                self.replaying = false;
             }
-            return;
+            PreparedEvent::Timestamp(t) => self.last_time = Some(*t),
+            PreparedEvent::Candidate(c) => {
+                let raw = &raw_buf[c.raw.clone()];
+                self.fill_wanting(raw, c.blob, c.exact_mask, c.check_mask);
+                if c.blob && self.wanting_buf.is_empty() {
+                    return;
+                }
+                if c.codex_model
+                    && let Some(value) = c.parsed.as_ref()
+                {
+                    self.codex_model(value);
+                }
+                if self.wanting_buf.is_empty() && c.reply.is_none() {
+                    if let Some(t) = raw_timestamp(raw) {
+                        self.last_time = Some(t);
+                    }
+                    return;
+                }
+                let Some(value) = c.parsed.as_ref() else {
+                    self.st.bad_lines += 1;
+                    return;
+                };
+                self.dispatch_value(value, c.reply);
+            }
         }
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
-            self.st.bad_lines += 1;
-            return;
-        };
-        let Some(copied) = self.copied(&value) else {
+    }
+
+    fn dispatch_value(&mut self, value: &Value, reply: Option<Option<f64>>) {
+        let Some(copied) = self.copied(value) else {
             return;
         };
         // A reply reads the results before it; a copy of one reads nothing.
@@ -781,27 +1181,49 @@ impl Feed<'_> {
             self.last_time = Some(t);
         }
         let rec = Record {
-            value: &value,
+            value,
             in_window: !copied && self.since.zip(self.last_time).is_some_and(|(s, t)| t >= s),
         };
-        for i in wanting {
+        for &i in &self.wanting_buf {
             self.dets[i].record(&self.session, &rec);
         }
     }
-}
 
-impl Feed<'_> {
-    /// The active detectors that want `line`; a request blob goes only to those that
-    /// read request blobs.
-    fn wanting(&self, line: &str, blob: bool) -> Vec<usize> {
-        self.active
-            .iter()
-            .copied()
-            .filter(|&i| {
-                (!blob || self.dets[i].reads_request_blobs())
-                    && self.dets[i].wants(&self.session, line)
-            })
-            .collect()
+    fn finish(
+        mut self,
+        extra_bad: u64,
+        read_err: Option<&str>,
+    ) -> (HashSet<String>, HashSet<String>) {
+        self.st.bad_lines += extra_bad;
+        // A Codex turn's model reads its results; a Claude result no reply read stays
+        // unpriced.
+        if self.session.agent == Agent::Codex {
+            self.read_by(self.codex_price(|| None));
+        }
+        for &i in self.active {
+            self.dets[i].end(&self.session);
+        }
+        if let Some(reason) = read_err {
+            self.st.count_unreadable(reason.to_owned());
+        }
+        (self.uuids, self.replies)
+    }
+
+    /// Fills `self.wanting_buf` with the active detectors that want `line`; a request
+    /// blob goes only to those that read request blobs.
+    fn fill_wanting(&mut self, line: &str, blob: bool, exact_mask: u64, check_mask: u64) {
+        self.wanting_buf.clear();
+        for (slot, &i) in self.active.iter().enumerate() {
+            let exact = slot < 64 && exact_mask & (1u64 << slot) != 0;
+            let check = slot >= 64 || check_mask & (1u64 << slot) != 0;
+            if exact
+                || (check
+                    && (!blob || self.dets[i].reads_request_blobs())
+                    && self.dets[i].wants(&self.session, line))
+            {
+                self.wanting_buf.push(i);
+            }
+        }
     }
 
     /// Whether a parsed record copies an earlier file's record, or `None` when it
@@ -824,22 +1246,21 @@ impl Feed<'_> {
         if !self.uuids.insert(uuid.to_owned()) {
             return None;
         }
-        Some(match &self.pi {
-            None if self.session.agent == Agent::Claude => {
-                let reply = value
-                    .pointer("/message/id")
-                    .and_then(Value::as_str)
-                    .filter(|_| value.get("type").and_then(Value::as_str) == Some("assistant"));
-                self.replies.extend(reply.map(str::to_owned));
-                self.earlier.claude.contains(uuid)
-                    || reply.is_some_and(|id| self.earlier.replies.contains(id))
-            }
-            None => self.earlier.claude.contains(uuid),
-            Some(tree) => tree
-                .parent
-                .as_ref()
+        Some(if self.session.agent == Agent::Pi {
+            self.pi_parent
+                .as_deref()
                 .and_then(|name| self.earlier.pi.get(name))
-                .is_some_and(|uuids| uuids.contains(uuid)),
+                .is_some_and(|uuids| uuids.contains(uuid))
+        } else if self.session.agent == Agent::Claude {
+            let reply = value
+                .pointer("/message/id")
+                .and_then(Value::as_str)
+                .filter(|_| value.get("type").and_then(Value::as_str) == Some("assistant"));
+            self.replies.extend(reply.map(str::to_owned));
+            self.earlier.claude.contains(uuid)
+                || reply.is_some_and(|id| self.earlier.replies.contains(id))
+        } else {
+            self.earlier.claude.contains(uuid)
         })
     }
 
@@ -849,64 +1270,33 @@ impl Feed<'_> {
         }
     }
 
-    /// Finds where a model reads what came before. A Codex model call's usage record,
-    /// and a new turn, which ends the last, are where the turn's model read the results
-    /// not yet read; the detectors are told here. A
-    /// Claude reply reads the results before it: its model's price, if it has one, is
-    /// returned for `line` to pass on once the record is known to be no copy.
-    ///
-    /// shortcut: a Claude reply is found by `"message":{"model":"`, as Claude Code writes
-    /// `model` first in an assistant message, so a reply written otherwise reads nothing
-    /// and its results stay unpriced; parsing every line would be the upgrade, at
-    /// several times the cost. Each reply's uuid is kept to find copies, which adds
-    /// replies no detector reads to the uuids held for the scan.
-    fn model(&mut self, line: &str) -> Option<Option<f64>> {
-        match self.session.agent {
-            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {
-                const KEY: &str = "\"message\":{\"model\":\"";
-                let at = line.find(KEY)?;
-                let rest = &line[at + KEY.len()..];
-                let model = rest.split('"').next().unwrap_or("");
-                // Claude Code writes a synthetic reply itself; no model read anything.
-                (model != "<synthetic>")
-                    .then(|| self.prices.usd_per_mtok(model, || prompt_tokens(line)))
+    fn codex_model(&mut self, v: &Value) {
+        match v.get("type").and_then(Value::as_str) {
+            // Codex writes a model call's usage as the call completes, so the call
+            // read the results before it, in a prompt of `input_tokens`.
+            //
+            // shortcut: a tool can finish whilst the call that asked for it is
+            // still writing, so its result comes before that call's usage record
+            // and is priced at a prompt that lacks it (6 of 92,410 results in
+            // 895 real rollouts in November 2026). Only a tier boundary between
+            // the 2 prompts changes the price; pairing each result's call_id
+            // with the call that made it would be the upgrade.
+            Some("token_usage_record") => {
+                let price = self.codex_price(|| {
+                    v.pointer("/payload/usage/input_tokens")
+                        .and_then(Value::as_u64)
+                });
+                self.read_by(price);
             }
-            Agent::Codex => {
-                if !line.contains("\"type\":\"turn_context\"")
-                    && !line.contains("\"type\":\"token_usage_record\"")
-                {
-                    return None;
-                }
-                let v = serde_json::from_str::<Value>(line).ok()?;
-                match v.get("type").and_then(Value::as_str) {
-                    // Codex writes a model call's usage as the call completes, so the call
-                    // read the results before it, in a prompt of `input_tokens`.
-                    //
-                    // shortcut: a tool can finish whilst the call that asked for it is
-                    // still writing, so its result comes before that call's usage record
-                    // and is priced at a prompt that lacks it (6 of 92,410 results in
-                    // 895 real rollouts in November 2026). Only a tier boundary between
-                    // the 2 prompts changes the price; pairing each result's call_id
-                    // with the call that made it would be the upgrade.
-                    Some("token_usage_record") => {
-                        let price = self.codex_price(|| {
-                            v.pointer("/payload/usage/input_tokens")
-                                .and_then(Value::as_u64)
-                        });
-                        self.read_by(price);
-                    }
-                    Some("turn_context") => {
-                        let ended = self.codex_price(|| None);
-                        self.read_by(ended);
-                        self.codex_model = v
-                            .pointer("/payload/model")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned);
-                    }
-                    _ => {}
-                }
-                None
+            Some("turn_context") => {
+                let ended = self.codex_price(|| None);
+                self.read_by(ended);
+                self.codex_model = v
+                    .pointer("/payload/model")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
             }
+            _ => {}
         }
     }
 
@@ -918,11 +1308,17 @@ impl Feed<'_> {
     }
 }
 
-/// The prompt a Claude reply was sent with, in tokens, as
-/// [`crate::detectors::startup::input_tokens`] counts it. Parses the line, so it is
-/// asked for only by a model priced by prompt size.
-fn prompt_tokens(line: &str) -> Option<u64> {
-    crate::detectors::startup::input_tokens(&serde_json::from_str(line).ok()?)
+fn claude_model_name(line: &str) -> Option<&str> {
+    const KEY: &str = "\"message\":{\"model\":\"";
+    let at = line.find(KEY)?;
+    let rest = &line[at + KEY.len()..];
+    let model = rest.split('"').next().unwrap_or("");
+    // Claude Code writes a synthetic reply itself; no model read anything.
+    (model != "<synthetic>").then_some(model)
+}
+
+fn codex_model_line(line: &str) -> bool {
+    line.contains("\"type\":\"turn_context\"") || line.contains("\"type\":\"token_usage_record\"")
 }
 
 /// A record's top-level `timestamp`, read without parsing the line: Codex writes
@@ -1171,5 +1567,537 @@ mod tests {
         assert_eq!(next.as_deref(), Some("{\"a\":1}\n"));
         assert_eq!(lines.over_long, 1);
         assert!(lines.next_line().expect("read").is_none());
+    }
+
+    fn test_dir(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp")
+            .join(format!("bigsister-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn parallel_scan_preserves_counts_errors_and_order_across_files() {
+        let dir = test_dir("par");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp folder");
+        fs::write(
+            dir.join("a.jsonl"),
+            concat!(
+                r#"{"type":"assistant","uuid":"u1","timestamp":"2026-11-08T01:00:00Z","message":{"model":"claude-sonnet-4-6"}}"#,
+                "\n\nnot-json\n",
+                r#"{"type":"user","uuid":"u2","timestamp":"2026-11-08T01:01:00Z","message":{}}"#,
+                "\n",
+            ),
+        )
+        .expect("a.jsonl");
+        fs::write(dir.join("b.jsonl"), "").expect("empty file");
+        fs::write(dir.join("c.jsonl.zst"), b"not-zstd").expect("non-zstd");
+        fs::write(
+            dir.join("d.jsonl.zst"),
+            [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00, 0x01],
+        )
+        .expect("corrupt zstd");
+
+        let prices = Prices::bundled();
+        let since = Some(Timestamp::MIN);
+        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(WholeCount(0))];
+        let stats = scan(&[(Agent::Claude, dir.clone())], since, &prices, &mut dets);
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].files, 3);
+        assert_eq!(stats[0].compressed, 1);
+        assert_eq!(stats[0].unreadable, 1);
+        assert_eq!(stats[0].bad_lines, 1);
+        assert_eq!(counted(&dets), 2);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn early_finish_and_pi_parallel_paths_record_errors_and_bad_lines() {
+        let dir = test_dir("par-err");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("early")).expect("temp folder");
+        fs::create_dir_all(dir.join("pi")).expect("temp folder");
+        fs::write(dir.join("early").join("c.jsonl.zst"), b"not-zstd").expect("non-zstd");
+        fs::write(
+            dir.join("early").join("d.jsonl.zst"),
+            [0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x00, 0x01],
+        )
+        .expect("corrupt zstd");
+        fs::write(
+            dir.join("pi").join("p.jsonl"),
+            concat!(
+                r#"{"type":"session","id":"s","timestamp":"2026-11-09T06:00:00.000Z"}"#,
+                "\n\n{bad\n",
+                r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-11-09T06:00:01.000Z","message":{"role":"user","content":"hi"}}"#,
+                "\n",
+            ),
+        )
+        .expect("p.jsonl");
+
+        let prices = Prices::bundled();
+        let since = Some(Timestamp::MIN);
+        let programs = std::rc::Rc::new(crate::programs::Programs::from_env());
+        let rc_prices = std::rc::Rc::new(Prices::bundled());
+        let mut early =
+            crate::detectors::build(crate::cli::Command::Startup, &programs, &rc_prices);
+        let early_stats = scan(
+            &[(Agent::Claude, dir.join("early"))],
+            since,
+            &prices,
+            &mut early,
+        );
+        assert_eq!(early_stats[0].files, 1);
+        assert_eq!(early_stats[0].compressed, 1);
+        assert_eq!(early_stats[0].unreadable, 1);
+
+        let mut pi_dets =
+            crate::detectors::build(crate::cli::Command::Tools, &programs, &rc_prices);
+        let pi_stats = scan(&[(Agent::Pi, dir.join("pi"))], since, &prices, &mut pi_dets);
+        assert_eq!(pi_stats[0].files, 1);
+        assert_eq!(pi_stats[0].bad_lines, 1);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn streaming_scan_surfaces_mid_file_read_error() {
+        struct FailAfterFirst(bool);
+        impl Read for FailAfterFirst {
+            fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+                if !self.0 {
+                    self.0 = true;
+                    let line = b"{\"type\":\"summary\"}\n";
+                    buf[..line.len()].copy_from_slice(line);
+                    Ok(line.len())
+                } else {
+                    Err(io::Error::other("broken stream"))
+                }
+            }
+        }
+        let mut st = RootStats::new(Agent::Claude, PathBuf::new());
+        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count::default())];
+        let err = scan_file(
+            Box::new(BufReader::new(FailAfterFirst(false))),
+            None,
+            Path::new("s.jsonl"),
+            &Window {
+                since: Some(Timestamp::MIN),
+                prices: &Prices::bundled(),
+            },
+            &mut dets,
+            &[0],
+            &mut st,
+            &mut Earlier::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+    }
+
+    #[test]
+    fn exact_prefilters_match_detector_wants() {
+        let programs = std::rc::Rc::new(crate::programs::Programs::from_env());
+        let prices = std::rc::Rc::new(Prices::bundled());
+        let dets = crate::detectors::build(crate::cli::Command::All, &programs, &prices);
+        let session = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let samples = [
+            r#"{"type":"assistant","message":{}}"#,
+            r#"{"type":"attachment","attachment":{"type":"hook_success"}}"#,
+            r#"{"type":"api-request-shape"}"#,
+            r#"{"type":"summary"}"#,
+        ];
+        for d in &dets {
+            if let Some(Prefilter::Exact(f)) = d.prefilter() {
+                for line in samples {
+                    assert_eq!(f(&session, line), d.wants(&session, line));
+                }
+            }
+        }
+    }
+
+    struct WholeCount(u64);
+    impl Detector for WholeCount {
+        fn agents(&self) -> &'static [Agent] {
+            &[Agent::Claude, Agent::Codex]
+        }
+        fn scans_whole_file(&self) -> bool {
+            true
+        }
+        fn wants(&self, _s: &Session, _line: &str) -> bool {
+            true
+        }
+        fn record(&mut self, _s: &Session, _r: &Record<'_>) {
+            self.0 += 1;
+        }
+        fn section(&self, _opts: &Opts) -> Section {
+            Section {
+                summary: vec![("records".to_owned(), self.0.into())],
+                ..Section::default()
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_prep_coalesces_timestamps_and_streams_when_over_budget() {
+        let dir = test_dir("budget");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp folder");
+        let body = [
+            r#"{"type":"progress","timestamp":"2026-11-08T01:00:00Z"}"#,
+            r#"{"type":"progress","timestamp":"2026-11-08T02:00:00Z"}"#,
+            r#"{"type":"assistant","uuid":"u1","message":{"model":"claude-sonnet-4-6"}}"#,
+            r#"{"type":"assistant","uuid":"u2","message":{"model":"claude-sonnet-4-6"}}"#,
+        ]
+        .join("\n");
+        let file = dir.join("a.jsonl");
+        fs::write(&file, format!("{body}\n")).expect("write");
+
+        let prices = Prices::bundled();
+        let window = Window {
+            since: parse_ts("2026-11-08T01:30:00Z"),
+            prices: &prices,
+        };
+        let programs = std::rc::Rc::new(crate::programs::Programs::from_env());
+        let rc_prices = std::rc::Rc::new(Prices::bundled());
+        let mut dets = crate::detectors::build(crate::cli::Command::Models, &programs, &rc_prices);
+        let mut st = RootStats::new(Agent::Claude, dir.clone());
+        let mut earlier = Earlier::default();
+        scan_files_with_budget(
+            vec![file],
+            &window,
+            &mut dets,
+            &[0],
+            &mut st,
+            &mut earlier,
+            1,
+            MAX_PREP_RAW_BYTES,
+        );
+        assert_eq!(st.files, 1);
+        assert_eq!(st.unreadable, 0);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn more_than_64_active_detectors_do_not_overflow_bitmasks() {
+        let prices = Prices::bundled();
+        let mut dets: Vec<Box<dyn Detector>> = (0..65)
+            .map(|_| Box::new(WholeCount(0)) as Box<dyn Detector>)
+            .collect();
+        let files = [Memory {
+            agent: Agent::Claude,
+            path: "s.jsonl",
+            text: r#"{"type":"summary"}"#,
+        }];
+        let stats = scan_memory(&files, "mem", Some(Timestamp::MIN), &prices, &mut dets);
+        assert_eq!(stats[0].files, 1);
+        assert_eq!(counted(&dets[64..]), 1);
+    }
+
+    struct StopAfterOne(u64);
+    impl Detector for StopAfterOne {
+        fn agents(&self) -> &'static [Agent] {
+            &[Agent::Claude]
+        }
+        fn wants(&self, _s: &Session, _line: &str) -> bool {
+            true
+        }
+        fn record(&mut self, _s: &Session, _r: &Record<'_>) {
+            self.0 += 1;
+        }
+        fn done(&self, _s: &Session) -> bool {
+            self.0 >= 1
+        }
+        fn section(&self, _opts: &Opts) -> Section {
+            Section {
+                summary: vec![("seen".to_owned(), self.0.into())],
+                ..Section::default()
+            }
+        }
+    }
+
+    struct PriceLog(Vec<Option<f64>>);
+    impl Detector for PriceLog {
+        fn agents(&self) -> &'static [Agent] {
+            &[Agent::Codex]
+        }
+        fn wants(&self, _s: &Session, _line: &str) -> bool {
+            true
+        }
+        fn record(&mut self, _s: &Session, _r: &Record<'_>) {}
+        fn read_by(&mut self, _s: &Session, p: Option<f64>) {
+            self.0.push(p);
+        }
+        fn section(&self, _opts: &Opts) -> Section {
+            Section {
+                summary: vec![("calls".to_owned(), (self.0.len() as u64).into())],
+                ..Section::default()
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_done_detector_and_spaced_codex_rules_match_sequential() {
+        let dir = test_dir("s3");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp folder");
+        fs::write(dir.join("s.jsonl"), "{\"type\":\"summary\"}\nnot-json\n").expect("write");
+        let prices = Prices::bundled();
+        let mut stop: Vec<Box<dyn Detector>> = vec![Box::new(StopAfterOne(0))];
+        let st = scan(
+            &[(Agent::Claude, dir.clone())],
+            Some(Timestamp::MIN),
+            &prices,
+            &mut stop,
+        );
+        assert_eq!(st[0].bad_lines, 0);
+        assert_eq!(counted(&stop), 1);
+
+        let mut pl: Vec<Box<dyn Detector>> = vec![Box::new(PriceLog(Vec::new()))];
+        let cm = [Memory {
+            agent: Agent::Codex,
+            path: "c.jsonl",
+            text: "{\"type\": \"turn_context\", \"payload\": {\"model\": \"gpt-5.4\"}}\n",
+        }];
+        let _ = scan_memory(&cm, "mem", Some(Timestamp::MIN), &prices, &mut pl);
+        assert_eq!(counted(&pl), 1);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    struct DynamicBlob {
+        enabled: bool,
+        seen: Vec<bool>,
+    }
+    impl Detector for DynamicBlob {
+        fn agents(&self) -> &'static [Agent] {
+            &[Agent::Claude]
+        }
+        fn scans_whole_file(&self) -> bool {
+            true
+        }
+        fn prefilter(&self) -> Option<Prefilter> {
+            Some(Prefilter::Superset(|_, line| line.contains("\"keep\"")))
+        }
+        fn reads_request_blobs(&self) -> bool {
+            self.enabled
+        }
+        fn begin(&mut self, _s: &Session) {
+            self.enabled = true;
+        }
+        fn wants(&self, _s: &Session, line: &str) -> bool {
+            line.contains("\"keep\"")
+        }
+        fn record(&mut self, _s: &Session, r: &Record<'_>) {
+            self.seen.push(r.in_window);
+        }
+        fn section(&self, _opts: &Opts) -> Section {
+            Section {
+                summary: vec![
+                    ("seen".to_owned(), (self.seen.len() as u64).into()),
+                    (
+                        "in_window".to_owned(),
+                        (self.seen.iter().filter(|&&w| w).count() as u64).into(),
+                    ),
+                ],
+                ..Section::default()
+            }
+        }
+    }
+
+    fn assert_dynamic_blob(dets: &[Box<dyn Detector>]) {
+        let opts = Opts {
+            limit: 0,
+            paths: false,
+            home: None,
+            usd_per_mtok: None,
+            prices_file: None,
+        };
+        assert_eq!(
+            dets[0].section(&opts).summary,
+            vec![
+                ("seen".to_owned(), 1u64.into()),
+                ("in_window".to_owned(), 0u64.into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn dynamic_blob_detector_receives_wanted_blobs_and_ignores_rejected_ones() {
+        let blob_text = concat!(
+            r#"{"type":"api-request-blob","timestamp":"2026-11-10T00:00:00Z","drop":true}"#,
+            "\n",
+            r#"{"type":"api-request-blob","broken":true"#,
+            "\n",
+            r#"{"type":"api-request-blob","keep":true}"#,
+            "\n",
+        );
+        let prices = Prices::bundled();
+        let cutoff = parse_ts("2026-11-09T00:00:00Z");
+        let mut mem_dets: Vec<Box<dyn Detector>> = vec![Box::new(DynamicBlob {
+            enabled: false,
+            seen: Vec::new(),
+        })];
+        let mem = [Memory {
+            agent: Agent::Claude,
+            path: "b.jsonl",
+            text: blob_text,
+        }];
+        assert_eq!(
+            scan_memory(&mem, "mem", cutoff, &prices, &mut mem_dets)[0].bad_lines,
+            0
+        );
+        assert_dynamic_blob(&mem_dets);
+
+        let dir = test_dir("blob");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp folder");
+        fs::write(dir.join("b.jsonl"), blob_text).expect("blob file");
+        let mut disk_dets: Vec<Box<dyn Detector>> = vec![Box::new(DynamicBlob {
+            enabled: false,
+            seen: Vec::new(),
+        })];
+        let st = scan(
+            &[(Agent::Claude, dir.clone())],
+            cutoff,
+            &prices,
+            &mut disk_dets,
+        );
+        assert_eq!(st[0].bad_lines, 0);
+        assert_dynamic_blob(&disk_dets);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn pi_branch_events_count_toward_prep_budget() {
+        let dir = test_dir("pi-budget");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp folder");
+        let path = dir.join("p.jsonl");
+        let pi_text = concat!(
+            r#"{"type":"session","version":3,"id":"s1","timestamp":"2026-11-08T01:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-11-08T01:01:00Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"b","parentId":"a","timestamp":"2026-11-08T01:02:00Z","message":{"role":"assistant","model":"claude-sonnet-4-6","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0},"content":[{"type":"text","text":"one"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"c","parentId":"b","timestamp":"2026-11-08T01:03:00Z","message":{"role":"user","content":[{"type":"text","text":"next"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"d","parentId":"b","timestamp":"2026-11-08T01:04:00Z","message":{"role":"assistant","model":"claude-sonnet-4-6","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0},"content":[{"type":"text","text":"two"}]}}"#,
+            "\n",
+        );
+        fs::write(&path, pi_text).expect("pi file");
+        let prices = Prices::bundled();
+        let opts = PrepareOpts {
+            agent: Agent::Pi,
+            prefilters: None,
+            prices: &prices,
+            max_events: 4,
+            max_raw_bytes: MAX_PREP_RAW_BYTES,
+        };
+        assert!(matches!(prepare_file(&path, &opts), PreparedFile::TooLarge));
+        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(
+            crate::detectors::models::Models::new(std::rc::Rc::new(Prices::bundled())),
+        )];
+        let mut st = RootStats::new(Agent::Pi, dir.clone());
+        let mut earlier = Earlier::default();
+        let window = Window {
+            since: Some(Timestamp::MIN),
+            prices: &prices,
+        };
+        scan_files_with_budget(
+            vec![path],
+            &window,
+            &mut dets,
+            &[0],
+            &mut st,
+            &mut earlier,
+            4,
+            MAX_PREP_RAW_BYTES,
+        );
+        assert_eq!(st.files, 1);
+        assert_eq!(st.bad_lines, 0);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    struct Trace(Vec<(String, bool)>);
+    impl Detector for Trace {
+        fn agents(&self) -> &'static [Agent] {
+            &[Agent::Claude]
+        }
+        fn scans_whole_file(&self) -> bool {
+            true
+        }
+        fn wants(&self, _s: &Session, _line: &str) -> bool {
+            true
+        }
+        fn record(&mut self, _s: &Session, r: &Record<'_>) {
+            let id = r
+                .value
+                .get("uuid")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned();
+            self.0.push((id, r.in_window));
+        }
+        fn section(&self, _opts: &Opts) -> Section {
+            Section {
+                summary: self
+                    .0
+                    .iter()
+                    .map(|(id, w)| (id.clone(), (*w).into()))
+                    .collect(),
+                ..Section::default()
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_scan_preserves_cross_file_order_and_deduplication_trace() {
+        let dir = test_dir("trace");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp folder");
+        fs::write(
+            dir.join("a-later.jsonl"),
+            concat!(
+                r#"{"type":"assistant","uuid":"u1","timestamp":"2026-11-08T02:00:00Z","message":{"id":"m1"}}"#,
+                "\n",
+                r#"{"type":"assistant","uuid":"u3","timestamp":"2026-11-08T02:01:00Z","message":{"id":"m1"}}"#,
+                "\n",
+                r#"{"type":"user","uuid":"u2","timestamp":"2026-11-08T02:02:00Z","message":{}}"#,
+                "\n",
+            ),
+        )
+        .expect("later");
+        fs::write(
+            dir.join("z-earlier.jsonl"),
+            r#"{"type":"assistant","uuid":"u1","timestamp":"2026-11-08T01:00:00Z","message":{"id":"m1"}}"#,
+        )
+        .expect("earlier");
+        let prices = Prices::bundled();
+        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Trace(Vec::new()))];
+        let _ = scan(
+            &[(Agent::Claude, dir.clone())],
+            Some(Timestamp::MIN),
+            &prices,
+            &mut dets,
+        );
+        let opts = Opts {
+            limit: 0,
+            paths: false,
+            home: None,
+            usd_per_mtok: None,
+            prices_file: None,
+        };
+        assert_eq!(
+            dets[0].section(&opts).summary,
+            vec![
+                ("u1".to_owned(), true.into()),
+                ("u1".to_owned(), false.into()),
+                ("u3".to_owned(), false.into()),
+                ("u2".to_owned(), true.into()),
+            ]
+        );
+        fs::remove_dir_all(&dir).expect("clean up");
     }
 }

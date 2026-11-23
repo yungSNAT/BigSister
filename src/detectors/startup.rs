@@ -57,6 +57,14 @@ impl Detector for Startup {
         shape || line.contains("\"type\":\"attachment\"") || line.contains("\"type\":\"assistant\"")
     }
 
+    fn prefilter(&self) -> Option<crate::scan::Prefilter> {
+        Some(crate::scan::Prefilter::Superset(|_, line| {
+            line.contains("\"type\":\"api-request-shape\"")
+                || line.contains("\"type\":\"attachment\"")
+                || line.contains("\"type\":\"assistant\"")
+        }))
+    }
+
     fn done(&self, s: &Session) -> bool {
         s.subagent || self.cur.replied || self.cur.started_in_window == Some(false)
     }

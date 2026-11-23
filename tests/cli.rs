@@ -3840,3 +3840,12 @@ fn output_that_cannot_be_written_fails_naming_the_error() {
         "{stderr}"
     );
 }
+
+#[test]
+fn completions_print_a_script_for_each_supported_shell() {
+    for shell in ["bash", "elvish", "fish", "powershell", "zsh"] {
+        let (code, stdout, stderr) = run(&["completions", shell]);
+        assert_eq!(code, 0, "{shell}: {stderr}");
+        assert!(stdout.contains("bigsister"), "{shell}: {stdout}");
+    }
+}

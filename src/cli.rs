@@ -125,6 +125,11 @@ pub enum Command {
     Models,
     /// Hook durations, cancellations and timeouts (Claude)
     Hooks,
+    /// Generate shell completions for bash, elvish, fish, powershell or zsh
+    Completions {
+        /// Shell to generate completions for
+        shell: clap_complete::Shell,
+    },
 }
 
 /// Agent selection for `--agent`.

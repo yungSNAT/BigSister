@@ -3,6 +3,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() -> ExitCode {
     let cli = bigsister::cli::Cli::parse();
     let out = match bigsister::run(&cli) {

@@ -5,17 +5,32 @@ edition = "2024"
 rust-version = "1.99"
 description = "Find where your coding agent's tokens go, from its own transcripts."
 license = "Apache-2.0"
+repository = "https://github.com/yungSNAT/BigSister"
 publish = false
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/bigsister-{ version }-{ target }.tar.gz"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.'cfg(target_os = "windows")']
+pkg-url = "{ repo }/releases/download/v{ version }/bigsister-{ version }-{ target }.zip"
+pkg-fmt = "zip"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 jiff = { version = "1.0.0", default-features = false, features = ["std", "tz-system", "tzdb-bundle-platform", "tzdb-zoneinfo"] }
+rayon = "1"
 regex = "1"
 ruzstd = "0.9"
 rusqlite = { version = "0.42.0", features = ["bundled", "hooks", "serialize"] }
 serde = "1"
 serde_json = { version = "1", features = ["raw_value"] }
 sha2 = { version = "0.11", default-features = false }
+
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", features = ["no_thp"] }
 
 [dev-dependencies]
 csv = "1"
@@ -27,3 +42,4 @@ too_many_lines = "warn"
 [profile.release]
 lto = true
 codegen-units = 1
+strip = true
