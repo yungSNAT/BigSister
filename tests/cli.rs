@@ -1118,6 +1118,34 @@ fn rereads_count_files_read_again_after_compaction() {
 }
 
 #[test]
+fn rereads_split_compactions_by_their_recorded_trigger() {
+    let doc = report("rereads", &[]);
+    let tables = doc["detectors"]["rereads"]["tables"]
+        .as_array()
+        .expect("tables");
+    let triggers = tables
+        .iter()
+        .find(|t| t["title"] == "By compaction trigger")
+        .and_then(|t| t["rows"].as_array())
+        .expect("a table by compaction trigger");
+    let claude = find(
+        triggers,
+        &[("agent", json!("claude")), ("trigger", json!("auto"))],
+    );
+    assert_eq!(claude["compactions"], 1);
+    assert_eq!(claude["median_pre_compaction_tokens"], 100);
+    assert_eq!(claude["max_pre_compaction_tokens"], 100);
+    assert_eq!(claude["rereads"], 2);
+    assert_eq!(claude["reread_chars"], 33);
+    assert_eq!(claude["reread_tokens_est"], 9);
+    // Codex records no trigger and no token count for its compactions.
+    let codex = find(triggers, &[("agent", json!("codex"))]);
+    assert_eq!(codex["trigger"], "not recorded");
+    assert_eq!(codex["rereads"], 1);
+    assert_eq!(codex["max_pre_compaction_tokens"], Value::Null);
+}
+
+#[test]
 fn rereads_hide_paths_without_the_flag() {
     let doc = report("rereads", &[]);
     assert_eq!(

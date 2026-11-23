@@ -427,6 +427,136 @@ mod tests {
         assert_eq!((c.rereads, c.reread_chars), (1, 0));
     }
 
+    /// The rows of `rereads`' table titled `title`, each as column name and value.
+    fn table_rows(d: &Rereads, title: &str) -> Vec<Vec<(&'static str, Value)>> {
+        let opts = Opts {
+            limit: 100,
+            paths: false,
+            home: None,
+            usd_per_mtok: None,
+            prices_file: None,
+        };
+        let section = d.section(&opts);
+        let table = section
+            .tables
+            .iter()
+            .find(|t| t.title == title)
+            .unwrap_or_else(|| panic!("no table {title}"));
+        table
+            .rows
+            .iter()
+            .map(|row| {
+                table
+                    .columns
+                    .iter()
+                    .copied()
+                    .zip(row.iter().cloned())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn rereads_count_toward_the_trigger_of_the_latest_compaction() {
+        let read = |id| claude_tool_use(id, "Read", &json!({"file_path": "/work/a.md"}));
+        let boundary = |meta: Value| {
+            json!({"type": "system", "subtype": "compact_boundary", "compactMetadata": meta})
+                .to_string()
+        };
+        let lines: Vec<(bool, String)> = [
+            (true, read("a")),
+            // Out of the window: sets the trigger but counts no compaction.
+            (
+                false,
+                boundary(json!({"trigger": "manual", "preTokens": 1})),
+            ),
+            (
+                true,
+                boundary(json!({"trigger": "manual", "preTokens": 5000})),
+            ),
+            (true, read("b")),
+            (true, claude_tool_result("b", "12345678")),
+            (
+                true,
+                boundary(json!({"trigger": "auto", "preTokens": 9000})),
+            ),
+            (true, read("c")),
+            (
+                true,
+                boundary(json!({"trigger": "manual", "preTokens": 7000})),
+            ),
+            (true, read("d")),
+            // No metadata, as pi's, OpenCode's and Gemini's boundaries have.
+            (
+                true,
+                json!({"type": "system", "subtype": "compact_boundary"}).to_string(),
+            ),
+            (true, read("e")),
+        ]
+        .into_iter()
+        .collect();
+        let s = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let mut d = Rereads::default();
+        replay(&mut d, &s, &lines);
+        let rows = table_rows(&d, "By compaction trigger");
+        let pick = |row: &Vec<(&str, Value)>, keys: &[&str]| -> Vec<Value> {
+            keys.iter()
+                .map(|k| {
+                    row.iter()
+                        .find(|(c, _)| c == k)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(Value::Null)
+                })
+                .collect()
+        };
+        let keys = [
+            "trigger",
+            "compactions",
+            "median_pre_compaction_tokens",
+            "max_pre_compaction_tokens",
+            "rereads",
+            "reread_chars",
+            "rereads_per_compaction",
+        ];
+        let got: Vec<Vec<Value>> = rows.iter().map(|r| pick(r, &keys)).collect();
+        assert_eq!(
+            got,
+            vec![
+                // The median of 2 values is the lower, by nearest rank.
+                vec![
+                    json!("manual"),
+                    json!(2),
+                    json!(5000),
+                    json!(7000),
+                    json!(2),
+                    json!(8),
+                    json!(1.0)
+                ],
+                vec![
+                    json!("auto"),
+                    json!(1),
+                    json!(9000),
+                    json!(9000),
+                    json!(1),
+                    json!(0),
+                    json!(1.0)
+                ],
+                vec![
+                    json!("not recorded"),
+                    json!(1),
+                    Value::Null,
+                    Value::Null,
+                    json!(1),
+                    json!(0),
+                    json!(1.0)
+                ],
+            ]
+        );
+    }
+
     #[test]
     fn reads_with_no_path_are_not_reads() {
         let read = |id| claude_tool_use(id, "Read", &json!({"file_path": ""}));
