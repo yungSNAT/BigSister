@@ -1148,12 +1148,13 @@ fn rereads_split_compactions_by_their_recorded_trigger() {
 #[test]
 fn rereads_hide_paths_without_the_flag() {
     let doc = report("rereads", &[]);
-    assert_eq!(
-        doc["detectors"]["rereads"]["tables"]
-            .as_array()
-            .map(Vec::len),
-        Some(1)
-    );
+    let titles: Vec<&str> = doc["detectors"]["rereads"]["tables"]
+        .as_array()
+        .expect("tables")
+        .iter()
+        .map(|t| t["title"].as_str().unwrap_or(""))
+        .collect();
+    assert_eq!(titles, ["By agent and scope", "By compaction trigger"]);
 }
 
 #[test]
