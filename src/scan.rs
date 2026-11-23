@@ -1570,10 +1570,9 @@ mod tests {
     }
 
     fn test_dir(name: &str) -> PathBuf {
-        std::env::current_exe()
-            .expect("test binary")
-            .parent()
-            .expect("test dir")
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-tmp")
             .join(format!("bigsister-{name}-{}", std::process::id()))
     }
 
