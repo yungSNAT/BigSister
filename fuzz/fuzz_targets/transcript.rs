@@ -45,6 +45,7 @@ fuzz_target!(|data: &[u8]| {
     let opts = Opts {
         limit: 20,
         paths: true,
+        by_branch: true,
         home: None,
         usd_per_mtok: None,
         prices_file: None,
