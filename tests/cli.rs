@@ -1850,6 +1850,54 @@ fn probe_inputs_never_reach_the_output() {
     );
 }
 
+/// Each column's sum over every row of a section's table, from a report with no row cut.
+fn column_sum(doc: &Value, section: &str, table: usize, column: &str) -> f64 {
+    rows(doc, section, table)
+        .iter()
+        .map(|r| r[column].as_f64().unwrap_or(0.0))
+        .sum()
+}
+
+#[test]
+fn all_ranks_figures_of_one_basis_by_dollars_over_every_row() {
+    let whole = report("all", &["--limit", "1000"]);
+    // --limit cuts the rows shown, not the rows a figure sums.
+    let cut = report("all", &["--limit", "1"]);
+    let ranked = rows(&whole, "ranked", 0);
+    let figures = [
+        ("polls", 0, "poll_tokens_est", "poll_usd_est"),
+        ("rereads", 0, "reread_tokens_est", "reread_usd_est"),
+        ("schemas", 0, "idle_tokens_est", "idle_usd_est"),
+        ("schemas", 1, "idle_tokens_est", "idle_usd_est"),
+    ];
+    let mut want: Vec<(f64, f64)> = figures
+        .iter()
+        .map(|&(section, table, tokens, usd)| {
+            (
+                (column_sum(&whole, section, table, usd) * 100.0).round() / 100.0,
+                column_sum(&whole, section, table, tokens),
+            )
+        })
+        .filter(|&(_, tokens)| tokens > 0.0)
+        .collect();
+    want.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.total_cmp(&a.1)));
+    let got: Vec<(f64, f64)> = ranked
+        .iter()
+        .map(|r| {
+            (
+                r["waste_usd_est"].as_f64().unwrap_or(-1.0),
+                r["waste_tokens_est"].as_f64().unwrap_or(-1.0),
+            )
+        })
+        .collect();
+    assert!(!got.is_empty());
+    assert_eq!(got, want);
+    let first = &rows(&cut, "ranked", 0)[0];
+    assert_eq!(first, &ranked[0]);
+    // Only all ranks.
+    assert_eq!(report("polls", &[])["detectors"]["ranked"], Value::Null);
+}
+
 #[test]
 fn text_output_has_a_section_per_detector() {
     let (code, stdout, _) = run(&fixture_args("all", &["--limit", "1"]));
