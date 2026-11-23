@@ -17,18 +17,19 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 
 /// When the bundled prices were read from Anthropic's and OpenAI's pricing pages.
-pub const READ: &str = "16 November 2026";
+pub const READ: &str = "24 November 2026";
 
 /// The bundled prices, a price file. Read from
 /// <https://platform.claude.com/docs/en/about-claude/pricing>, for each model
 /// <https://platform.claude.com/docs/en/about-claude/model-deprecations> lists as active
 /// under its API id, and <https://developers.openai.com/api/docs/pricing> (standard,
-/// short context, and long context above 272,000 input tokens).
+/// short context, and long context above 272,000 input tokens), with <https://developers.openai.com/api/docs/models/gpt-5.3-codex> for
+/// `gpt-5.3-codex`, which that page no longer lists.
 const BUNDLED: &str = include_str!("prices.json");
 
 /// The note of each section whose estimates are priced at each model's price, from the
 /// bundled prices. [`Prices::note`] gives the note for the prices in use.
-pub const NOTE: &str = "Dollars (usd est) price the characters of each estimate, divided by 4, once as uncached input at the published price of the model whose reply read them, from prices bundled with this release and read on 16 November 2026: an illustration, not a bill. Cached re-sends cost less and text kept in context costs again in later turns. Unpriced tokens est are those read by a model without a bundled price, by a model priced by prompt size whose prompt size is not recorded, or by no reply, and add no dollars.";
+pub const NOTE: &str = "Dollars (usd est) price the characters of each estimate, divided by 4, once as uncached input at the published price of the model whose reply read them, from prices bundled with this release and read on 24 November 2026: an illustration, not a bill. Cached re-sends cost less and text kept in context costs again in later turns. Unpriced tokens est are those read by a model without a bundled price, by a model priced by prompt size whose prompt size is not recorded, or by no reply, and add no dollars.";
 
 /// One model's price for uncached input, in US dollars per million tokens.
 #[derive(Debug, PartialEq)]
@@ -347,6 +348,14 @@ mod tests {
         // GPT-6 models are priced by prompt size; these prompts are in the short tier.
         assert_eq!(p.usd_per_mtok("gpt-6.1-sol", || Some(272_000)), Some(2.0));
         assert_eq!(p.usd_per_mtok("gpt-6-luna", || Some(1)), Some(0.1));
+        // GPT-6.2's long-context price applies to the whole request above 272,000 tokens.
+        assert_eq!(p.usd_per_mtok("gpt-6.2-astra", || Some(272_000)), Some(8.0));
+        assert_eq!(
+            p.usd_per_mtok("gpt-6.2-astra", || Some(272_001)),
+            Some(16.0)
+        );
+        assert_eq!(p.usd_per_mtok("gpt-6.2-sol", || Some(272_000)), Some(2.0));
+        assert_eq!(p.usd_per_mtok("gpt-6.2-sol", || Some(272_001)), Some(4.0));
         assert_eq!(flat(&p, "gpt-5.3-codex"), Some(1.75));
         for unpriced in [
             "claude-opus-4-5",
@@ -364,7 +373,7 @@ mod tests {
     #[test]
     fn the_bundled_file_prices_every_listed_model() {
         let p = Prices::bundled();
-        assert_eq!(p.models.len(), 27);
+        assert_eq!(p.models.len(), 29);
         let mut tiered: Vec<&str> = p
             .models
             .iter()
@@ -383,10 +392,12 @@ mod tests {
                 "gpt-6-luna",
                 "gpt-6-sol",
                 "gpt-6.1-sol",
-                "gpt-6.1-terra"
+                "gpt-6.1-terra",
+                "gpt-6.2-astra",
+                "gpt-6.2-sol"
             ]
         );
-        // OpenAI's long context doubles each GPT-6 and GPT-5.6 input price.
+        // OpenAI's long context doubles each GPT-6, GPT-6.2 and GPT-5.6 input price.
         for (id, price) in p.models.iter().filter(|(id, _)| id.starts_with("gpt-")) {
             if id != "gpt-5.3-codex" {
                 assert_eq!(price.above, [(272_000, 2.0 * price.usd_per_mtok)], "{id}");

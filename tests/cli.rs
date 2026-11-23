@@ -2172,7 +2172,7 @@ fn each_estimate_is_priced_at_the_model_that_read_it() {
     assert_eq!(reread["unpriced_tokens_est"], json!(0));
     let notes = doc["detectors"]["polls"]["notes"].to_string();
     assert!(
-        notes.contains("16 November 2026") && notes.contains("not a bill"),
+        notes.contains("24 November 2026") && notes.contains("not a bill"),
         "{notes}"
     );
     assert_eq!(doc["schema_version"], 2);
@@ -2631,7 +2631,7 @@ fn a_given_rate_prices_every_estimate_and_leaves_none_unpriced() {
     }
     let notes = doc["detectors"]["polls"]["notes"].to_string();
     assert!(notes.contains("--usd-per-mtok"), "{notes}");
-    assert!(!notes.contains("16 November 2026"), "{notes}");
+    assert!(!notes.contains("24 November 2026"), "{notes}");
 }
 
 #[test]
