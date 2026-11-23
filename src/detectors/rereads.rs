@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Value, json};
 
+use super::tools::printed;
 use super::{
     ClaudeCalls, CodexCalls, EST_NOTE, codex_call, codex_call_line, codex_output, est_tokens,
     input_str, name_of, result_chars, tool_results, tool_uses,
@@ -240,7 +241,7 @@ impl Detector for Rereads {
             notes: vec![
                 "A re-read is a file read after a compaction that was read before it and not yet since.".to_owned(),
                 "Reread share divides re-reads by every read in the window, in compacted sessions or not.".to_owned(),
-                "By compaction trigger: the trigger is the compactMetadata trigger Claude Code records on each compaction, such as auto or manual; Codex, pi, OpenCode and Qwen record none. Pre-compaction tokens are the preTokens it records, measured, not estimated; a row none of whose compactions records them shows null. A re-read counts toward the trigger of the latest compaction before it in its session.".to_owned(),
+                "By compaction trigger: the trigger is the compactMetadata trigger Claude Code records on each compaction, such as auto or manual, printed as tool names are ((other) for any other text); Codex, pi, OpenCode and Qwen record none. Pre-compaction tokens are the preTokens it records, measured, not estimated; a row none of whose compactions records them shows null. A re-read counts toward the trigger of the latest compaction before it in its session.".to_owned(),
                 "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed; Codex outputs not paired counts the calls in the window that re-read but were a function_call, whose output is not read, or an exec cell that had no call id, shared it with another exec cell in the session or whose output never came.".to_owned(),
                 EST_NOTE.to_owned(),
                 prices::NOTE.to_owned(),
@@ -269,11 +270,11 @@ impl Rereads {
 
     fn boundary(&mut self, s: &Session, r: &Record<'_>) {
         let meta = r.value.get("compactMetadata");
-        meta.and_then(|m| m.get("trigger"))
+        self.trigger = meta
+            .and_then(|m| m.get("trigger"))
             .and_then(Value::as_str)
             .filter(|t| !t.is_empty())
-            .unwrap_or(NOT_RECORDED)
-            .clone_into(&mut self.trigger);
+            .map_or_else(|| NOT_RECORDED.to_owned(), printed);
         if r.in_window {
             self.compacted_in_window = true;
             self.totals
@@ -478,6 +479,22 @@ mod tests {
             ),
             (true, read("e")),
         ]
+    }
+
+    #[test]
+    fn a_trigger_prints_only_as_a_label() {
+        let boundary = json!({"type": "system", "subtype": "compact_boundary",
+                              "compactMetadata": {"trigger": "secret: do not print"}});
+        let s = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let mut d = Rereads::default();
+        replay(&mut d, &s, &[(true, boundary.to_string())]);
+        assert_eq!(
+            table_cells(&d, "By compaction trigger", &["trigger", "compactions"]),
+            json!([["(other)", 1]])
+        );
     }
 
     #[test]
