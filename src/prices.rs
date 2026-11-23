@@ -23,8 +23,7 @@ pub const READ: &str = "24 November 2026";
 /// <https://platform.claude.com/docs/en/about-claude/pricing>, for each model
 /// <https://platform.claude.com/docs/en/about-claude/model-deprecations> lists as active
 /// under its API id, and <https://developers.openai.com/api/docs/pricing> (standard,
-/// short context, and long context above 272,000 input tokens, priced for the whole
-/// request), with <https://developers.openai.com/api/docs/models/gpt-5.3-codex> for
+/// short context, and long context above 272,000 input tokens), with <https://developers.openai.com/api/docs/models/gpt-5.3-codex> for
 /// `gpt-5.3-codex`, which that page no longer lists.
 const BUNDLED: &str = include_str!("prices.json");
 
