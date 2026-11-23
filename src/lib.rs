@@ -7,6 +7,7 @@ pub mod opencode;
 pub mod pi;
 pub mod prices;
 pub mod programs;
+pub mod ranked;
 pub mod report;
 pub mod sample;
 pub mod scan;
@@ -45,7 +46,7 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         prices_file: prices.file().map(str::to_owned),
     };
     let scanned: Vec<Agent> = stats.iter().map(|s| s.agent).collect();
-    let sections: Vec<_> = dets
+    let mut sections: Vec<_> = dets
         .iter()
         .map(|d| {
             let mut s = d.section(&opts);
@@ -63,6 +64,9 @@ pub fn run(cli: &Cli) -> Result<String, String> {
             s
         })
         .collect();
+    if cli.command == cli::Command::All {
+        sections.insert(0, ranked_section(cli, &prices, &dets, &opts));
+    }
     let meta = Meta {
         since: since.unwrap_or(jiff::Timestamp::MAX),
         roots: &stats,
@@ -70,6 +74,37 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         home: home.as_deref(),
     };
     Ok(render_report(cli, &meta, &sections))
+}
+
+/// The ranked figures, which sum every row of their sections, not the rows --limit keeps.
+fn ranked_section(
+    cli: &Cli,
+    prices: &prices::Prices,
+    dets: &[Box<dyn scan::Detector>],
+    opts: &Opts,
+) -> report::Section {
+    let whole = Opts {
+        limit: usize::MAX,
+        ..opts.clone()
+    };
+    let priced: Vec<_> = dets
+        .iter()
+        .map(|d| {
+            let mut s = d.section(&whole);
+            price(cli, prices, &mut s);
+            s
+        })
+        .collect();
+    let mut ranked = ranked::section(&priced, opts);
+    // The basis every priced section names.
+    ranked.summary.extend(
+        priced
+            .iter()
+            .flat_map(|s| &s.summary)
+            .find(|(k, _)| k == "usd_basis")
+            .cloned(),
+    );
+    ranked
 }
 
 fn render_report(cli: &Cli, meta: &Meta<'_>, sections: &[report::Section]) -> String {

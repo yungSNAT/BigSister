@@ -147,6 +147,7 @@ bigsister context --sample
 
 | Command | Agents | Reports |
 |---|---|---|
+| `ranked` | (from the sections below) | With `all` only, printed first: the largest estimated costs of 4 figures that share one basis (characters a model read divided by 4, at its input price): polls' output, re-reads after compactions, tool schemas loaded but never called and skills listed but never used, each summed over all its rows and ranked by dollars. They can overlap, so they are not added up; cache rebuilds and model choice are priced on other bases and left out |
 | `startup` | Claude | Characters loaded before the first non-synthetic reply of each main session, by source: instruction files, hook output, listings, tool schemas and MCP instructions; also the input tokens recorded for that first reply |
 | `context` | Claude | Each request Claude Code's request log records, rebuilt: its input's characters by part (system prompt, built-in tools, MCP tools, system messages, reminders, tool results, tool calls, thinking, text, other blocks) and by MCP server, its recorded input tokens split across the parts by their share, and the largest requests; a request naming a message its transcript does not hold counts as partly rebuilt, in no table |
 | `schemas` | Claude | Per tool or MCP server: sessions that loaded its schema, sessions that called it, and the characters loaded in sessions that never called it; the same for each skill listed against the skills used |

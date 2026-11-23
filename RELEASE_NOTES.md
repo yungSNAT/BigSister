@@ -16,6 +16,7 @@ BigSister is ShaphansAudit renamed, with 4 new report sections, 4 more agents, p
 - `--csv` prints the report's sections as one CSV table, a value a record.
 - `--by-branch` adds a `models` table of input-side cost by the Git branch Claude Code records on each reply.
 - Each section with a dollar column names its price basis in its summary (`usd_basis`: `bundled`, `usd_per_mtok` or `prices_file`).
+- `all` starts with `ranked`: polls' output, re-reads after compactions, unused tool schemas and unused skills, each as estimated tokens and dollars over the whole window, most dollars first.
 - `--sample` runs any section on sample transcripts built into `bigsister`, so a first run gives a full report before there are transcripts to read; with no transcript folder, the error suggests it.
 - `schemas` also counts skills listed against skills used, and `polls` the characters every non-blank command's results returned, by verb class.
 - The run header gives the reason each unreadable file or folder was unreadable.

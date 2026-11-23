@@ -1255,7 +1255,8 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[1]["files"], 2);
     assert_eq!(doc["schema_version"], 2);
     assert_eq!(doc["tool"], "bigsister");
-    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(10));
+    // 10 detectors and the ranked figures.
+    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(11));
 }
 
 /// `bigsister all` over the Claude transcripts in a fixture folder, which must hold 2.
@@ -1944,6 +1945,82 @@ fn probe_inputs_never_reach_the_output() {
         hooks,
         &[("hook_name", json!("(unknown)")), ("hook", json!("node"))],
     );
+}
+
+/// Each column's sum over every row of a section's table, from a report with no row cut.
+fn column_sum(doc: &Value, section: &str, table: usize, column: &str) -> f64 {
+    rows(doc, section, table)
+        .iter()
+        .map(|r| r[column].as_f64().unwrap_or(0.0))
+        .sum()
+}
+
+/// A ranked figure as (dollars, tokens).
+type Figure = (f64, f64);
+
+/// The ranked figures of `all` with `extra`, and those its sections' columns sum to, both
+/// as (dollars, tokens) and in rank order.
+fn ranked_against_sections(extra: &[&str]) -> (Vec<Figure>, Vec<Figure>) {
+    let mut args = vec!["--limit", "1000"];
+    args.extend_from_slice(extra);
+    let whole = report("all", &args);
+    let figures = [
+        ("polls", 0, "poll_tokens_est", "poll_usd_est"),
+        ("rereads", 0, "reread_tokens_est", "reread_usd_est"),
+        ("schemas", 0, "idle_tokens_est", "idle_usd_est"),
+        ("schemas", 1, "idle_tokens_est", "idle_usd_est"),
+    ];
+    let mut want: Vec<Figure> = figures
+        .iter()
+        .filter(|(section, ..)| whole["detectors"][*section]["tables"].is_array())
+        .map(|&(section, table, tokens, usd)| {
+            (
+                (column_sum(&whole, section, table, usd) * 100.0).round() / 100.0,
+                column_sum(&whole, section, table, tokens),
+            )
+        })
+        .filter(|&(_, tokens)| tokens > 0.0)
+        .collect();
+    want.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.total_cmp(&a.1)));
+    let got = rows(&whole, "ranked", 0)
+        .iter()
+        .map(|r| {
+            (
+                r["waste_usd_est"].as_f64().unwrap_or(-1.0),
+                r["waste_tokens_est"].as_f64().unwrap_or(-1.0),
+            )
+        })
+        .collect();
+    (got, want)
+}
+
+#[test]
+fn all_ranks_figures_of_one_basis_by_dollars_over_every_row() {
+    let (got, want) = ranked_against_sections(&[]);
+    assert!(got.len() > 1, "{got:?}");
+    assert_eq!(got, want);
+    // At one rate every figure is repriced with its section.
+    let (got, want) = ranked_against_sections(&["--usd-per-mtok", "10"]);
+    assert_eq!(got, want);
+    // Codex alone: schemas reads Claude only, so its figures are left out.
+    let (got, want) = ranked_against_sections(&["--agent", "codex"]);
+    assert_eq!(got, want);
+    let codex = report("all", &["--agent", "codex"]);
+    let sections: Vec<&str> = rows(&codex, "ranked", 0)
+        .iter()
+        .map(|r| r["section"].as_str().unwrap_or(""))
+        .collect();
+    assert!(!sections.contains(&"schemas"), "{sections:?}");
+    // --limit cuts the rows shown, not the rows a figure sums.
+    let whole = report("all", &["--limit", "1000"]);
+    let cut = report("all", &["--limit", "1"]);
+    assert_eq!(rows(&cut, "ranked", 0)[0], rows(&whole, "ranked", 0)[0]);
+    assert_eq!(
+        whole["detectors"]["ranked"]["summary"]["usd_basis"],
+        "bundled"
+    );
+    // Only all ranks.
+    assert_eq!(report("polls", &[])["detectors"]["ranked"], Value::Null);
 }
 
 #[test]
