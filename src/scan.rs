@@ -1369,6 +1369,7 @@ mod tests {
         let opts = Opts {
             limit: 0,
             paths: false,
+            by_branch: false,
             home: None,
             usd_per_mtok: None,
             prices_file: None,
@@ -1911,6 +1912,7 @@ mod tests {
         let opts = Opts {
             limit: 0,
             paths: false,
+            by_branch: false,
             home: None,
             usd_per_mtok: None,
             prices_file: None,
@@ -2087,6 +2089,7 @@ mod tests {
         let opts = Opts {
             limit: 0,
             paths: false,
+            by_branch: false,
             home: None,
             usd_per_mtok: None,
             prices_file: None,

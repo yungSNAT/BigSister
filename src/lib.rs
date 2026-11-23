@@ -39,6 +39,7 @@ pub fn run(cli: &Cli) -> Result<String, String> {
     let opts = Opts {
         limit: cli.limit,
         paths: cli.paths,
+        by_branch: cli.by_branch,
         home: home.clone(),
         usd_per_mtok: cli.usd_per_mtok,
         prices_file: prices.file().map(str::to_owned),
@@ -140,12 +141,25 @@ fn read_prices(cli: &Cli, home: Option<&str>) -> Result<prices::Prices, String> 
 
 /// Prices a section at `--usd-per-mtok`'s one rate, or names the price file in its note.
 fn price(cli: &Cli, prices: &prices::Prices, s: &mut report::Section) {
-    if let Some(usd) = cli.usd_per_mtok {
+    let basis = if let Some(usd) = cli.usd_per_mtok {
         report::price(s, usd);
+        "usd_per_mtok"
     } else if cli.prices.is_some() {
         for note in s.notes.iter_mut().filter(|n| *n == prices::NOTE) {
             *note = prices.note();
         }
+        "prices_file"
+    } else {
+        "bundled"
+    };
+    let dollars = |c: &str| c.ends_with("_usd_est");
+    if s.summary.iter().any(|(k, _)| dollars(k))
+        || s.tables
+            .iter()
+            .any(|t| t.columns.iter().any(|c| dollars(c)))
+    {
+        s.summary
+            .push(("usd_basis".to_owned(), serde_json::json!(basis)));
     }
 }
 

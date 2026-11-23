@@ -407,6 +407,73 @@ fn models_rank_subagents_against_the_parent_s_top_priced_model() {
 }
 
 #[test]
+fn models_give_cost_by_git_branch_only_when_asked() {
+    let plain = models_report(&[]);
+    assert_eq!(
+        plain["detectors"]["models"]["tables"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    let doc = models_report(&["--by-branch"]);
+    let r = rows(&doc, "models", 1);
+    let keys = [
+        "branch",
+        "replies",
+        "input_usd_est",
+        "input_usd_share",
+        "unpriced_replies",
+    ];
+    let got: Value = r.iter().map(|row| cells(row, &keys)).collect();
+    // The same replies and dollars as the first table: Opus 5.5's 1-hour writes (1.60),
+    // Sonnet 5.5 (0.10) and Opus 5.5 in another subagent (0.02) record no branch, an
+    // empty one or a number; Fable 5.2 (1.21 and 0.48) and the unpriced model record
+    // feature/pay; the other Opus 5.5 reply (0.40) records main.
+    assert_eq!(
+        got,
+        json!([
+            ["(none)", 3, 1.72, 0.45, 0],
+            ["feature/pay", 3, 1.69, 0.44, 1],
+            ["main", 1, 0.4, 0.11, 0]
+        ])
+    );
+    let first: f64 = rows(&doc, "models", 0)
+        .iter()
+        .map(|row| row["input_usd_est"].as_f64().unwrap_or(0.0))
+        .sum();
+    let by_branch: f64 = r
+        .iter()
+        .map(|row| row["input_usd_est"].as_f64().unwrap_or(0.0))
+        .sum();
+    assert!((first - by_branch).abs() < 0.015, "{first} {by_branch}");
+}
+
+#[test]
+fn dollar_sections_name_the_basis_of_their_prices() {
+    let basis =
+        |doc: &Value, section: &str| doc["detectors"][section]["summary"]["usd_basis"].clone();
+    assert_eq!(basis(&models_report(&[]), "models"), "bundled");
+    assert_eq!(
+        basis(&models_report(&["--usd-per-mtok", "10"]), "models"),
+        "usd_per_mtok"
+    );
+    let file = price_file(
+        "prices-basis.json",
+        r#"{"claude-opus-5-5": {"input_cost_per_token": 4e-06}}"#,
+    );
+    let doc = models_report(&["--prices", file.to_str().expect("UTF-8 path")]);
+    assert_eq!(basis(&doc, "models"), "prices_file");
+    // Every section with a dollar column says so; one without, such as pipes, does not.
+    let all = report("all", &[]);
+    for section in ["schemas", "polls", "rereads", "tools", "cache", "models"] {
+        assert_eq!(basis(&all, section), "bundled", "{section}");
+    }
+    for section in ["pipes", "hooks"] {
+        assert_eq!(basis(&all, section), Value::Null, "{section}");
+    }
+}
+
+#[test]
 fn models_rank_subagents_at_a_price_file_s_prices() {
     // Fable 5.2 at US$2 under Opus 5.5 at US$4 puts the Fable subagent below its parent's
     // top, and Sonnet 5.5 at US$8 puts the Sonnet one on top: its 1,000,000 cache reads at

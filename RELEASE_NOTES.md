@@ -14,6 +14,8 @@ BigSister is ShaphansAudit renamed, with 4 new report sections, 4 more agents, p
 - `rereads` also splits compactions by the trigger Claude Code records (auto or manual), with the median and largest token count in context before them and the re-reads after them, so a manual compaction before a break can be compared with an automatic one.
 - Each `tokens est` column is followed by a `usd est` column: the estimate at the bundled price of the model that read it (every active Claude model, OpenAI's GPT-6, GPT-6.2, GPT-5.6 and Codex models, priced by prompt size where the price depends on it). `--usd-per-mtok USD` prices every estimate at one rate instead, and `--prices FILE` reads prices from a file with LiteLLM's field names.
 - `--csv` prints the report's sections as one CSV table, a value a record.
+- `--by-branch` adds a `models` table of input-side cost by the Git branch Claude Code records on each reply.
+- Each section with a dollar column names its price basis in its summary (`usd_basis`: `bundled`, `usd_per_mtok` or `prices_file`).
 - `--sample` runs any section on sample transcripts built into `bigsister`, so a first run gives a full report before there are transcripts to read; with no transcript folder, the error suggests it.
 - `schemas` also counts skills listed against skills used, and `polls` the characters every non-blank command's results returned, by verb class.
 - The run header gives the reason each unreadable file or folder was unreadable.
