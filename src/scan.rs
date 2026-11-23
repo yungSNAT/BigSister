@@ -333,7 +333,6 @@ fn record_open_error(st: &mut RootStats, err: &OpenError) {
 
 struct PrepareOpts<'a> {
     agent: Agent,
-    skip_blobs: bool,
     prefilters: Option<&'a [Prefilter]>,
     prices: &'a Prices,
     max_events: usize,
@@ -380,6 +379,7 @@ struct Prep<'a> {
     bad_lines: u64,
     raw_buf: String,
     events: Vec<PreparedEvent>,
+    event_count: usize,
 }
 
 impl<'a> Prep<'a> {
@@ -392,11 +392,12 @@ impl<'a> Prep<'a> {
             bad_lines: 0,
             raw_buf: String::new(),
             events: Vec::new(),
+            event_count: 0,
         }
     }
 
     fn over_budget(&self) -> bool {
-        self.events.len() > self.opts.max_events || self.raw_buf.len() > self.opts.max_raw_bytes
+        self.event_count > self.opts.max_events || self.raw_buf.len() > self.opts.max_raw_bytes
     }
 
     fn drain_into(&mut self, line: &str, feed: &mut Feed<'_>) {
@@ -407,6 +408,7 @@ impl<'a> Prep<'a> {
             feed.apply_event(event, &self.raw_buf);
         }
         self.events.clear();
+        self.event_count = 0;
     }
 
     fn take(&mut self, line: &str) {
@@ -437,13 +439,18 @@ impl<'a> Prep<'a> {
         if tree.parent != prev_parent {
             self.events
                 .push(PreparedEvent::PiParent(tree.parent.clone()));
+            self.event_count += 1;
         }
         if let Some(path) = read.branch {
             let mut branch = Vec::new();
             for old in &path {
+                if self.over_budget() {
+                    return;
+                }
                 self.push_line(old, &mut branch);
             }
             self.events.push(PreparedEvent::Branch(branch));
+            self.event_count += 1;
         }
         let mut events = std::mem::take(&mut self.events);
         self.push_line(&read.line, &mut events);
@@ -482,9 +489,6 @@ impl<'a> Prep<'a> {
             return;
         }
         let blob = self.session.agent == Agent::Claude && line.starts_with(CLAUDE_BLOB_PREFIX);
-        if blob && self.opts.skip_blobs {
-            return;
-        }
         if !blob && !line.ends_with('}') {
             self.bad_lines += 1;
             return;
@@ -497,7 +501,9 @@ impl<'a> Prep<'a> {
             None
         };
         if exact_mask == 0 && check_mask == 0 && !codex_model && claude_model.is_none() {
-            push_timestamp(out, line);
+            if !blob && push_timestamp(out, line) {
+                self.event_count += 1;
+            }
             return;
         }
         let parsed = line
@@ -527,16 +533,23 @@ impl<'a> Prep<'a> {
             reply,
             parsed,
         }));
+        self.event_count += 1;
     }
 }
 
-fn push_timestamp(out: &mut Vec<PreparedEvent>, line: &str) {
+fn push_timestamp(out: &mut Vec<PreparedEvent>, line: &str) -> bool {
     let Some(t) = raw_timestamp(line) else {
-        return;
+        return false;
     };
     match out.last_mut() {
-        Some(PreparedEvent::Timestamp(prev)) => *prev = t,
-        _ => out.push(PreparedEvent::Timestamp(t)),
+        Some(PreparedEvent::Timestamp(prev)) => {
+            *prev = t;
+            false
+        }
+        _ => {
+            out.push(PreparedEvent::Timestamp(t));
+            true
+        }
     }
 }
 
@@ -679,10 +692,8 @@ fn scan_files_with_budget(
     let prefilters: Option<Vec<Prefilter>> = (active.len() <= 64)
         .then(|| active.iter().map(|&i| dets[i].prefilter()).collect())
         .flatten();
-    let skip_blobs = prefilters.is_some() && !active.iter().any(|&i| dets[i].reads_request_blobs());
     let opts = PrepareOpts {
         agent: st.agent,
-        skip_blobs,
         prefilters: prefilters.as_deref(),
         prices: window.prices,
         max_events,
@@ -1019,10 +1030,8 @@ fn scan_file(
     for &i in active {
         dets[i].begin(&session);
     }
-    let skip_blobs = prefilters.is_some() && !active.iter().any(|&i| dets[i].reads_request_blobs());
     let opts = PrepareOpts {
         agent,
-        skip_blobs,
         prefilters: prefilters.as_deref(),
         prices: window.prices,
         max_events: usize::MAX,
@@ -1857,6 +1866,12 @@ mod tests {
         fn agents(&self) -> &'static [Agent] {
             &[Agent::Claude]
         }
+        fn scans_whole_file(&self) -> bool {
+            true
+        }
+        fn prefilter(&self) -> Option<Prefilter> {
+            Some(Prefilter::Superset(|_, line| line.contains("\"keep\"")))
+        }
         fn reads_request_blobs(&self) -> bool {
             self.enabled
         }
@@ -1871,13 +1886,33 @@ mod tests {
         }
         fn section(&self, _opts: &Opts) -> Section {
             Section {
-                summary: vec![(
-                    "in_window".to_owned(),
-                    (self.seen.iter().filter(|&&w| w).count() as u64).into(),
-                )],
+                summary: vec![
+                    ("seen".to_owned(), (self.seen.len() as u64).into()),
+                    (
+                        "in_window".to_owned(),
+                        (self.seen.iter().filter(|&&w| w).count() as u64).into(),
+                    ),
+                ],
                 ..Section::default()
             }
         }
+    }
+
+    fn assert_dynamic_blob(dets: &[Box<dyn Detector>]) {
+        let opts = Opts {
+            limit: 0,
+            paths: false,
+            home: None,
+            usd_per_mtok: None,
+            prices_file: None,
+        };
+        assert_eq!(
+            dets[0].section(&opts).summary,
+            vec![
+                ("seen".to_owned(), 1u64.into()),
+                ("in_window".to_owned(), 0u64.into()),
+            ]
+        );
     }
 
     #[test]
@@ -1891,7 +1926,8 @@ mod tests {
             "\n",
         );
         let prices = Prices::bundled();
-        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(DynamicBlob {
+        let cutoff = parse_ts("2026-11-09T00:00:00Z");
+        let mut mem_dets: Vec<Box<dyn Detector>> = vec![Box::new(DynamicBlob {
             enabled: false,
             seen: Vec::new(),
         })];
@@ -1900,15 +1936,81 @@ mod tests {
             path: "b.jsonl",
             text: blob_text,
         }];
-        let st = scan_memory(
-            &mem,
-            "mem",
-            parse_ts("2026-11-09T00:00:00Z"),
+        assert_eq!(
+            scan_memory(&mem, "mem", cutoff, &prices, &mut mem_dets)[0].bad_lines,
+            0
+        );
+        assert_dynamic_blob(&mem_dets);
+
+        let dir = std::env::temp_dir().join(format!("bigsister-blob-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp folder");
+        fs::write(dir.join("b.jsonl"), blob_text).expect("blob file");
+        let mut disk_dets: Vec<Box<dyn Detector>> = vec![Box::new(DynamicBlob {
+            enabled: false,
+            seen: Vec::new(),
+        })];
+        let st = scan(
+            &[(Agent::Claude, dir.clone())],
+            cutoff,
             &prices,
-            &mut dets,
+            &mut disk_dets,
         );
         assert_eq!(st[0].bad_lines, 0);
-        assert_eq!(counted(&dets), 0);
+        assert_dynamic_blob(&disk_dets);
+        fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    #[test]
+    fn pi_branch_events_count_toward_prep_budget() {
+        let dir = std::env::temp_dir().join(format!("bigsister-pi-budget-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("temp folder");
+        let path = dir.join("p.jsonl");
+        let pi_text = concat!(
+            r#"{"type":"session","version":3,"id":"s1","timestamp":"2026-11-08T01:00:00Z"}"#,
+            "\n",
+            r#"{"type":"message","id":"a","parentId":null,"timestamp":"2026-11-08T01:01:00Z","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"b","parentId":"a","timestamp":"2026-11-08T01:02:00Z","message":{"role":"assistant","model":"claude-sonnet-4-6","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0},"content":[{"type":"text","text":"one"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"c","parentId":"b","timestamp":"2026-11-08T01:03:00Z","message":{"role":"user","content":[{"type":"text","text":"next"}]}}"#,
+            "\n",
+            r#"{"type":"message","id":"d","parentId":"b","timestamp":"2026-11-08T01:04:00Z","message":{"role":"assistant","model":"claude-sonnet-4-6","usage":{"input":10,"output":5,"cacheRead":0,"cacheWrite":0},"content":[{"type":"text","text":"two"}]}}"#,
+            "\n",
+        );
+        fs::write(&path, pi_text).expect("pi file");
+        let prices = Prices::bundled();
+        let opts = PrepareOpts {
+            agent: Agent::Pi,
+            prefilters: None,
+            prices: &prices,
+            max_events: 4,
+            max_raw_bytes: MAX_PREP_RAW_BYTES,
+        };
+        assert!(matches!(prepare_file(&path, &opts), PreparedFile::TooLarge));
+        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(
+            crate::detectors::models::Models::new(std::rc::Rc::new(Prices::bundled())),
+        )];
+        let mut st = RootStats::new(Agent::Pi, dir.clone());
+        let mut earlier = Earlier::default();
+        let window = Window {
+            since: Some(Timestamp::MIN),
+            prices: &prices,
+        };
+        scan_files_with_budget(
+            vec![path],
+            &window,
+            &mut dets,
+            &[0],
+            &mut st,
+            &mut earlier,
+            4,
+            MAX_PREP_RAW_BYTES,
+        );
+        assert_eq!(st.files, 1);
+        assert_eq!(st.bad_lines, 0);
+        fs::remove_dir_all(&dir).expect("clean up");
     }
 
     struct Trace(Vec<(String, bool)>);
