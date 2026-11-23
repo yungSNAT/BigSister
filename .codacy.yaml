@@ -1,5 +1,5 @@
-# Opengrep's temporary-folder rules are about production code, so it does not scan
-# the integration tests under tests/; src/ is still scanned. Lizard's file-size
+# Opengrep does not scan the integration tests under tests/, where its
+# temporary-folder rules flag fixtures; src/ is still scanned. Lizard's file-size
 # check skips lockfiles, which Cargo generates.
 engines:
   opengrep:
