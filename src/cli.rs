@@ -78,6 +78,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub paths: bool,
 
+    /// Also give input-side cost by Git branch (models only)
+    #[arg(long, global = true)]
+    pub by_branch: bool,
+
     /// Price every token estimate, and cache writes at their write multipliers, at this one rate in US dollars per million tokens, instead of each model's price (above 0, up to 1000)
     #[arg(long, global = true, value_name = "USD", value_parser = parse_usd_per_mtok)]
     pub usd_per_mtok: Option<f64>,

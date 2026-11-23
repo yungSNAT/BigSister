@@ -35,6 +35,12 @@ struct Cost {
     weighted_usd: f64,
 }
 
+/// A label `v` records under `key`, if it is a string other than empty; anything else
+/// counts as unrecorded rather than skipping the reply.
+fn optional<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+    v.get(key).and_then(Value::as_str).filter(|s| !s.is_empty())
+}
+
 impl Cost {
     fn add(&mut self, weighted: f64, price: Option<f64>) {
         self.weighted += weighted;
@@ -47,7 +53,7 @@ impl Cost {
     }
 }
 
-/// Replies of one scope, model, effort and agent type.
+/// Replies of one scope, model, effort and agent type, or of one Git branch.
 #[derive(Default)]
 struct Group {
     replies: u64,
@@ -57,6 +63,19 @@ struct Group {
     output: u64,
     cost: Cost,
     unpriced: u64,
+}
+
+impl Group {
+    fn add(&mut self, reply: &Reply<'_>, weighted: f64, price: Option<f64>) {
+        let u = &reply.usage;
+        self.replies += 1;
+        self.input = self.input.saturating_add(reply.input);
+        self.write = self.write.saturating_add(u.write);
+        self.read = self.read.saturating_add(u.read);
+        self.output = self.output.saturating_add(reply.output);
+        self.cost.add(weighted, price);
+        self.unpriced += u64::from(price.is_none());
+    }
 }
 
 /// A subagent session's replies in the window.
@@ -94,6 +113,8 @@ pub struct Models {
     here: HashSet<String>,
     skipped_here: bool,
     groups: BTreeMap<(&'static str, String, String, String), Group>,
+    /// By Git branch, as the reply's record gives it.
+    branches: BTreeMap<String, Group>,
     /// By main session id, the highest base input price of its replies' models in the
     /// window.
     parents: HashMap<String, f64>,
@@ -136,6 +157,8 @@ struct Reply<'a> {
     effort: Option<&'a str>,
     /// `attributionAgent`, the subagent type.
     agent: Option<&'a str>,
+    /// `gitBranch`, the branch checked out when Claude Code wrote the record.
+    branch: Option<&'a str>,
     /// `message.usage`'s `input_tokens` and `output_tokens`, each an integer from 0 to
     /// 2^40, and its cache counts as `cache` reads them.
     input: u64,
@@ -153,6 +176,7 @@ fn read_reply(v: &Value) -> Result<Reply<'_>, &'static str> {
         session: field(v, "sessionId", Value::as_str)?,
         effort: label(v, "effort")?,
         agent: label(v, "attributionAgent")?,
+        branch: optional(v, "gitBranch"),
         input: field(usage, "input_tokens", count)?,
         output: field(usage, "output_tokens", count)?,
         usage: read_usage(usage)?,
@@ -249,15 +273,15 @@ impl Detector for Models {
             shown(reply.effort),
             shown(reply.agent),
         );
-        let g = self.groups.entry(key).or_default();
-        g.replies += 1;
-        g.input = g.input.saturating_add(reply.input);
-        g.write = g.write.saturating_add(u.write);
-        g.read = g.read.saturating_add(u.read);
-        g.output = g.output.saturating_add(reply.output);
-        g.cost.add(weighted, price);
+        self.groups
+            .entry(key)
+            .or_default()
+            .add(&reply, weighted, price);
+        self.branches
+            .entry(shown(reply.branch))
+            .or_default()
+            .add(&reply, weighted, price);
         if price.is_none() {
-            g.unpriced += 1;
             let tokens = reply.input.saturating_add(u.write).saturating_add(u.read);
             self.unpriced_tokens = self.unpriced_tokens.saturating_add(tokens);
         }
@@ -308,7 +332,11 @@ impl Detector for Models {
                 .into_iter()
                 .map(|(k, v)| (k.to_owned(), v))
                 .collect(),
-            tables: vec![self.table(opts)],
+            tables: if opts.by_branch {
+                vec![self.table(opts), self.branch_table(opts)]
+            } else {
+                vec![self.table(opts)]
+            },
             notes: notes(opts),
         }
     }
@@ -322,11 +350,15 @@ fn cents(usd: f64) -> f64 {
 /// The section's notes.
 fn notes(opts: &Opts) -> Vec<String> {
     let price = input_price(opts);
-    vec![
+    let mut notes = vec![
         format!("Each reply counts once (the first record of its message.id); synthetic replies are left out, and a reply none of whose records reads whole (a message with an id, a model and a usage whose input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens and, when it has a cache_creation split, ephemeral_5m_input_tokens and ephemeral_1h_input_tokens are integers from 0 to 2^40; a session id; and effort and agent type as text when recorded) counts as skipped (replies skipped) and adds to no total, so with any skipped the totals are a floor. Effort is the reasoning effort the reply records and agent type the subagent type Claude Code records (attributionAgent); {NONE} marks a reply that records neither."),
         format!("Input usd est is an input-side estimate, not spend: uncached input at the input price, cache writes at 1.25 times it (5-minute) or 2 times (1-hour), as the reply records (1.25 times for replies without split, which record none), and cache reads at the model's cache read price, 0.025, 0.05 or 0.1 times the input price as Anthropic's pricing page gave on 24 November 2026, where the input price is {price}. Output tokens are counted but not priced, as bigsister reads input prices only; output costs several times as much as input per token. Input usd share is each row's part of all rows' input usd est, rounded to 2 places, so shares need not sum to 1. Unpriced replies are those of a model without a price, or of one priced by prompt size whose prompt size is not recorded; dollars and shares leave them out, and replies unpriced and unpriced input tokens (their input, cache write and cache read tokens) count them whatever --limit cuts. An illustration, not a bill."),
         "Each model is ranked at its base input price (its price for the shortest prompt, so a model priced by prompt size ranks the same whatever the prompt), from the bundled prices or the price file's with --prices, whatever --usd-per-mtok gives: a subagent session is on its parent's top model when the cheapest model of its replies in the window costs at least the dearest of its parent session's, so the same model on both sides is on top, and below when cheaper. It is indeterminate when the parent session (the main session whose id its records carry) was not read or had no reply in the window, or it or the subagent had a reply in the window skipped or on a model without a price (a skipped one without a session id, or whose blocks name different sessions, counts against every session its file's records in the window name, and against none, counting only in replies skipped, when no record names one), as such a reply's model may be dearer or cheaper. On top input usd est sums those sessions' input usd est.".to_owned(),
-    ]
+    ];
+    if opts.by_branch {
+        notes.push(format!("By Git branch (--by-branch) groups the same replies by the gitBranch Claude Code records on each reply, the branch checked out in its working folder when it was written, not the branch its work was later merged to; {NONE} marks a reply that records none, an empty one or one that is not text. Its dollars are the same estimate as above."));
+    }
+    notes
 }
 
 impl Models {
@@ -341,6 +373,7 @@ impl Models {
             here: HashSet::new(),
             skipped_here: false,
             groups: BTreeMap::new(),
+            branches: BTreeMap::new(),
             parents: HashMap::new(),
             unsure: HashSet::new(),
             subs: Vec::new(),
@@ -466,53 +499,80 @@ impl Models {
 
     /// The table by scope, model, effort and agent type, most input dollars first.
     fn table(&self, opts: &Opts) -> Table {
-        let rate = opts.usd_per_mtok;
-        let total: f64 = self.groups.values().map(|g| g.cost.usd(rate)).sum();
-        let mut rows: Vec<(f64, Vec<Value>)> = self
+        let groups = self
             .groups
             .iter()
             .map(|((scope, model, effort, agent), g)| {
-                let usd = g.cost.usd(rate);
-                let share = (total > 0.0).then(|| cents(usd / total));
-                let row = vec![
-                    json!(scope),
-                    json!(model),
-                    json!(effort),
-                    json!(agent),
-                    json!(g.replies),
-                    json!(g.input),
-                    json!(g.write),
-                    json!(g.read),
-                    json!(g.output),
-                    json!(cents(usd)),
-                    json!(share),
-                    json!(if rate.is_some() { 0 } else { g.unpriced }),
-                ];
-                (usd, row)
-            })
-            .collect();
-        rows.sort_by(|a, b| b.0.total_cmp(&a.0));
-        let mut table = Table::new(
+                (
+                    vec![json!(scope), json!(model), json!(effort), json!(agent)],
+                    g,
+                )
+            });
+        group_table(
             "By scope, model, effort and agent type, most input dollars first",
-            vec![
-                "scope",
-                "model",
-                "effort",
-                "agent_type",
-                "replies",
-                "input_tokens",
-                "cache_write_tokens",
-                "cache_read_tokens",
-                "output_tokens",
-                "input_usd_est",
-                "input_usd_share",
-                "unpriced_replies",
-            ],
-        );
-        table.rows = rows.into_iter().map(|(_, r)| r).collect();
-        table.truncate(opts.limit);
-        table
+            &["scope", "model", "effort", "agent_type"],
+            groups,
+            opts,
+        )
     }
+
+    /// The table by Git branch, most input dollars first.
+    fn branch_table(&self, opts: &Opts) -> Table {
+        let groups = self.branches.iter().map(|(b, g)| (vec![json!(b)], g));
+        group_table(
+            "By Git branch, most input dollars first",
+            &["branch"],
+            groups,
+            opts,
+        )
+    }
+}
+
+/// A table of `groups`, each with its key cells, under `keys` and the counts' columns,
+/// most input dollars first.
+fn group_table<'a>(
+    title: &str,
+    keys: &[&'static str],
+    groups: impl Iterator<Item = (Vec<Value>, &'a Group)>,
+    opts: &Opts,
+) -> Table {
+    let rate = opts.usd_per_mtok;
+    let groups: Vec<_> = groups.collect();
+    let total: f64 = groups.iter().map(|(_, g)| g.cost.usd(rate)).sum();
+    let mut rows: Vec<(f64, Vec<Value>)> = groups
+        .into_iter()
+        .map(|(mut row, g)| {
+            let usd = g.cost.usd(rate);
+            let share = (total > 0.0).then(|| cents(usd / total));
+            row.extend([
+                json!(g.replies),
+                json!(g.input),
+                json!(g.write),
+                json!(g.read),
+                json!(g.output),
+                json!(cents(usd)),
+                json!(share),
+                json!(if rate.is_some() { 0 } else { g.unpriced }),
+            ]);
+            (usd, row)
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let mut columns = keys.to_vec();
+    columns.extend([
+        "replies",
+        "input_tokens",
+        "cache_write_tokens",
+        "cache_read_tokens",
+        "output_tokens",
+        "input_usd_est",
+        "input_usd_share",
+        "unpriced_replies",
+    ]);
+    let mut table = Table::new(title, columns);
+    table.rows = rows.into_iter().map(|(_, r)| r).collect();
+    table.truncate(opts.limit);
+    table
 }
 
 #[cfg(test)]
