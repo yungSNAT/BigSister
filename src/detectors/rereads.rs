@@ -78,7 +78,7 @@ pub struct Rereads {
     compacted_in_window: bool,
     /// Claude calls that re-read and whose result has not been read yet, by
     /// `tool_use` id.
-    claude: ClaudeCalls<()>,
+    claude: ClaudeCalls<String>,
     /// Codex `exec` calls that re-read and whose output has not been read yet.
     codex: CodexCalls<()>,
     totals: BTreeMap<(Agent, &'static str), Counts>,
@@ -182,13 +182,14 @@ impl Detector for Rereads {
                         && fresh
                         && let Some(id) = id
                     {
-                        self.claude.wait(id, ());
+                        self.claude.wait(id, self.trigger.clone());
                     }
                 }
                 for b in tool_results(r) {
                     let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
-                    if self.claude.take(id).is_some() {
-                        self.returned(s, result_chars(b.get("content").unwrap_or(&Value::Null)));
+                    if let Some(trigger) = self.claude.take(id) {
+                        let size = result_chars(b.get("content").unwrap_or(&Value::Null));
+                        self.returned(s, &trigger, size);
                     }
                 }
             }
@@ -241,7 +242,7 @@ impl Detector for Rereads {
             notes: vec![
                 "A re-read is a file read after a compaction that was read before it and not yet since.".to_owned(),
                 "Reread share divides re-reads by every read in the window, in compacted sessions or not.".to_owned(),
-                "By compaction trigger: the trigger is the compactMetadata trigger Claude Code records on each compaction, such as auto or manual, printed as tool names are ((other) for any other text); Codex, pi, OpenCode and Qwen record none. Pre-compaction tokens are the preTokens it records, measured, not estimated; a row none of whose compactions records them shows null. A re-read counts toward the trigger of the latest compaction before it in its session.".to_owned(),
+                "By compaction trigger: the trigger is the compactMetadata trigger Claude Code records on each compaction, such as auto or manual, printed as tool names are ((other) for any other text); Codex, pi, OpenCode and Qwen record none. Pre-compaction tokens are the preTokens it records, measured, not estimated: the median (by nearest rank, so the lower of 2 middle values) and largest of the row's compactions that record them; a row none of whose compactions records them shows null. A re-read, with its result, counts toward the trigger of the latest compaction before its call in its session.".to_owned(),
                 "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed; Codex outputs not paired counts the calls in the window that re-read but were a function_call, whose output is not read, or an exec cell that had no call id, shared it with another exec cell in the session or whose output never came.".to_owned(),
                 EST_NOTE.to_owned(),
                 prices::NOTE.to_owned(),
@@ -264,7 +265,9 @@ impl Rereads {
             && let Some(out) = codex_output(r)
             && self.codex.take(&out)
         {
-            self.returned(s, out.chars);
+            // Codex records no trigger, so its current one is the call's.
+            let trigger = self.trigger.clone();
+            self.returned(s, &trigger, out.chars);
         }
     }
 
@@ -292,15 +295,19 @@ impl Rereads {
         self.before.extend(current);
     }
 
-    /// Adds the size of the result of a call that re-read.
-    fn returned(&mut self, s: &Session, size: u64) {
+    /// Adds the size of the result of a call that re-read under `trigger`, the trigger of
+    /// the compaction before the call.
+    fn returned(&mut self, s: &Session, trigger: &str, size: u64) {
         self.totals
             .entry((s.agent, s.scope()))
             .or_default()
             .reread_chars += size;
-        self.trigger_counts(s).reread_chars += size;
-        let trigger = self.trigger.clone();
-        self.unread.push((s.agent, s.scope(), trigger, size));
+        self.triggers
+            .entry((s.agent, trigger.to_owned()))
+            .or_default()
+            .reread_chars += size;
+        self.unread
+            .push((s.agent, s.scope(), trigger.to_owned(), size));
     }
 
     /// Notes one read and says whether it is a re-read counted in the window.
@@ -472,13 +479,45 @@ mod tests {
             (true, read("c")),
             (true, boundary("manual", 7000)),
             (true, read("d")),
-            // No metadata, as pi's, OpenCode's and Gemini's boundaries have.
+            // No metadata, as pi's, OpenCode's and Qwen's boundaries have.
             (
                 true,
                 json!({"type": "system", "subtype": "compact_boundary"}).to_string(),
             ),
             (true, read("e")),
         ]
+    }
+
+    #[test]
+    fn a_result_counts_toward_the_trigger_before_its_call() {
+        let boundary = |trigger: &str| {
+            json!({"type": "system", "subtype": "compact_boundary",
+                   "compactMetadata": {"trigger": trigger}})
+            .to_string()
+        };
+        let read = |id| claude_tool_use(id, "Read", &json!({"file_path": "/work/a.md"}));
+        let lines: Vec<(bool, String)> = [
+            read("a"),
+            boundary("manual"),
+            read("b"),
+            // A compaction between the re-read and its result.
+            boundary("auto"),
+            claude_tool_result("b", "1234"),
+        ]
+        .into_iter()
+        .map(|l| (true, l))
+        .collect();
+        let s = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let mut d = Rereads::default();
+        replay(&mut d, &s, &lines);
+        let keys = ["trigger", "rereads", "reread_chars"];
+        assert_eq!(
+            table_cells(&d, "By compaction trigger", &keys),
+            json!([["auto", 0, 0], ["manual", 1, 4]])
+        );
     }
 
     #[test]
