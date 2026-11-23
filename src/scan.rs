@@ -1396,6 +1396,7 @@ mod tests {
 
     #[test]
     fn a_gemini_transcript_that_changes_between_passes_is_reported() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- a test fixture folder; no security decision rests on it
         let dir = std::env::temp_dir().join(format!("bigsister-reopen-{}", std::process::id()));
         fs::create_dir(&dir).expect("create test directory");
         let path = dir.join("transcript.jsonl.zst");
@@ -1510,6 +1511,7 @@ mod tests {
 
     #[test]
     fn only_jsonl_and_compressed_jsonl_files_are_listed() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- a test fixture folder; no security decision rests on it
         let dir = std::env::temp_dir().join(format!("bigsister-list-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("sub")).expect("temp folder");

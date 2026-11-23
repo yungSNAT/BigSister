@@ -19,6 +19,7 @@ struct Current {
     started_in_window: Option<bool>,
     replied: bool,
     /// Input tokens of the first reply's request, as Claude Code recorded them.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens -- a count of model tokens, not a credential
     first_tokens: Option<u64>,
     shape_seen: bool,
     entrypoint: Option<String>,
@@ -29,6 +30,7 @@ struct Current {
 pub struct Startup {
     cur: Current,
     totals: Vec<u64>,
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens -- a count of model tokens, not a credential
     first_tokens: Vec<u64>,
     pieces: BTreeMap<String, Vec<u64>>,
     entrypoints: BTreeMap<String, u64>,

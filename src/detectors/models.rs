@@ -110,6 +110,7 @@ pub struct Models {
     without_split: u64,
     /// The input, cache write and cache read tokens of replies counted in the window
     /// without a price, each count at most 2^40.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens -- a count of model tokens, not a credential
     unpriced_tokens: u64,
 }
 
@@ -346,6 +347,7 @@ impl Models {
             unreadable: None,
             skipped: 0,
             without_split: 0,
+            // nosemgrep: codacy.yaml.security.hard-coded-tokens -- a count of model tokens, not a credential
             unpriced_tokens: 0,
         }
     }
