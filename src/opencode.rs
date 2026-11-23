@@ -501,6 +501,7 @@ mod tests {
     /// Only `TABLES` can be read through the connection `open` gives.
     #[test]
     fn a_table_other_than_sessions_messages_and_parts_is_refused() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- a test fixture folder; no security decision rests on it
         let dir = std::env::temp_dir().join(format!("bigsister-opencode-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("folder");
         let db = dir.join("opencode.db");
@@ -534,6 +535,7 @@ mod tests {
     /// queries see: they read the copy `open` made.
     #[test]
     fn a_write_after_opening_is_not_seen() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- a test fixture folder; no security decision rests on it
         let dir = std::env::temp_dir().join(format!("bigsister-opencode-w-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("folder");
         let db = dir.join("opencode.db");
@@ -562,6 +564,7 @@ mod tests {
     /// the copy.
     #[test]
     fn a_file_changed_after_its_copy_does_not_hold_it() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- a test fixture folder; no security decision rests on it
         let dir = std::env::temp_dir().join(format!("bigsister-opencode-h-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("folder");
         let file = dir.join("f");
@@ -600,6 +603,7 @@ mod tests {
     /// A new folder `name` holding `opencode.db`, in WAL mode or not, with `SCHEMA`,
     /// closed, so that no file is beside it.
     fn database(name: &str, wal: bool) -> (PathBuf, PathBuf) {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- a test fixture folder; no security decision rests on it
         let dir = std::env::temp_dir().join(format!("bigsister-oc-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("folder");
@@ -675,6 +679,7 @@ mod tests {
 
     impl Other {
         fn start(db: &Path, mode: &str) -> Self {
+            // nosemgrep: rust.lang.security.current-exe.current-exe -- the test reruns its own binary as a second process; no trust decision rests on the path
             let mut child = Command::new(std::env::current_exe().expect("test binary"))
                 .args([
                     "--exact",
