@@ -51,6 +51,7 @@ const NOT_RECORDED: &str = "not recorded";
 struct Trigger {
     compactions: u64,
     /// The `preTokens` of each compaction that records it.
+    // nosemgrep: codacy.yaml.security.hard-coded-tokens -- a count of model tokens, not a credential
     pre_tokens: Vec<u64>,
     rereads: u64,
     reread_chars: u64,
