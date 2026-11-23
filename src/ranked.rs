@@ -87,7 +87,7 @@ pub fn section(whole: &[Section], opts: &Opts) -> Section {
         summary: Vec::new(),
         tables: vec![table],
         notes: vec![
-            "Each figure sums one section's table before --limit cuts it: the characters a model read, divided by 4, at that model's input price, or at the --usd-per-mtok rate. They share that basis, so they rank against each other, but they can overlap (a command's output can be both a poll and a re-read), so do not add them up. Unpriced tokens est are those of a model without a price. Cache rebuilds (cache) and model choice (models) are priced on other bases and are left out. Figures cover the report window, not a month. An illustration, not a bill.".to_owned(),
+            "Each figure sums one section's table before --limit cuts it, row by row as the table shows it: its token estimates (the characters a model read, divided by 4 and rounded up in each row) and its dollars (each at that model's input price, or at the --usd-per-mtok rate, rounded to cents in each row), so a figure can differ from an unrounded total by up to a token and half a cent a row. The figures share that basis, so they rank against each other, but they can overlap (a command's output can be both a poll and a re-read), so do not add them up. Unpriced tokens est are unpriced as each section's note defines them. A figure with no tokens, as when --agent leaves out its section's agents, is left out, so fewer than 4 rows can show. Cache rebuilds (cache) and model choice (models) are priced on other bases and are left out. Figures cover the report window, not a month. An illustration, not a bill.".to_owned(),
         ],
     }
 }
