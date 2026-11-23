@@ -9,7 +9,7 @@ use super::{
     input_str, name_of, result_chars, tool_results, tool_uses,
 };
 use crate::prices::{self, Priced};
-use crate::report::{Opts, Section, Table, display_path, ratio};
+use crate::report::{Opts, Section, Table, display_path, median, ratio};
 use crate::scan::{Agent, Detector, Record, Session};
 use crate::shell::{normalise_path, read_targets};
 
@@ -27,6 +27,35 @@ const COLUMNS: [&str; 12] = [
     "rereads_per_compaction",
     "reread_share",
 ];
+
+/// The columns of the table by compaction trigger.
+const TRIGGER_COLUMNS: [&str; 11] = [
+    "agent",
+    "trigger",
+    "compactions",
+    "median_pre_compaction_tokens",
+    "max_pre_compaction_tokens",
+    "rereads",
+    "reread_chars",
+    "reread_tokens_est",
+    "reread_usd_est",
+    "unpriced_tokens_est",
+    "rereads_per_compaction",
+];
+
+/// The trigger of a compaction whose record names none.
+const NOT_RECORDED: &str = "not recorded";
+
+/// Compactions of one trigger, and the re-reads after them.
+#[derive(Default)]
+struct Trigger {
+    compactions: u64,
+    /// The `preTokens` of each compaction that records it.
+    pre_tokens: Vec<u64>,
+    rereads: u64,
+    reread_chars: u64,
+    reread_priced: Priced,
+}
 
 #[derive(Default, Clone, Copy)]
 struct Counts {
@@ -53,7 +82,10 @@ pub struct Rereads {
     totals: BTreeMap<(Agent, &'static str), Counts>,
     paths: HashMap<String, u64>,
     /// Re-read characters of this file that no model has read yet, with their rows.
-    unread: Vec<(Agent, &'static str, u64)>,
+    unread: Vec<(Agent, &'static str, String, u64)>,
+    /// The trigger of the session's latest compaction, which its re-reads count toward.
+    trigger: String,
+    triggers: BTreeMap<(Agent, String), Trigger>,
 }
 
 fn rereads_prefilter(s: &Session, line: &str) -> bool {
@@ -103,6 +135,7 @@ impl Detector for Rereads {
         self.compacted_in_window = false;
         self.claude.clear();
         self.unread.clear();
+        self.trigger.clear();
     }
 
     fn branch(&mut self, _s: &Session) {
@@ -114,9 +147,11 @@ impl Detector for Rereads {
     }
 
     fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
-        for (agent, scope, n) in self.unread.drain(..) {
+        for (agent, scope, trigger, n) in self.unread.drain(..) {
             let c = self.totals.entry((agent, scope)).or_default();
             c.reread_priced.add(n, usd_per_mtok);
+            let t = self.triggers.entry((agent, trigger)).or_default();
+            t.reread_priced.add(n, usd_per_mtok);
         }
     }
 
@@ -129,7 +164,7 @@ impl Detector for Rereads {
             Agent::Codex => r.kind() == "compacted",
         };
         if boundary {
-            self.boundary(s, r.in_window);
+            self.boundary(s, r);
             return;
         }
         match s.agent {
@@ -192,6 +227,7 @@ impl Detector for Rereads {
         if opts.paths {
             tables.push(self.path_table(opts));
         }
+        tables.push(self.trigger_table(opts));
         Section {
             name: "rereads",
             title: "files read again after a context compaction",
@@ -203,6 +239,7 @@ impl Detector for Rereads {
             notes: vec![
                 "A re-read is a file read after a compaction that was read before it and not yet since.".to_owned(),
                 "Reread share divides re-reads by every read in the window, in compacted sessions or not.".to_owned(),
+                "By compaction trigger: the trigger is the compactMetadata trigger Claude Code records on each compaction, such as auto or manual; Codex, pi, OpenCode and Qwen record none. Pre-compaction tokens are the preTokens it records, measured, not estimated; a row none of whose compactions records them shows null. A re-read counts toward the trigger of the latest compaction before it in its session.".to_owned(),
                 "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed; Codex outputs not paired counts the calls in the window that re-read but were a function_call, whose output is not read, or an exec cell that had no call id, shared it with another exec cell in the session or whose output never came.".to_owned(),
                 EST_NOTE.to_owned(),
                 prices::NOTE.to_owned(),
@@ -229,13 +266,25 @@ impl Rereads {
         }
     }
 
-    fn boundary(&mut self, s: &Session, in_window: bool) {
-        if in_window {
+    fn boundary(&mut self, s: &Session, r: &Record<'_>) {
+        let meta = r.value.get("compactMetadata");
+        meta.and_then(|m| m.get("trigger"))
+            .and_then(Value::as_str)
+            .filter(|t| !t.is_empty())
+            .unwrap_or(NOT_RECORDED)
+            .clone_into(&mut self.trigger);
+        if r.in_window {
             self.compacted_in_window = true;
             self.totals
                 .entry((s.agent, s.scope()))
                 .or_default()
                 .compactions += 1;
+            let t = self.trigger_counts(s);
+            t.compactions += 1;
+            t.pre_tokens.extend(
+                meta.and_then(|m| m.get("preTokens"))
+                    .and_then(Value::as_u64),
+            );
         }
         let current = std::mem::take(&mut self.current);
         self.before.extend(current);
@@ -247,7 +296,9 @@ impl Rereads {
             .entry((s.agent, s.scope()))
             .or_default()
             .reread_chars += size;
-        self.unread.push((s.agent, s.scope(), size));
+        self.trigger_counts(s).reread_chars += size;
+        let trigger = self.trigger.clone();
+        self.unread.push((s.agent, s.scope(), trigger, size));
     }
 
     /// Notes one read and says whether it is a re-read counted in the window.
@@ -266,8 +317,57 @@ impl Rereads {
                 reread = true;
             }
         }
+        if reread {
+            self.trigger_counts(s).rereads += 1;
+        }
         self.current.insert(path);
         reread
+    }
+
+    /// The counts of the trigger of the session's latest compaction.
+    fn trigger_counts(&mut self, s: &Session) -> &mut Trigger {
+        self.triggers
+            .entry((s.agent, self.trigger.clone()))
+            .or_default()
+    }
+
+    /// Compactions and the re-reads after them by agent and trigger, most compactions
+    /// first.
+    fn trigger_table(&self, opts: &Opts) -> Table {
+        let mut triggers: Vec<_> = self.triggers.iter().collect();
+        triggers.sort_by(|a, b| {
+            b.1.compactions
+                .cmp(&a.1.compactions)
+                .then_with(|| a.0.cmp(b.0))
+        });
+        let mut table = Table::new("By compaction trigger", TRIGGER_COLUMNS.to_vec());
+        table.rows = triggers
+            .into_iter()
+            .map(|((agent, trigger), t)| {
+                let pre = |v: u64| {
+                    if t.pre_tokens.is_empty() {
+                        Value::Null
+                    } else {
+                        json!(v)
+                    }
+                };
+                vec![
+                    json!(agent.name()),
+                    json!(trigger),
+                    json!(t.compactions),
+                    pre(median(&t.pre_tokens)),
+                    pre(t.pre_tokens.iter().copied().max().unwrap_or(0)),
+                    json!(t.rereads),
+                    json!(t.reread_chars),
+                    json!(est_tokens(t.reread_chars)),
+                    json!(t.reread_priced.usd()),
+                    json!(t.reread_priced.unpriced_tokens(t.reread_chars)),
+                    ratio(t.rereads, t.compactions),
+                ]
+            })
+            .collect();
+        table.truncate(opts.limit);
+        table
     }
 
     fn path_table(&self, opts: &Opts) -> Table {
