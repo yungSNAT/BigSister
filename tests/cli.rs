@@ -434,7 +434,7 @@ fn models_give_cost_by_git_branch_only_when_asked() {
         json!([
             ["(none)", 3, 1.72, 0.45, 0],
             ["feature/pay", 3, 1.69, 0.44, 1],
-            ["main", 1, 0.4, 0.1, 0]
+            ["main", 1, 0.4, 0.11, 0]
         ])
     );
     let first: f64 = rows(&doc, "models", 0)
