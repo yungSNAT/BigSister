@@ -1,0 +1,11 @@
+# Opengrep's temporary-folder rules are about production code, so it does not scan
+# the integration tests under tests/; src/ is still scanned. Lizard's file-size
+# check skips lockfiles, which Cargo generates.
+engines:
+  opengrep:
+    exclude_paths:
+      - "tests/**"
+  lizard:
+    exclude_paths:
+      - "Cargo.lock"
+      - "**/Cargo.lock"

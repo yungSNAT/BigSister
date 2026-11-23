@@ -195,6 +195,7 @@ mod tests {
 
     #[test]
     fn path_lookups_need_a_runnable_file() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- a test fixture folder; no security decision rests on it
         let dir = std::env::temp_dir().join(format!("bigsister-programs-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("docs")).expect("temp folder");
         let tool = dir.join(if cfg!(windows) {
@@ -231,6 +232,7 @@ mod tests {
 
     #[test]
     fn share_paths_are_never_looked_up() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- a test fixture folder; no security decision rests on it
         let dir = std::env::temp_dir().join(format!("bigsister-share-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp folder");
         let script = dir.join("fsociety.ps1");
