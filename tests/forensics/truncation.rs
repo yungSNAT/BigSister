@@ -445,3 +445,43 @@ fn codex_separate_truncation_notice_flags_single_call_only() {
         "clean sibling must not be flagged: {rows:?}"
     );
 }
+
+#[test]
+fn codex_same_id_duplicate_before_idless_mirror_coalesces_at_two_turn_boundary() {
+    let dir = super::temp_dir("tr", "codex-dup-mirror");
+    let ts = "2026-11-08T01:00:05Z";
+    // Turn 1: c1 truncated + same-ID opposite-family mirror (ev+item share id "m0").
+    // Turn 2: item dup ("m1","m1") + idless ev (1 turn).
+    // Turn 3: ev dup ("e2","e2") + idless item (1 turn, gap = 2 -> rerun counts!).
+    let base = vec![
+        json!({"type": "turn_context", "timestamp": "2026-11-08T01:00:00Z", "payload": {"turn_id": "t1"}}).to_string(),
+        codex_exec("2026-11-08T01:00:01Z", "d1", "git status"),
+        codex_out("2026-11-08T01:00:02Z", "d1", 0, "[output truncated]"),
+        super::codex_agent_msg(ts, Some("m0")),
+        super::codex_asst_msg(ts, Some("m0")),
+        super::codex_asst_msg(ts, Some("m1")),
+        super::codex_asst_msg(ts, Some("m1")),
+        super::codex_agent_msg(ts, None),
+        super::codex_agent_msg(ts, Some("e2")),
+        super::codex_agent_msg(ts, Some("e2")),
+        super::codex_asst_msg(ts, None),
+    ];
+    for (name, extra, expect) in [("within", false, 1_u64), ("past", true, 0)] {
+        let mut lines = base.clone();
+        if extra {
+            lines.extend([
+                super::codex_asst_msg(ts, Some("m3")),
+                super::codex_asst_msg(ts, Some("m3")),
+                super::codex_agent_msg(ts, None),
+            ]);
+        }
+        lines.push(codex_exec("2026-11-08T01:00:20Z", "d2", "git status"));
+        lines.push(codex_out("2026-11-08T01:00:21Z", "d2", 0, "clean"));
+        super::write_jsonl(&dir, &format!("{name}/2026/rollout.jsonl"), &lines);
+        let doc = super::run_json("polls", &["--codex-root", dir.join(name).to_str().unwrap()]);
+        assert_eq!(
+            doc["detectors"]["polls"]["summary"]["truncation_reruns"], expect,
+            "{name}"
+        );
+    }
+}

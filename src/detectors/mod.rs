@@ -272,15 +272,19 @@ impl CodexTurns {
     }
 
     fn note_msg(&mut self, family: MsgSeen, id: Option<&str>) -> bool {
-        if id.is_some() && self.last_msg_id.as_deref() == id {
-            self.msg_seen = Some(MsgSeen::Both);
-            return false;
-        }
-        let mirror = matches!(
+        let opposite = matches!(
             (self.msg_seen, family),
             (Some(MsgSeen::Event), MsgSeen::Item) | (Some(MsgSeen::Item), MsgSeen::Event)
-        ) && (id.is_none() || self.last_msg_id.is_none());
-        if mirror {
+        );
+        if id.is_some() && self.last_msg_id.as_deref() == id {
+            self.msg_seen = if opposite {
+                Some(MsgSeen::Both)
+            } else {
+                self.msg_seen
+            };
+            return false;
+        }
+        if opposite && (id.is_none() || self.last_msg_id.is_none()) {
             self.last_msg_id = id.map(str::to_owned).or_else(|| self.last_msg_id.take());
             self.msg_seen = Some(MsgSeen::Both);
             return false;

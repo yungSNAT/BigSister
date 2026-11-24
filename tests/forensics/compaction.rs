@@ -331,3 +331,46 @@ fn codex_mirrored_idless_messages_coalesce_at_five_turn_compaction_boundary() {
         );
     }
 }
+
+#[test]
+fn codex_same_id_duplicate_before_idless_mirror_coalesces_at_compaction_boundary() {
+    let dir = super::temp_dir("ct", "codex-dup-mirror");
+    let ts = "2026-11-08T01:01:05Z";
+    for (name, turns, expect) in [("within", 5_usize, 1_u64), ("past", 6, 0)] {
+        let mut lines = vec![
+            codex_patch("2026-11-08T01:00:00Z", "p1", "/work/dm.rs"),
+            json!({"type": "compacted", "timestamp": "2026-11-08T01:01:00Z"}).to_string(),
+        ];
+        for i in 0..turns {
+            let id = format!("id{i}");
+            if i % 2 == 0 {
+                lines.extend([
+                    super::codex_asst_msg(ts, Some(&id)),
+                    super::codex_asst_msg(ts, Some(&id)),
+                    super::codex_agent_msg(ts, None),
+                ]);
+            } else {
+                lines.extend([
+                    super::codex_agent_msg(ts, Some(&id)),
+                    super::codex_agent_msg(ts, Some(&id)),
+                    super::codex_asst_msg(ts, None),
+                ]);
+            }
+        }
+        lines.push(codex_exec_cmd(
+            "2026-11-08T01:02:00Z",
+            "r1",
+            "cat /work/dm.rs",
+        ));
+        lines.push(codex_patch("2026-11-08T01:02:05Z", "p2", "/work/dm.rs"));
+        super::write_jsonl(&dir, &format!("{name}/2026/rollout.jsonl"), &lines);
+        let doc = super::run_json(
+            "rereads",
+            &["--codex-root", dir.join(name).to_str().unwrap()],
+        );
+        assert_eq!(
+            doc["detectors"]["rereads"]["summary"]["post_compaction_revert_cycles"], expect,
+            "{name}"
+        );
+    }
+}

@@ -77,4 +77,20 @@ mod forensics {
             r#"{{"type":"assistant","uuid":"u-{id}","timestamp":"{ts}","message":{{"model":"{model}","id":"{id}","role":"assistant","content":{content},"usage":{{"input_tokens":{input},"cache_creation_input_tokens":{write},"cache_read_input_tokens":{read},"cache_creation":{{"ephemeral_5m_input_tokens":{write},"ephemeral_1h_input_tokens":0}}}}}}}}"#
         )
     }
+
+    pub(super) fn codex_agent_msg(ts: &str, id: Option<&str>) -> String {
+        let mut p = serde_json::json!({"type": "agent_message", "message": "ok"});
+        if let Some(id) = id {
+            p["id"] = serde_json::json!(id);
+        }
+        serde_json::json!({"type": "event_msg", "timestamp": ts, "payload": p}).to_string()
+    }
+
+    pub(super) fn codex_asst_msg(ts: &str, id: Option<&str>) -> String {
+        let mut p = serde_json::json!({"type": "message", "role": "assistant"});
+        if let Some(id) = id {
+            p["id"] = serde_json::json!(id);
+        }
+        serde_json::json!({"type": "response_item", "timestamp": ts, "payload": p}).to_string()
+    }
 }
