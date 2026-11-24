@@ -121,7 +121,10 @@ impl Detector for Schemas {
         self.cur = Current::default();
     }
 
-    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
+    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>, in_window: bool) {
+        if !in_window {
+            return;
+        }
         let same = self.cur.model.is_none_or(|m| m == usd_per_mtok);
         self.cur.model = Some(usd_per_mtok.filter(|_| same));
     }

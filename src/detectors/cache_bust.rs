@@ -74,10 +74,10 @@ struct BustRow {
     count: u64,
     rebuilt: u64,
     priced_rebuilt: u64,
-    write_weighted: f64,
-    write_weighted_usd: f64,
-    warm_weighted: f64,
-    warm_weighted_usd: f64,
+    write_mtok: f64,
+    write_usd: f64,
+    warm_mtok: f64,
+    warm_usd: f64,
     unpriced: u64,
 }
 
@@ -87,30 +87,33 @@ impl BustRow {
             clippy::cast_precision_loss,
             reason = "token counts stay far below 2^52"
         )]
-        let n = rebuilt as f64;
-        let write_w = n * write_mult;
-        let warm_w = n * read_mult;
+        let mtok = rebuilt as f64 / 1e6;
+        let write_m = mtok * write_mult;
+        let warm_m = mtok * read_mult;
         self.count += 1;
         self.rebuilt = self.rebuilt.saturating_add(rebuilt);
-        self.write_weighted += write_w;
-        self.warm_weighted += warm_w;
+        self.write_mtok += write_m;
+        self.warm_mtok += warm_m;
         match price {
             Some(usd) => {
                 self.priced_rebuilt = self.priced_rebuilt.saturating_add(rebuilt);
-                self.write_weighted_usd += write_w * usd;
-                self.warm_weighted_usd += warm_w * usd;
+                self.write_usd += write_m * usd;
+                self.warm_usd += warm_m * usd;
             }
             None => self.unpriced = self.unpriced.saturating_add(rebuilt),
         }
     }
 
-    fn write_usd(&self, rate: Option<f64>) -> f64 {
-        rate.map_or(self.write_weighted_usd, |r| self.write_weighted * r) / 1e6
+    fn write_usd(&self, rate: Option<f64>) -> Option<f64> {
+        let v = rate.map_or(self.write_usd, |r| self.write_mtok * r);
+        v.is_finite().then_some(v)
     }
 
-    fn penalty_usd(&self, rate: Option<f64>) -> f64 {
-        let warm = rate.map_or(self.warm_weighted_usd, |r| self.warm_weighted * r) / 1e6;
-        (self.write_usd(rate) - warm).max(0.0)
+    fn penalty_usd(&self, rate: Option<f64>) -> Option<f64> {
+        let write = self.write_usd(rate)?;
+        let warm = rate.map_or(self.warm_usd, |r| self.warm_mtok * r);
+        let diff = write - warm;
+        (warm.is_finite() && diff.is_finite()).then(|| diff.max(0.0))
     }
 
     fn unpriced_for(&self, rate: Option<f64>) -> u64 {
@@ -137,8 +140,8 @@ pub(super) struct Tracker {
     mid_edit_since_reply: bool,
     total_input: u64,
     priced_input: u64,
-    total_weighted: f64,
-    total_weighted_usd: f64,
+    total_mtok: f64,
+    total_usd: f64,
     busts: BTreeMap<(&'static str, BustCause), BustRow>,
 }
 
@@ -219,6 +222,10 @@ impl Tracker {
         self.mid_edit_since_reply = false;
     }
 
+    pub(super) fn total_penalty_usd(&self, rate: Option<f64>) -> Option<f64> {
+        sum_finite(self.busts.values().map(|b| b.penalty_usd(rate)))
+    }
+
     pub(super) fn summary(&self, opts: &Opts) -> Vec<(String, Value)> {
         let count: u64 = self.busts.values().map(|b| b.count).sum();
         let rebuilt: u64 = self
@@ -226,16 +233,8 @@ impl Tracker {
             .values()
             .map(|b| b.rebuilt)
             .fold(0, u64::saturating_add);
-        let write_usd: f64 = self
-            .busts
-            .values()
-            .map(|b| b.write_usd(opts.usd_per_mtok))
-            .sum();
-        let penalty_usd: f64 = self
-            .busts
-            .values()
-            .map(|b| b.penalty_usd(opts.usd_per_mtok))
-            .sum();
+        let write_usd = sum_finite(self.busts.values().map(|b| b.write_usd(opts.usd_per_mtok)));
+        let penalty_usd = self.total_penalty_usd(opts.usd_per_mtok);
         let total_usd = self.total_usd(opts.usd_per_mtok);
         vec![
             ("sub_ttl_busts".to_owned(), json!(count)),
@@ -250,7 +249,7 @@ impl Tracker {
             ),
             (
                 "sub_ttl_bust_penalty_usd_est".to_owned(),
-                json!(round_cents(penalty_usd)),
+                round_cents(penalty_usd),
             ),
         ]
     }
@@ -278,7 +277,7 @@ impl Tracker {
         key: (&'static str, BustCause),
         b: &BustRow,
         rate: Option<f64>,
-        total_usd: f64,
+        total_usd: Option<f64>,
     ) -> (f64, u64, (&'static str, BustCause), Vec<Value>) {
         let write_usd = b.write_usd(rate);
         let penalty_usd = b.penalty_usd(rate);
@@ -288,8 +287,8 @@ impl Tracker {
             json!(b.count),
             json!(b.rebuilt),
             ratio(b.rebuilt, self.total_input),
-            json!(round_cents(write_usd)),
-            json!(round_cents(penalty_usd)),
+            round_cents(write_usd),
+            round_cents(penalty_usd),
             float_ratio(write_usd, total_usd),
             divergence(
                 b.priced_rebuilt_for(rate),
@@ -299,7 +298,7 @@ impl Tracker {
             ),
             json!(b.unpriced_for(rate)),
         ];
-        (penalty_usd, b.rebuilt, key, row)
+        (penalty_usd.unwrap_or(-1.0), b.rebuilt, key, row)
     }
 
     fn note_shape(&mut self, id: Option<&str>) {
@@ -351,13 +350,14 @@ impl Tracker {
             clippy::cast_precision_loss,
             reason = "token counts stay far below 2^52"
         )]
-        let weighted = ctx.uncached_input as f64
+        let mtok = (ctx.uncached_input as f64
             + ctx.write as f64 * ctx.write_mult
-            + ctx.read as f64 * read_mult;
-        self.total_weighted += weighted;
+            + ctx.read as f64 * read_mult)
+            / 1e6;
+        self.total_mtok += mtok;
         if let Some(usd) = ctx.price {
             self.priced_input = self.priced_input.saturating_add(sum);
-            self.total_weighted_usd += weighted * usd;
+            self.total_usd += mtok * usd;
         }
     }
 
@@ -369,9 +369,15 @@ impl Tracker {
         }
     }
 
-    fn total_usd(&self, rate: Option<f64>) -> f64 {
-        rate.map_or(self.total_weighted_usd, |r| self.total_weighted * r) / 1e6
+    fn total_usd(&self, rate: Option<f64>) -> Option<f64> {
+        let v = rate.map_or(self.total_usd, |r| self.total_mtok * r);
+        v.is_finite().then_some(v)
     }
+}
+
+fn sum_finite(mut iter: impl Iterator<Item = Option<f64>>) -> Option<f64> {
+    let total = iter.try_fold(0.0_f64, |acc, v| Some(acc + v?))?;
+    total.is_finite().then_some(total)
 }
 
 fn has_tool_load_call(r: &Record<'_>) -> bool {
@@ -384,28 +390,45 @@ fn is_rewind_reply(v: &Value, seen_uuids: &HashSet<String>) -> bool {
         .is_some_and(|p| seen_uuids.contains(p))
 }
 
-fn round_cents(usd: f64) -> f64 {
-    (usd * 100.0).round() / 100.0
+fn round_cents(usd: Option<f64>) -> Value {
+    let Some(scaled) = usd
+        .filter(|v| v.is_finite())
+        .map(|v| v * 100.0)
+        .filter(|v| v.is_finite())
+    else {
+        return Value::Null;
+    };
+    let r = scaled.round() / 100.0;
+    json!(if r == 0.0 { 0.0 } else { r })
 }
 
-fn float_ratio(num: f64, den: f64) -> Value {
-    if den <= 0.0 {
+fn float_ratio(num: Option<f64>, den: Option<f64>) -> Value {
+    let Some((n, d)) = num
+        .zip(den)
+        .filter(|&(n, d)| n.is_finite() && d.is_finite() && d > 0.0)
+    else {
         return Value::Null;
-    }
-    json!(((num / den) * 100.0).round() / 100.0)
+    };
+    round_cents(Some(n / d))
 }
 
-fn divergence(rebuilt: u64, total_input: u64, write_usd: f64, total_usd: f64) -> Value {
-    if rebuilt == 0 || total_input == 0 || write_usd <= 0.0 || total_usd <= 0.0 {
+fn divergence(
+    rebuilt: u64,
+    total_input: u64,
+    write_usd: Option<f64>,
+    total_usd: Option<f64>,
+) -> Value {
+    let Some((w, t)) = write_usd.zip(total_usd).filter(|&(w, t)| {
+        rebuilt > 0 && total_input > 0 && w.is_finite() && t.is_finite() && w > 0.0 && t > 0.0
+    }) else {
         return Value::Null;
-    }
+    };
     #[expect(
         clippy::cast_precision_loss,
         reason = "token counts stay far below 2^52"
     )]
     let token_share = rebuilt as f64 / total_input as f64;
-    let usd_share = write_usd / total_usd;
-    json!(((usd_share / token_share) * 100.0).round() / 100.0)
+    round_cents(Some((w / t) / token_share))
 }
 
 /// Note explaining the sub-TTL cache-bust table and token-vs-dollar divergence.

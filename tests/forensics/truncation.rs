@@ -263,3 +263,104 @@ fn plain_assistant_turns_advance_truncation_turn_gap() {
     assert_eq!(s["truncated_outputs"], 1);
     assert_eq!(s["truncation_reruns"], 0);
 }
+
+fn codex_exec(ts: &str, id: &str, cmd: &str) -> String {
+    json!({"type": "response_item", "timestamp": ts, "payload": {"type": "custom_tool_call", "name": "exec", "call_id": id, "input": format!("text(await tools.exec_command({{cmd: \"{cmd}\"}}));")}}).to_string()
+}
+
+fn codex_out(ts: &str, id: &str, code: i64, output: &str) -> String {
+    let body = json!({"exit_code": code, "output": output}).to_string();
+    json!({"type": "response_item", "timestamp": ts, "payload": {"type": "custom_tool_call_output", "call_id": id, "output": [{"type": "input_text", "text": body}]}}).to_string()
+}
+
+fn codex_item(ts: &str, args: &[&str], code: i64, out: &str, ms: i64) -> String {
+    json!({"type": "event_msg", "timestamp": ts, "payload": {"type": "item_completed", "started_at_ms": ms, "completed_at_ms": ms + 5, "item": {"type": "CommandExecution", "command": args, "exit_code": code, "aggregated_output": out, "status": "completed"}}}).to_string()
+}
+
+#[test]
+fn codex_truncation_uses_turn_boundaries_for_multi_call_and_text_turns() {
+    let dir = super::temp_dir("tr", "codex-turns");
+    // Multi-call turn: 3 extra calls inside turn t1 must not advance the turn gap past 2.
+    let multi = vec![
+        json!({"type": "event_msg", "timestamp": "2026-11-08T01:00:00Z", "payload": {"type": "task_started", "turn_id": "t1"}}).to_string(),
+        json!({"type": "turn_context", "timestamp": "2026-11-08T01:00:00Z", "payload": {"turn_id": "t1", "model": "gpt-6.1-sol"}}).to_string(),
+        codex_exec("2026-11-08T01:00:01Z", "c1", "git status"),
+        codex_out("2026-11-08T01:00:02Z", "c1", 0, "[output truncated]"),
+        codex_exec("2026-11-08T01:00:03Z", "c2", "git diff"),
+        codex_exec("2026-11-08T01:00:04Z", "c3", "cargo check"),
+        codex_exec("2026-11-08T01:00:05Z", "c4", "rustc --version"),
+        json!({"type": "token_usage_record", "timestamp": "2026-11-08T01:00:06Z", "payload": {"turn_id": "t1", "response_id": "r1"}}).to_string(),
+        json!({"type": "token_usage_record", "timestamp": "2026-11-08T01:00:06Z", "payload": {"turn_id": "t1", "response_id": "r1"}}).to_string(),
+        json!({"type": "turn_context", "timestamp": "2026-11-08T01:00:10Z", "payload": {"turn_id": "t2", "model": "gpt-6.1-sol"}}).to_string(),
+        codex_exec("2026-11-08T01:00:11Z", "c5", "git status"),
+        codex_out("2026-11-08T01:00:12Z", "c5", 0, "clean"),
+    ];
+    super::write_jsonl(&dir, "multi/2026/rollout.jsonl", &multi);
+    let doc_multi = super::run_json(
+        "polls",
+        &["--codex-root", dir.join("multi").to_str().unwrap()],
+    );
+    assert_eq!(
+        doc_multi["detectors"]["polls"]["summary"]["truncation_reruns"],
+        1
+    );
+    assert_codex_text_turns(&dir);
+}
+
+fn assert_codex_text_turns(dir: &std::path::Path) {
+    // 3 intervening text-only Codex turns push the repeat past the 2-turn gap.
+    let spaced = vec![
+        json!({"type": "turn_context", "timestamp": "2026-11-08T02:00:00Z", "payload": {"turn_id": "u1"}}).to_string(),
+        codex_exec("2026-11-08T02:00:01Z", "s1", "git status"),
+        codex_out("2026-11-08T02:00:02Z", "s1", 0, "[output truncated]"),
+        json!({"type": "response_item", "timestamp": "2026-11-08T02:00:03Z", "payload": {"type": "message", "role": "assistant", "id": "m1"}}).to_string(),
+        json!({"type": "response_item", "timestamp": "2026-11-08T02:00:03Z", "payload": {"type": "message", "role": "assistant", "id": "m1"}}).to_string(),
+        json!({"type": "response_item", "timestamp": "2026-11-08T02:00:04Z", "payload": {"type": "message", "role": "user", "id": "usr1"}}).to_string(),
+        json!({"type": "token_usage_record", "timestamp": "2026-11-08T02:00:05Z", "payload": {"response_id": "u1r1"}}).to_string(),
+        json!({"type": "token_usage_record", "timestamp": "2026-11-08T02:00:06Z", "payload": {"response_id": "u1r2"}}).to_string(),
+        json!({"type": "event_msg", "timestamp": "2026-11-08T02:00:07Z", "payload": {"type": "agent_message", "id": "am1"}}).to_string(),
+        json!({"type": "response_item", "timestamp": "2026-11-08T02:00:08Z", "payload": {"type": "message", "role": "assistant", "id": "m3"}}).to_string(),
+        codex_exec("2026-11-08T02:00:10Z", "s2", "git status"),
+        codex_out("2026-11-08T02:00:11Z", "s2", 0, "clean"),
+    ];
+    super::write_jsonl(dir, "spaced/2026/rollout.jsonl", &spaced);
+    let doc = super::run_json(
+        "polls",
+        &["--codex-root", dir.join("spaced").to_str().unwrap()],
+    );
+    assert_eq!(doc["detectors"]["polls"]["summary"]["truncated_outputs"], 1);
+    assert_eq!(doc["detectors"]["polls"]["summary"]["truncation_reruns"], 0);
+}
+
+#[test]
+fn codex_command_execution_uses_model_visible_truncation_not_archived_stdout() {
+    let dir = super::temp_dir("tr", "codex-visible");
+    // Archived CommandExecution holds complete non-truncated stdout, while visible output is truncated.
+    let ts = "2026-11-08T01:00:00.000Z";
+    let ms = 1_794_099_600_000_i64;
+    let lines = vec![
+        codex_exec(ts, "v1", "cargo test"),
+        codex_item(ts, &["cargo", "test"], 0, "full archived stdout\nall lines intact", ms + 1),
+        codex_out(ts, "v1", 0, "output too long; <persisted-output>"),
+        codex_exec("2026-11-08T01:00:05.000Z", "v2", "cargo test"),
+        codex_item("2026-11-08T01:00:05.000Z", &["cargo", "test"], 0, "1 passed", ms + 5001),
+        codex_out("2026-11-08T01:00:05.000Z", "v2", 0, "1 passed"),
+        // Tail-truncated visible output (shorter suffix of archived stdout, no marker text).
+        codex_exec("2026-11-08T01:00:10.000Z", "v3", "git status"),
+        codex_item("2026-11-08T01:00:10.000Z", &["git", "status"], 0, "head lines\ntail line", ms + 10_001),
+        codex_out("2026-11-08T01:00:10.000Z", "v3", 0, "tail line"),
+        codex_exec("2026-11-08T01:00:15.000Z", "v4", "git status"),
+        codex_out("2026-11-08T01:00:15.000Z", "v4", 0, "clean"),
+        // Non-JSON plain-text truncated output on single tied command.
+        codex_exec("2026-11-08T01:00:20.000Z", "v5", "git diff"),
+        codex_item("2026-11-08T01:00:20.000Z", &["git", "diff"], 0, "full diff", ms + 20_001),
+        json!({"type": "response_item", "timestamp": "2026-11-08T01:00:20.000Z", "payload": {"type": "custom_tool_call_output", "call_id": "v5", "output": "Script completed\n[output truncated]"}}).to_string(),
+        codex_exec("2026-11-08T01:00:25.000Z", "v6", "git diff"),
+        codex_out("2026-11-08T01:00:25.000Z", "v6", 0, "ok"),
+    ];
+    super::write_jsonl(&dir, "2026/rollout.jsonl", &lines);
+    let doc = super::run_json("polls", &["--codex-root", dir.to_str().unwrap()]);
+    let s = &doc["detectors"]["polls"]["summary"];
+    assert_eq!(s["truncated_outputs"], 3);
+    assert_eq!(s["truncation_reruns"], 3);
+}

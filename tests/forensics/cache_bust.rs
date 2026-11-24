@@ -202,3 +202,102 @@ fn unpriced_sessions_do_not_inflate_priced_divergence_ratio() {
             .clone();
     assert_eq!(r_pure, r_mixed);
 }
+
+#[test]
+fn extreme_price_file_scales_before_multiplying_and_marks_overflow_null() {
+    let dir = super::temp_dir("cb", "extreme-price");
+    let price_file = dir.join("prices.json");
+    std::fs::write(
+        &price_file,
+        r#"{"claude-opus-5-5":{"input_cost_per_token":1e300}}"#,
+    )
+    .expect("write price file");
+    let pf = price_file.to_str().unwrap();
+    assert_finite_extreme_price(&dir, pf);
+    assert_overflow_extreme_price(&dir, pf);
+}
+
+fn assert_finite_extreme_price(dir: &std::path::Path, price_file: &str) {
+    let txt = json!([{"type": "text", "text": "ok"}]);
+    let lines = vec![
+        reply(
+            "2026-11-08T01:00:00Z",
+            "e1",
+            "claude-opus-5-5",
+            100_000,
+            0,
+            &txt,
+        ),
+        reply(
+            "2026-11-08T01:00:10Z",
+            "e2",
+            "claude-opus-5-5",
+            90_000,
+            10_000,
+            &txt,
+        ),
+    ];
+    super::write_jsonl(dir, "finite/proj/s.jsonl", &lines);
+    let doc = super::run_json(
+        "cache",
+        &[
+            "--claude-root",
+            dir.join("finite").to_str().unwrap(),
+            "--prices",
+            price_file,
+        ],
+    );
+    let row = find_bust(bust_rows(&doc), "main", "proxy or prefix change");
+    assert!(row["write_usd_est"].as_f64().unwrap() > 1e304);
+    assert!(row["penalty_usd_est"].as_f64().unwrap() > 1e304);
+    assert!(row["usd_to_token_ratio"].as_f64().unwrap() > 1.0);
+    assert!(
+        doc["detectors"]["cache"]["summary"]["sub_ttl_bust_penalty_usd_est"]
+            .as_f64()
+            .unwrap()
+            > 1e304
+    );
+}
+
+fn assert_overflow_extreme_price(dir: &std::path::Path, price_file: &str) {
+    let txt = json!([{"type": "text", "text": "ok"}]);
+    // 1e9 * 1e300 overflows f64 to +inf; 2e7 * 1e300 is finite (~2.5e307) but * 100.0 overflows.
+    for (name, write, read) in [("inf", 900_000_000, 100_000_000), ("scale", 20_000_000, 0)] {
+        let lines = vec![
+            reply(
+                "2026-11-08T01:00:00Z",
+                "h1",
+                "claude-opus-5-5",
+                write + read,
+                0,
+                &txt,
+            ),
+            reply(
+                "2026-11-08T01:00:10Z",
+                "h2",
+                "claude-opus-5-5",
+                write,
+                read,
+                &txt,
+            ),
+        ];
+        super::write_jsonl(dir, &format!("{name}/proj/s.jsonl"), &lines);
+        let over = super::run_json(
+            "cache",
+            &[
+                "--claude-root",
+                dir.join(name).to_str().unwrap(),
+                "--prices",
+                price_file,
+            ],
+        );
+        let row = find_bust(bust_rows(&over), "main", "proxy or prefix change");
+        assert_eq!(row["write_usd_est"], Value::Null, "{name}");
+        assert_eq!(row["penalty_usd_est"], Value::Null, "{name}");
+        assert_eq!(
+            over["detectors"]["cache"]["summary"]["sub_ttl_bust_penalty_usd_est"],
+            Value::Null,
+            "{name}"
+        );
+    }
+}

@@ -52,6 +52,7 @@ pub(super) struct Health {
     has_compacted: bool,
     post_turns: u64,
     last_msg_id: Option<String>,
+    codex_turns: super::CodexTurns,
     edited_before: HashSet<String>,
     edited_current: HashSet<String>,
     post_reread_edited: HashSet<String>,
@@ -66,6 +67,7 @@ impl Health {
         self.has_compacted = false;
         self.post_turns = 0;
         self.last_msg_id = None;
+        self.codex_turns.reset();
         self.edited_before.clear();
         self.edited_current.clear();
         self.post_reread_edited.clear();
@@ -73,21 +75,17 @@ impl Health {
     }
 
     pub(super) fn branch(&mut self) {
-        self.pending_pre = None;
-        self.low_savings_streak = 0;
-        self.has_compacted = false;
-        self.post_turns = 0;
-        self.last_msg_id = None;
-        self.edited_before.clear();
-        self.edited_current.clear();
-        self.post_reread_edited.clear();
-        self.post_reedited.clear();
+        self.begin();
     }
 
     pub(super) fn wants_claude(&self, line: &str) -> bool {
         (self.pending_pre.is_some()
             || (self.has_compacted && self.post_turns <= POST_COMPACT_WINDOW))
             && line.contains("\"type\":\"assistant\"")
+    }
+
+    pub(super) fn wants_codex(&self, line: &str) -> bool {
+        self.has_compacted && self.post_turns <= POST_COMPACT_WINDOW && super::codex_turn_line(line)
     }
 
     pub(super) fn on_boundary(&mut self, s: &Session, r: &Record<'_>) {
@@ -120,6 +118,7 @@ impl Health {
         self.has_compacted = true;
         self.post_turns = 0;
         self.last_msg_id = None;
+        self.codex_turns.reset();
         self.post_reread_edited.clear();
         self.post_reedited.clear();
     }
@@ -145,8 +144,8 @@ impl Health {
         }
     }
 
-    pub(super) fn on_codex_turn(&mut self) {
-        if self.has_compacted {
+    pub(super) fn on_codex_record(&mut self, r: &Record<'_>) {
+        if self.has_compacted && self.codex_turns.note(r) {
             self.post_turns += 1;
         }
     }

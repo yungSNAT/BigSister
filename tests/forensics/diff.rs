@@ -6,13 +6,26 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 
-fn metric_row<'a>(doc: &'a Value, metric: &str) -> &'a Value {
+pub(super) fn metric_row<'a>(doc: &'a Value, metric: &str) -> &'a Value {
     doc["detectors"]["diff"]["tables"][0]["rows"]
         .as_array()
         .expect("rows")
         .iter()
         .find(|r| r["metric"] == metric)
         .unwrap_or_else(|| panic!("missing metric {metric}"))
+}
+
+pub(super) fn diff_json(before: &Path, after: &Path, extra: &[&str]) -> Value {
+    let mut args = vec![
+        "diff",
+        before.to_str().unwrap(),
+        after.to_str().unwrap(),
+        "--json",
+    ];
+    args.extend_from_slice(extra);
+    let (code, stdout, stderr) = super::run(&args);
+    assert_eq!(code, 0, "{stderr}");
+    serde_json::from_str(&stdout).unwrap()
 }
 
 fn session_lines(ts1: &str, ts2: &str, read2: u64, write2: u64, tag: &str) -> Vec<String> {

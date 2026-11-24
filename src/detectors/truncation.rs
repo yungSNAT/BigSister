@@ -48,6 +48,7 @@ struct VerbRow {
 pub(super) struct Tracker {
     turn: u64,
     last_msg_id: Option<String>,
+    codex_turns: super::CodexTurns,
     stashed: HashMap<String, u64>,
     unread: Vec<(Agent, String, u64)>,
     by_verb: BTreeMap<(Agent, String), VerbRow>,
@@ -57,6 +58,7 @@ impl Tracker {
     pub(super) fn begin(&mut self) {
         self.turn = 0;
         self.last_msg_id = None;
+        self.codex_turns.reset();
         self.stashed.clear();
         self.unread.clear();
     }
@@ -78,8 +80,10 @@ impl Tracker {
         }
     }
 
-    pub(super) fn next_turn(&mut self) {
-        self.turn += 1;
+    pub(super) fn note_codex_turn(&mut self, r: &Record<'_>) {
+        if self.codex_turns.note(r) {
+            self.turn += 1;
+        }
     }
 
     /// Checks whether `cmd` repeats a command whose output was truncated within 1-2 turns.

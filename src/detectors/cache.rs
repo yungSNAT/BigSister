@@ -286,7 +286,7 @@ impl Detector for Cache {
         }
     }
 
-    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
+    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>, _in_window: bool) {
         self.price = usd_per_mtok;
     }
 
@@ -417,6 +417,11 @@ fn notes(opts: &Opts) -> Vec<String> {
 }
 
 impl Cache {
+    /// Unrounded total sub-TTL cache-bust penalty USD, or `None` if non-finite.
+    pub(crate) fn exact_sub_ttl_penalty_usd(&self, rate: Option<f64>) -> Option<f64> {
+        self.busts.total_penalty_usd(rate)
+    }
+
     /// Why `reply` wrote to the cache, and how many of its writes rebuilt what the
     /// previous reply had cached.
     fn cause(&self, reply: &Reply<'_>) -> (Cause, u64) {

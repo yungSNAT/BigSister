@@ -116,7 +116,7 @@ pub struct Polls {
 
 fn polls_prefilter(s: &Session, line: &str) -> bool {
     match s.agent {
-        Agent::Codex => super::tool_prefilter(s, line),
+        Agent::Codex => super::tool_prefilter(s, line) || super::codex_turn_line(line),
         _ => line.contains("\"type\":\"assistant\"") || super::tool_prefilter(s, line),
     }
 }
@@ -140,7 +140,9 @@ impl Detector for Polls {
                     || self.claude.wants(line)
                     || (self.truncation.has_pending() && line.contains("\"type\":\"assistant\""))
             }
-            Agent::Codex => codex_call_line(line) || self.codex.wants(line),
+            Agent::Codex => {
+                codex_call_line(line) || self.codex.wants(line) || super::codex_turn_line(line)
+            }
         }
     }
 
@@ -166,7 +168,7 @@ impl Detector for Polls {
         self.codex.end();
     }
 
-    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
+    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>, _in_window: bool) {
         for (agent, scope, class, n) in self.unread.drain(..) {
             let add = |c: &mut Counts| c.poll_priced.add(n, usd_per_mtok);
             add(self.totals.entry((agent, scope)).or_default());
@@ -404,8 +406,8 @@ impl Polls {
 
     /// Reads a Codex call's commands, or its output.
     fn codex(&mut self, s: &Session, r: &Record<'_>) {
+        self.truncation.note_codex_turn(r);
         if let Some(call) = codex_call(r) {
-            self.truncation.next_turn();
             let awaits = call.exec && !call.call_id.is_empty();
             let mut runs = Vec::new();
             for step in &call.steps {
@@ -421,8 +423,9 @@ impl Polls {
         {
             for (run, res) in self.codex.pair(&out) {
                 if let Some(run) = run {
-                    let truncated = truncation::text_looks_truncated(&res.output);
-                    self.result(s, run, res.exit_code != 0, truncated, || res.printed_chars);
+                    self.result(s, run, res.exit_code != 0, res.visible_truncated, || {
+                        res.printed_chars
+                    });
                 }
             }
         }

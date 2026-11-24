@@ -94,7 +94,11 @@ pub struct Rereads {
 
 fn rereads_prefilter(s: &Session, line: &str) -> bool {
     match s.agent {
-        Agent::Codex => line.contains("\"type\":\"compacted\"") || super::tool_prefilter(s, line),
+        Agent::Codex => {
+            line.contains("\"type\":\"compacted\"")
+                || super::tool_prefilter(s, line)
+                || super::codex_turn_line(line)
+        }
         _ => {
             line.contains("\"compact_boundary\"")
                 || line.contains("\"type\":\"assistant\"")
@@ -126,6 +130,7 @@ impl Detector for Rereads {
                 line.contains("\"type\":\"compacted\"")
                     || codex_call_line(line)
                     || self.codex.wants(line)
+                    || self.health.wants_codex(line)
             }
         }
     }
@@ -157,7 +162,7 @@ impl Detector for Rereads {
         self.health.branch();
     }
 
-    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
+    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>, _in_window: bool) {
         for (agent, scope, trigger, n) in self.unread.drain(..) {
             let c = self.totals.entry((agent, scope)).or_default();
             c.reread_priced.add(n, usd_per_mtok);
@@ -271,8 +276,8 @@ impl Detector for Rereads {
 impl Rereads {
     /// Reads a Codex call's reads, or the output of a call that re-read.
     fn codex(&mut self, s: &Session, r: &Record<'_>) {
+        self.health.on_codex_record(r);
         if let Some(call) = codex_call(r) {
-            self.health.on_codex_turn();
             for path in compaction::codex_patch_paths(r) {
                 self.health.on_edit(s, &path, r.in_window);
             }

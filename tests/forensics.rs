@@ -4,6 +4,7 @@ mod forensics {
     mod cache_bust;
     mod compaction;
     mod diff;
+    mod diff_edges;
     mod truncation;
 
     use std::fs;

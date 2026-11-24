@@ -221,3 +221,82 @@ fn unmeasured_compaction_resets_thrashing_streak() {
     assert_eq!(s["compactions_measured"], 3);
     assert_eq!(s["compaction_thrashing_passes"], 0);
 }
+
+fn codex_patch(ts: &str, id: &str, path: &str) -> String {
+    let args = format!("*** Update File: {path}\n");
+    json!({"type": "response_item", "timestamp": ts, "payload": {"type": "function_call", "name": "apply_patch", "call_id": id, "arguments": args}}).to_string()
+}
+
+fn codex_exec_cmd(ts: &str, id: &str, cmd: &str) -> String {
+    let input = format!("tools.exec_command({{cmd: \"{cmd}\"}})");
+    json!({"type": "response_item", "timestamp": ts, "payload": {"type": "custom_tool_call", "name": "exec", "call_id": id, "input": input}}).to_string()
+}
+
+#[test]
+fn codex_post_compaction_window_counts_turn_boundaries_not_tool_calls() {
+    let dir = super::temp_dir("ct", "codex-turns");
+    assert_codex_multi_call_turn(&dir);
+    assert_codex_spaced_text_turns(&dir);
+}
+
+fn assert_codex_multi_call_turn(dir: &std::path::Path) {
+    // 6 tool calls in 1 post-compaction turn must still detect churn and revert.
+    let mut lines = vec![
+        codex_patch("2026-11-08T01:00:00Z", "p1", "/work/a.rs"),
+        json!({"type": "compacted", "timestamp": "2026-11-08T01:01:00Z"}).to_string(),
+        json!({"type": "event_msg", "timestamp": "2026-11-08T01:01:01Z", "payload": {"type": "task_started", "turn_id": "t1"}}).to_string(),
+        json!({"type": "turn_context", "timestamp": "2026-11-08T01:01:02Z", "payload": {"turn_id": "t1", "model": "gpt-6.1-sol"}}).to_string(),
+    ];
+    for i in 1..=5 {
+        lines.push(codex_exec_cmd(
+            "2026-11-08T01:01:03Z",
+            &format!("n{i}"),
+            "git status",
+        ));
+    }
+    lines.push(codex_exec_cmd(
+        "2026-11-08T01:01:04Z",
+        "r1",
+        "cat /work/a.rs",
+    ));
+    lines.push(codex_patch("2026-11-08T01:01:05Z", "p2", "/work/a.rs"));
+    super::write_jsonl(dir, "multi/2026/rollout.jsonl", &lines);
+    let doc = super::run_json(
+        "rereads",
+        &["--codex-root", dir.join("multi").to_str().unwrap()],
+    );
+    assert_eq!(
+        doc["detectors"]["rereads"]["summary"]["post_compaction_revert_cycles"],
+        1
+    );
+}
+
+fn assert_codex_spaced_text_turns(dir: &std::path::Path) {
+    // 6 intervening text-only Codex turns push the later read/edit past the 5-turn window.
+    let mut lines = vec![
+        codex_patch("2026-11-08T02:00:00Z", "p1", "/work/b.rs"),
+        json!({"type": "compacted", "timestamp": "2026-11-08T02:01:00Z"}).to_string(),
+    ];
+    for i in 1..=6 {
+        lines.push(json!({"type": "response_item", "timestamp": "2026-11-08T02:01:05Z", "payload": {"type": "message", "role": "assistant", "id": format!("m{i}")}}).to_string());
+    }
+    lines.push(codex_exec_cmd(
+        "2026-11-08T02:02:00Z",
+        "r1",
+        "cat /work/b.rs",
+    ));
+    lines.push(codex_patch("2026-11-08T02:02:05Z", "p2", "/work/b.rs"));
+    super::write_jsonl(dir, "spaced/2026/rollout.jsonl", &lines);
+    let doc = super::run_json(
+        "rereads",
+        &["--codex-root", dir.join("spaced").to_str().unwrap()],
+    );
+    let s = &doc["detectors"]["rereads"]["summary"];
+    assert_eq!(
+        (
+            s["post_compaction_churn_rereads"].clone(),
+            s["post_compaction_revert_cycles"].clone()
+        ),
+        (json!(0), json!(0))
+    );
+}
