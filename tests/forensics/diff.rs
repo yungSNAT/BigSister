@@ -171,8 +171,8 @@ fn assert_diff_sample_and_dirs(root: &Path) {
 fn assert_diff_sample() {
     let (code, sample_out, stderr) = super::run(&[
         "diff",
-        "2026-11-01..2026-11-08",
-        "2026-11-08..now",
+        "2026-11-01..2026-11-05",
+        "2026-11-05..now",
         "--sample",
         "--json",
     ]);
