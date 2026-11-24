@@ -1,62 +1,19 @@
-//! Regression tests for sub-TTL (< 5 min) cache-bust detection and divergence.
-
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+//! Sub-TTL (< 5 min) cache-bust detection and divergence tests.
 
 use serde_json::{Value, json};
 
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("bigsister-cb-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
-}
+use super::{find_row, reply as raw_reply, table_rows};
 
-fn write_jsonl(dir: &Path, rel: &str, lines: &[String]) {
-    let path = dir.join(rel);
-    fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-    let body = lines.join("\n");
-    fs::write(path, format!("{body}\n")).expect("write fixture");
-}
-
-fn run_cache(extra: &[&str]) -> Value {
-    let mut args = vec!["cache", "--since", "2026-11-01", "--json"];
-    args.extend(extra);
-    let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
-        .args(&args)
-        .output()
-        .expect("run bigsister");
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    serde_json::from_slice(&out.stdout).expect("valid JSON")
+fn reply(ts: &str, id: &str, model: &str, write: u64, read: u64, content: &Value) -> String {
+    raw_reply(ts, id, model, 10, write, read, content)
 }
 
 fn bust_rows(doc: &Value) -> &[Value] {
-    doc["detectors"]["cache"]["tables"]
-        .as_array()
-        .expect("tables")
-        .iter()
-        .find(|t| t["title"] == "Sub-TTL cache busts (< 5 min)")
-        .and_then(|t| t["rows"].as_array())
-        .map(Vec::as_slice)
-        .expect("busts table")
+    table_rows(doc, "cache", "Sub-TTL cache busts (< 5 min)")
 }
 
 fn find_bust<'a>(rows: &'a [Value], scope: &str, cause: &str) -> &'a Value {
-    rows.iter()
-        .find(|r| r["scope"] == scope && r["cause"] == cause)
-        .unwrap_or_else(|| panic!("no row ({scope}, {cause}) in {rows:?}"))
-}
-
-fn reply(ts: &str, id: &str, model: &str, write: u64, read: u64, content: &Value) -> String {
-    format!(
-        r#"{{"type":"assistant","uuid":"u-{id}","timestamp":"{ts}","message":{{"model":"{model}","id":"{id}","role":"assistant","content":{content},"usage":{{"input_tokens":10,"cache_creation_input_tokens":{write},"cache_read_input_tokens":{read},"cache_creation":{{"ephemeral_5m_input_tokens":{write},"ephemeral_1h_input_tokens":0}}}}}}}}"#
-    )
+    find_row(rows, &[("scope", json!(scope)), ("cause", json!(cause))])
 }
 
 fn fixture_part_a() -> Vec<String> {
@@ -109,10 +66,10 @@ fn fixture_part_c(txt: &Value) -> Vec<String> {
 
 #[test]
 fn sub_ttl_cache_busts_classify_causes_and_divergence() {
-    let dir = temp_dir("causes");
+    let dir = super::temp_dir("cb", "causes");
     let mut lines = fixture_part_a();
     lines.extend(fixture_part_b());
-    write_jsonl(&dir, "proj/s1.jsonl", &lines);
+    super::write_jsonl(&dir, "proj/s1.jsonl", &lines);
     let unpriced = vec![
         reply(
             "2026-11-08T02:00:00Z",
@@ -147,10 +104,10 @@ fn sub_ttl_cache_busts_classify_causes_and_divergence() {
             &json!([]),
         ),
     ];
-    write_jsonl(&dir, "proj/subagents/agent-1.jsonl", &unpriced);
+    super::write_jsonl(&dir, "proj/subagents/agent-1.jsonl", &unpriced);
 
     let root = dir.to_str().expect("utf8");
-    let doc = run_cache(&["--claude-root", root]);
+    let doc = super::run_json("cache", &["--claude-root", root]);
     assert!(!doc.to_string().contains("SENTINEL-BUST-TEXT"));
     assert_causes(&doc);
     assert_pricing_and_unpriced(root, &unpriced);
@@ -193,14 +150,14 @@ fn assert_causes(doc: &Value) {
 }
 
 fn assert_pricing_and_unpriced(root: &str, unpriced: &[String]) {
-    let flat = run_cache(&["--claude-root", root, "--usd-per-mtok", "10"]);
+    let flat = super::run_json("cache", &["--claude-root", root, "--usd-per-mtok", "10"]);
     let sub = find_bust(bust_rows(&flat), "subagent", "proxy or prefix change");
     assert_eq!(sub["unpriced_tokens"], 0);
     assert!(sub["penalty_usd_est"].as_f64().unwrap() > 0.0);
 
-    let udir = temp_dir("unpriced");
-    write_jsonl(&udir, "proj/u.jsonl", unpriced);
-    let udoc = run_cache(&["--claude-root", udir.to_str().unwrap()]);
+    let udir = super::temp_dir("cb", "unpriced");
+    super::write_jsonl(&udir, "proj/u.jsonl", unpriced);
+    let udoc = super::run_json("cache", &["--claude-root", udir.to_str().unwrap()]);
     assert_eq!(
         udoc["detectors"]["cache"]["summary"]["sub_ttl_bust_usd_share"],
         Value::Null
@@ -209,12 +166,12 @@ fn assert_pricing_and_unpriced(root: &str, unpriced: &[String]) {
 
 #[test]
 fn unpriced_sessions_do_not_inflate_priced_divergence_ratio() {
-    let priced_dir = temp_dir("ratio-priced");
-    let mixed_dir = temp_dir("ratio-mixed");
+    let priced_dir = super::temp_dir("cb", "ratio-priced");
+    let mixed_dir = super::temp_dir("cb", "ratio-mixed");
     let mut lines = fixture_part_a();
     lines.extend(fixture_part_b());
-    write_jsonl(&priced_dir, "proj/s1.jsonl", &lines);
-    write_jsonl(&mixed_dir, "proj/s1.jsonl", &lines);
+    super::write_jsonl(&priced_dir, "proj/s1.jsonl", &lines);
+    super::write_jsonl(&mixed_dir, "proj/s1.jsonl", &lines);
     let unpriced = vec![
         reply(
             "2026-11-08T02:00:00Z",
@@ -233,10 +190,10 @@ fn unpriced_sessions_do_not_inflate_priced_divergence_ratio() {
             &json!([]),
         ),
     ];
-    write_jsonl(&mixed_dir, "proj/subagents/agent-1.jsonl", &unpriced);
+    super::write_jsonl(&mixed_dir, "proj/subagents/agent-1.jsonl", &unpriced);
 
-    let pure = run_cache(&["--claude-root", priced_dir.to_str().unwrap()]);
-    let mixed = run_cache(&["--claude-root", mixed_dir.to_str().unwrap()]);
+    let pure = super::run_json("cache", &["--claude-root", priced_dir.to_str().unwrap()]);
+    let mixed = super::run_json("cache", &["--claude-root", mixed_dir.to_str().unwrap()]);
     let r_pure =
         find_bust(bust_rows(&pure), "main", "tool load / schema change")["usd_to_token_ratio"]
             .clone();

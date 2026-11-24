@@ -1,57 +1,6 @@
-//! Regression tests for truncation-triggered command re-runs.
-
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+//! Truncation-triggered command re-run tests.
 
 use serde_json::{Value, json};
-
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("bigsister-ct-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
-}
-
-fn write_jsonl(dir: &Path, rel: &str, lines: &[String]) {
-    let path = dir.join(rel);
-    fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-    let body = lines.join("\n");
-    fs::write(path, format!("{body}\n")).expect("write fixture");
-}
-
-fn run_json(cmd: &str, extra: &[&str]) -> Value {
-    let mut args = vec![cmd, "--since", "2026-11-01", "--json"];
-    args.extend(extra);
-    let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
-        .args(&args)
-        .output()
-        .expect("run");
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    serde_json::from_slice(&out.stdout).expect("valid JSON")
-}
-
-fn table_rows<'a>(doc: &'a Value, section: &str, title: &str) -> &'a [Value] {
-    doc["detectors"][section]["tables"]
-        .as_array()
-        .expect("tables")
-        .iter()
-        .find(|t| t["title"] == title)
-        .and_then(|t| t["rows"].as_array())
-        .map(Vec::as_slice)
-        .expect("table by title")
-}
-
-fn find_row<'a>(rows: &'a [Value], pairs: &[(&str, Value)]) -> &'a Value {
-    rows.iter()
-        .find(|r| pairs.iter().all(|(k, v)| r.get(*k) == Some(v)))
-        .unwrap_or_else(|| panic!("no row matching {pairs:?}"))
-}
 
 fn reply(
     ts: &str,
@@ -62,9 +11,7 @@ fn reply(
     read: u64,
     content: Value,
 ) -> String {
-    format!(
-        r#"{{"type":"assistant","uuid":"u-{id}","timestamp":"{ts}","message":{{"model":"{model}","id":"{id}","role":"assistant","content":{content},"usage":{{"input_tokens":{input},"cache_creation_input_tokens":{write},"cache_read_input_tokens":{read}}}}}}}"#
-    )
+    super::reply(ts, id, model, input, write, read, &content)
 }
 
 fn read_use(id: &str, path: &str) -> Value {
@@ -218,12 +165,12 @@ fn truncation_codex_lines() -> Vec<String> {
 #[test]
 fn truncation_reruns_flag_repeats_within_two_turns_only() {
     // Patrick Jane always notices when the same command repeats within 2 turns of a cut output.
-    let dir = temp_dir("truncation");
+    let dir = super::temp_dir("tr", "truncation");
     let mut claude = truncation_claude_a();
     claude.extend(truncation_claude_b());
-    write_jsonl(&dir, "claude/proj/s1.jsonl", &claude);
-    write_jsonl(&dir, "codex/2026/rollout.jsonl", &truncation_codex_lines());
-    let doc = run_json(
+    super::write_jsonl(&dir, "claude/proj/s1.jsonl", &claude);
+    super::write_jsonl(&dir, "codex/2026/rollout.jsonl", &truncation_codex_lines());
+    let doc = super::run_json(
         "polls",
         &[
             "--claude-root",
@@ -243,8 +190,8 @@ fn assert_truncation_rows(doc: &Value) {
     let s = &doc["detectors"]["polls"]["summary"];
     assert_eq!(s["truncated_outputs"], 4);
     assert_eq!(s["truncation_reruns"], 3);
-    let rows = table_rows(doc, "polls", "Truncation-triggered command re-runs");
-    let cargo = find_row(
+    let rows = super::table_rows(doc, "polls", "Truncation-triggered command re-runs");
+    let cargo = super::find_row(
         rows,
         &[("agent", json!("claude")), ("verb", json!("cargo"))],
     );
@@ -252,25 +199,25 @@ fn assert_truncation_rows(doc: &Value) {
     assert_eq!(cargo["truncation_reruns"], 1);
     assert_eq!(cargo["rerun_chars"], 18);
     assert_eq!(
-        find_row(rows, &[("agent", json!("claude")), ("verb", json!("git"))])["truncation_reruns"],
+        super::find_row(rows, &[("agent", json!("claude")), ("verb", json!("git"))])["truncation_reruns"],
         1
     );
     assert_eq!(
-        find_row(
+        super::find_row(
             rows,
             &[("agent", json!("claude")), ("verb", json!("rustc"))]
         )["truncation_reruns"],
         0
     );
     assert_eq!(
-        find_row(rows, &[("agent", json!("codex")), ("verb", json!("git"))])["truncation_reruns"],
+        super::find_row(rows, &[("agent", json!("codex")), ("verb", json!("git"))])["truncation_reruns"],
         1
     );
 }
 
 #[test]
 fn plain_assistant_turns_advance_truncation_turn_gap() {
-    let dir = temp_dir("plain-turns");
+    let dir = super::temp_dir("tr", "plain-turns");
     let txt = json!([{"type": "text", "text": "thinking through next step"}]);
     let mut lines = vec![
         reply(
@@ -310,8 +257,8 @@ fn plain_assistant_turns_advance_truncation_turn_gap() {
         bash_use("tb2", "cargo test"),
     ));
     lines.push(tool_res("2026-11-08T01:00:27Z", "tb2", json!("ok")));
-    write_jsonl(&dir, "proj/s.jsonl", &lines);
-    let doc = run_json("polls", &["--claude-root", dir.to_str().unwrap()]);
+    super::write_jsonl(&dir, "proj/s.jsonl", &lines);
+    let doc = super::run_json("polls", &["--claude-root", dir.to_str().unwrap()]);
     let s = &doc["detectors"]["polls"]["summary"];
     assert_eq!(s["truncated_outputs"], 1);
     assert_eq!(s["truncation_reruns"], 0);

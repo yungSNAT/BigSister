@@ -1,36 +1,10 @@
-//! Regression tests for `bigsister diff <before> <after>`.
+//! Tests for `bigsister diff <before> <after>`.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 use serde_json::{Value, json};
-
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("bigsister-diff-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
-}
-
-fn write_jsonl(dir: &Path, rel: &str, lines: &[String]) {
-    let path = dir.join(rel);
-    fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-    let text = lines.join("\n");
-    fs::write(path, format!("{text}\n")).expect("write fixture");
-}
-
-fn run(args: &[&str]) -> (i32, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
-        .args(args)
-        .output()
-        .expect("run");
-    (
-        out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
-}
 
 fn metric_row<'a>(doc: &'a Value, metric: &str) -> &'a Value {
     doc["detectors"]["diff"]["tables"][0]["rows"]
@@ -54,10 +28,10 @@ fn session_lines(ts1: &str, ts2: &str, read2: u64, write2: u64, tag: &str) -> Ve
 
 #[test]
 fn diff_compares_two_session_folders_in_json_csv_and_text() {
-    let root = temp_dir("folders");
+    let root = super::temp_dir("diff", "folders");
     let before = root.join("before");
     let after = root.join("after");
-    write_jsonl(
+    super::write_jsonl(
         &before,
         "proj/s.jsonl",
         &session_lines(
@@ -68,7 +42,7 @@ fn diff_compares_two_session_folders_in_json_csv_and_text() {
             "a",
         ),
     );
-    write_jsonl(
+    super::write_jsonl(
         &after,
         "proj/s.jsonl",
         &session_lines(
@@ -81,7 +55,7 @@ fn diff_compares_two_session_folders_in_json_csv_and_text() {
     );
 
     let (b, a) = (before.to_str().unwrap(), after.to_str().unwrap());
-    let (code, stdout, stderr) = run(&["diff", b, a, "--json"]);
+    let (code, stdout, stderr) = super::run(&["diff", b, a, "--json"]);
     assert_eq!(code, 0, "{stderr}");
     assert!(!stdout.contains("SENTINEL-DIFF-BODY"));
     let doc: Value = serde_json::from_str(&stdout).expect("valid json");
@@ -106,10 +80,10 @@ fn diff_compares_two_session_folders_in_json_csv_and_text() {
 }
 
 fn assert_diff_formats(root: &Path, b: &str, a: &str) {
-    let (code, text, stderr) = run(&["diff", b, a, "--usd-per-mtok", "5"]);
+    let (code, text, stderr) = super::run(&["diff", b, a, "--usd-per-mtok", "5"]);
     assert_eq!(code, 0, "{stderr}");
     assert!(text.contains("== diff: ") && text.contains("cache_hit_pct"));
-    let (code, csv, stderr) = run(&["diff", b, a, "--csv"]);
+    let (code, csv, stderr) = super::run(&["diff", b, a, "--csv"]);
     assert_eq!(code, 0, "{stderr}");
     assert!(csv.contains("diff,cell,0,"));
     let price_file = root.join("prices.json");
@@ -118,7 +92,7 @@ fn assert_diff_formats(root: &Path, b: &str, a: &str) {
         r#"{"claude-opus-5-5":{"input_cost_per_token":5e-6}}"#,
     )
     .unwrap();
-    let (code, out_p, stderr) = run(&[
+    let (code, out_p, stderr) = super::run(&[
         "diff",
         b,
         a,
@@ -136,7 +110,7 @@ fn assert_diff_formats(root: &Path, b: &str, a: &str) {
 
 #[test]
 fn diff_compares_time_windows_sample_and_agent_subfolders() {
-    let root = temp_dir("windows");
+    let root = super::temp_dir("diff", "windows");
     let mut lines = session_lines(
         "2026-11-08T01:00:00Z",
         "2026-11-08T01:00:30Z",
@@ -152,9 +126,9 @@ fn diff_compares_time_windows_sample_and_agent_subfolders() {
         "b",
     );
     lines.extend(later);
-    write_jsonl(&root, "claude/proj/s.jsonl", &lines);
+    super::write_jsonl(&root, "claude/proj/s.jsonl", &lines);
 
-    let (code, stdout, stderr) = run(&[
+    let (code, stdout, stderr) = super::run(&[
         "diff",
         "2026-11-08T00:00:00Z..2026-11-09T00:00:00Z",
         "2026-11-09T00:00:00Z..2026-11-10T00:00:00Z",
@@ -182,7 +156,7 @@ fn assert_diff_sample_and_dirs(root: &Path) {
 }
 
 fn assert_diff_sample() {
-    let (code, sample_out, stderr) = run(&[
+    let (code, sample_out, stderr) = super::run(&[
         "diff",
         "2026-11-01..2026-11-08",
         "2026-11-08..now",
@@ -201,9 +175,9 @@ fn assert_diff_sample() {
 }
 
 fn assert_diff_dir_modes(root: &Path) {
-    let empty = temp_dir("empty-dir");
+    let empty = super::temp_dir("diff", "empty-dir");
     assert_eq!(
-        run(&[
+        super::run(&[
             "diff",
             root.to_str().unwrap(),
             empty.to_str().unwrap(),
@@ -213,7 +187,7 @@ fn assert_diff_dir_modes(root: &Path) {
         0
     );
     assert_eq!(
-        run(&[
+        super::run(&[
             "diff",
             root.join("claude").to_str().unwrap(),
             empty.to_str().unwrap(),
@@ -224,10 +198,10 @@ fn assert_diff_dir_modes(root: &Path) {
         .0,
         0
     );
-    let oc = temp_dir("oc-dir");
+    let oc = super::temp_dir("diff", "oc-dir");
     fs::write(oc.join("opencode.db"), b"not-a-db").unwrap();
     assert_eq!(
-        run(&[
+        super::run(&[
             "diff",
             oc.to_str().unwrap(),
             empty.to_str().unwrap(),
@@ -240,17 +214,18 @@ fn assert_diff_dir_modes(root: &Path) {
 
 #[test]
 fn diff_reports_clear_errors_for_bad_targets() {
-    let missing = temp_dir("missing").join("nope");
-    let dir = temp_dir("ok");
-    let (code, _, stderr) = run(&["diff", missing.to_str().unwrap(), dir.to_str().unwrap()]);
+    let missing = super::temp_dir("diff", "missing").join("nope");
+    let dir = super::temp_dir("diff", "ok");
+    let (code, _, stderr) = super::run(&["diff", missing.to_str().unwrap(), dir.to_str().unwrap()]);
     assert_eq!(code, 1);
     assert!(stderr.contains("diff folder not found"), "{stderr}");
 
-    let (code, _, stderr) = run(&["diff", "2026-11-10..2026-11-01", "2026-11-01..2026-11-10"]);
+    let (code, _, stderr) =
+        super::run(&["diff", "2026-11-10..2026-11-01", "2026-11-01..2026-11-10"]);
     assert_eq!(code, 1);
     assert!(stderr.contains("start must be before end"), "{stderr}");
 
-    let (code, _, stderr) = run(&["diff", "bad..now", "2026-11-01..now"]);
+    let (code, _, stderr) = super::run(&["diff", "bad..now", "2026-11-01..now"]);
     assert_eq!(code, 1);
     assert!(stderr.contains("expected START..END"), "{stderr}");
 
@@ -265,7 +240,7 @@ fn diff_reports_clear_errors_for_bad_targets() {
 
     // Relative directory path containing `..` is treated as a folder, not a time window.
     let rel_missing = format!("{}/../definitely-not-a-dir", dir.display());
-    let (code, _, stderr) = run(&["diff", &rel_missing, dir.to_str().unwrap()]);
+    let (code, _, stderr) = super::run(&["diff", &rel_missing, dir.to_str().unwrap()]);
     assert_eq!(code, 1);
     assert!(stderr.contains("diff folder not found"), "{stderr}");
 }
@@ -273,9 +248,9 @@ fn diff_reports_clear_errors_for_bad_targets() {
 #[test]
 fn diff_deduplicates_skipped_roots_across_windows() {
     // Window diff with missing default agent folders deduplicates skipped_roots cleanly.
-    let fake_home = temp_dir("fake-home");
-    let claude = temp_dir("win-claude");
-    write_jsonl(
+    let fake_home = super::temp_dir("diff", "fake-home");
+    let claude = super::temp_dir("diff", "win-claude");
+    super::write_jsonl(
         &claude,
         "proj/s.jsonl",
         &session_lines(
@@ -312,7 +287,7 @@ fn diff_deduplicates_skipped_roots_across_windows() {
 
 #[test]
 fn diff_handles_dotdot_dirs_and_rejects_sample_with_folders() {
-    let parent = temp_dir("dotdot");
+    let parent = super::temp_dir("diff", "dotdot");
     let child = parent.join("child");
     let dotted = parent.join("a..b");
     fs::create_dir_all(&child).unwrap();
@@ -342,7 +317,7 @@ fn diff_handles_dotdot_dirs_and_rejects_sample_with_folders() {
         String::from_utf8_lossy(&out_dotted.stderr)
     );
 
-    let (code, _, stderr) = run(&[
+    let (code, _, stderr) = super::run(&[
         "diff",
         parent.to_str().unwrap(),
         child.to_str().unwrap(),

@@ -1,57 +1,6 @@
-//! Regression tests for compaction health metrics.
-
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+//! Compaction health metrics tests.
 
 use serde_json::{Value, json};
-
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("bigsister-ct-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create temp dir");
-    dir
-}
-
-fn write_jsonl(dir: &Path, rel: &str, lines: &[String]) {
-    let path = dir.join(rel);
-    fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-    let body = lines.join("\n");
-    fs::write(path, format!("{body}\n")).expect("write fixture");
-}
-
-fn run_json(cmd: &str, extra: &[&str]) -> Value {
-    let mut args = vec![cmd, "--since", "2026-11-01", "--json"];
-    args.extend(extra);
-    let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
-        .args(&args)
-        .output()
-        .expect("run");
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    serde_json::from_slice(&out.stdout).expect("valid JSON")
-}
-
-fn table_rows<'a>(doc: &'a Value, section: &str, title: &str) -> &'a [Value] {
-    doc["detectors"][section]["tables"]
-        .as_array()
-        .expect("tables")
-        .iter()
-        .find(|t| t["title"] == title)
-        .and_then(|t| t["rows"].as_array())
-        .map(Vec::as_slice)
-        .expect("table by title")
-}
-
-fn find_row<'a>(rows: &'a [Value], pairs: &[(&str, Value)]) -> &'a Value {
-    rows.iter()
-        .find(|r| pairs.iter().all(|(k, v)| r.get(*k) == Some(v)))
-        .unwrap_or_else(|| panic!("no row matching {pairs:?}"))
-}
 
 fn reply(
     ts: &str,
@@ -62,9 +11,7 @@ fn reply(
     read: u64,
     content: Value,
 ) -> String {
-    format!(
-        r#"{{"type":"assistant","uuid":"u-{id}","timestamp":"{ts}","message":{{"model":"{model}","id":"{id}","role":"assistant","content":{content},"usage":{{"input_tokens":{input},"cache_creation_input_tokens":{write},"cache_read_input_tokens":{read}}}}}}}"#
-    )
+    super::reply(ts, id, model, input, write, read, &content)
 }
 
 fn boundary(ts: &str, trigger: &str, pre: u64, post: Option<u64>) -> String {
@@ -223,10 +170,10 @@ fn codex_compaction_lines() -> Vec<String> {
 
 #[test]
 fn compaction_health_detects_extreme_loss_thrashing_and_reverts() {
-    let dir = temp_dir("compaction");
-    write_jsonl(&dir, "claude/proj/s1.jsonl", &claude_compaction_lines());
-    write_jsonl(&dir, "codex/2026/rollout.jsonl", &codex_compaction_lines());
-    let doc = run_json(
+    let dir = super::temp_dir("ct", "compaction");
+    super::write_jsonl(&dir, "claude/proj/s1.jsonl", &claude_compaction_lines());
+    super::write_jsonl(&dir, "codex/2026/rollout.jsonl", &codex_compaction_lines());
+    let doc = super::run_json(
         "rereads",
         &[
             "--claude-root",
@@ -244,14 +191,14 @@ fn assert_compaction_health(doc: &Value) {
     assert_eq!(s["extreme_loss_compactions"], 1);
     assert_eq!(s["compaction_thrashing_passes"], 1);
     assert_eq!(s["post_compaction_revert_cycles"], 2);
-    let rows = table_rows(doc, "rereads", "Compaction health");
-    let claude = find_row(
+    let rows = super::table_rows(doc, "rereads", "Compaction health");
+    let claude = super::find_row(
         rows,
         &[("agent", json!("claude")), ("scope", json!("main"))],
     );
     assert_eq!(claude["measured"], 2);
     assert_eq!(claude["min_post_pre_ratio"], 0.012);
-    let codex = find_row(rows, &[("agent", json!("codex")), ("scope", json!("main"))]);
+    let codex = super::find_row(rows, &[("agent", json!("codex")), ("scope", json!("main"))]);
     assert_eq!(codex["measured"], 0);
     assert_eq!(codex["median_post_pre_ratio"], Value::Null);
     assert_eq!(codex["revert_cycles"], 1);
@@ -259,7 +206,7 @@ fn assert_compaction_health(doc: &Value) {
 
 #[test]
 fn unmeasured_compaction_resets_thrashing_streak() {
-    let dir = temp_dir("unmeasured-streak");
+    let dir = super::temp_dir("ct", "unmeasured-streak");
     let no_pre = json!({"type": "system", "subtype": "compact_boundary", "timestamp": "2026-11-08T01:01:00Z"}).to_string();
     let lines = vec![
         boundary("2026-11-08T01:00:00Z", "auto", 100_000, Some(95_000)),
@@ -268,8 +215,8 @@ fn unmeasured_compaction_resets_thrashing_streak() {
         boundary("2026-11-08T01:03:00Z", "auto", 100_000, None),
         boundary("2026-11-08T01:04:00Z", "auto", 100_000, Some(95_000)),
     ];
-    write_jsonl(&dir, "proj/s.jsonl", &lines);
-    let doc = run_json("rereads", &["--claude-root", dir.to_str().unwrap()]);
+    super::write_jsonl(&dir, "proj/s.jsonl", &lines);
+    let doc = super::run_json("rereads", &["--claude-root", dir.to_str().unwrap()]);
     let s = &doc["detectors"]["rereads"]["summary"];
     assert_eq!(s["compactions_measured"], 3);
     assert_eq!(s["compaction_thrashing_passes"], 0);
