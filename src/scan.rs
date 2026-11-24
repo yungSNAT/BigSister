@@ -185,7 +185,22 @@ pub fn scan(
     prices: &Prices,
     dets: &mut [Box<dyn Detector>],
 ) -> Vec<RootStats> {
-    let window = Window { since, prices };
+    scan_range(roots, since, None, prices, dets)
+}
+
+/// Scans every transcript under each root for records in `[since, until)`.
+pub fn scan_range(
+    roots: &[(Agent, PathBuf)],
+    since: Option<Timestamp>,
+    until: Option<Timestamp>,
+    prices: &Prices,
+    dets: &mut [Box<dyn Detector>],
+) -> Vec<RootStats> {
+    let window = Window {
+        since,
+        until,
+        prices,
+    };
     let cutoff = since.map_or(Timestamp::MAX.as_second() + 1, Timestamp::as_second);
     let cutoff = u64::try_from(cutoff)
         .ok()
@@ -240,7 +255,23 @@ pub fn scan_memory(
     prices: &Prices,
     dets: &mut [Box<dyn Detector>],
 ) -> Vec<RootStats> {
-    let window = Window { since, prices };
+    scan_memory_range(files, root, since, None, prices, dets)
+}
+
+/// Scans in-memory transcripts for records in `[since, until)`.
+pub fn scan_memory_range(
+    files: &[Memory],
+    root: &str,
+    since: Option<Timestamp>,
+    until: Option<Timestamp>,
+    prices: &Prices,
+    dets: &mut [Box<dyn Detector>],
+) -> Vec<RootStats> {
+    let window = Window {
+        since,
+        until,
+        prices,
+    };
     let mut agents: Vec<Agent> = Vec::new();
     for f in files {
         if !agents.contains(&f.agent) {
@@ -962,6 +993,8 @@ impl Lines {
 struct Window<'a> {
     /// `None` starts the window after every instant.
     since: Option<Timestamp>,
+    /// Exclusive upper bound, or `None` for open-ended scans.
+    until: Option<Timestamp>,
     prices: &'a Prices,
 }
 
@@ -1077,6 +1110,7 @@ fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
 struct Feed<'a> {
     session: Session,
     since: Option<Timestamp>,
+    until: Option<Timestamp>,
     prices: &'a Prices,
     last_time: Option<Timestamp>,
     /// The model the latest Codex `turn_context` names, if any.
@@ -1108,6 +1142,7 @@ impl<'a> Feed<'a> {
         Feed {
             session,
             since: window.since,
+            until: window.until,
             prices: window.prices,
             last_time: None,
             codex_model: None,
@@ -1180,9 +1215,11 @@ impl<'a> Feed<'a> {
         {
             self.last_time = Some(t);
         }
+        let after_since = self.since.zip(self.last_time).is_some_and(|(s, t)| t >= s);
+        let before_until = self.until.zip(self.last_time).is_none_or(|(u, t)| t < u);
         let rec = Record {
             value,
-            in_window: !copied && self.since.zip(self.last_time).is_some_and(|(s, t)| t >= s),
+            in_window: !copied && after_since && before_until,
         };
         for &i in &self.wanting_buf {
             self.dets[i].record(&self.session, &rec);
@@ -1442,6 +1479,7 @@ mod tests {
             None,
             Path::new("s.jsonl"),
             &Window {
+                until: None,
                 since: Some(Timestamp::MIN),
                 prices: &Prices::bundled(),
             },
@@ -1684,6 +1722,7 @@ mod tests {
             None,
             Path::new("s.jsonl"),
             &Window {
+                until: None,
                 since: Some(Timestamp::MIN),
                 prices: &Prices::bundled(),
             },
@@ -1759,6 +1798,7 @@ mod tests {
 
         let prices = Prices::bundled();
         let window = Window {
+            until: None,
             since: parse_ts("2026-11-08T01:30:00Z"),
             prices: &prices,
         };
@@ -2006,6 +2046,7 @@ mod tests {
         let mut st = RootStats::new(Agent::Pi, dir.clone());
         let mut earlier = Earlier::default();
         let window = Window {
+            until: None,
             since: Some(Timestamp::MIN),
             prices: &prices,
         };

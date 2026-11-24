@@ -1,6 +1,8 @@
 //! The detectors and the record helpers they share.
 
 pub mod cache;
+mod cache_bust;
+mod compaction;
 pub mod context;
 pub mod hooks;
 pub mod models;
@@ -10,6 +12,7 @@ pub mod rereads;
 pub mod schemas;
 pub mod startup;
 pub mod tools;
+mod truncation;
 
 #[cfg(test)]
 mod codex_tests;

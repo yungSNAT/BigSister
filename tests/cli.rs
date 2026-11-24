@@ -1221,7 +1221,14 @@ fn rereads_hide_paths_without_the_flag() {
         .iter()
         .map(|t| t["title"].as_str().unwrap_or(""))
         .collect();
-    assert_eq!(titles, ["By agent and scope", "By compaction trigger"]);
+    assert_eq!(
+        titles,
+        [
+            "By agent and scope",
+            "By compaction trigger",
+            "Compaction health"
+        ]
+    );
 }
 
 #[test]

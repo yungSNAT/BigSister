@@ -14,7 +14,7 @@ use crate::scan::{Agent, Detector, Record, Session};
 
 /// Cache reads as a multiple of the uncached input price, by the exact model id, from
 /// <https://platform.claude.com/docs/en/about-claude/pricing> as read on 24 November 2026.
-fn read_multiplier(model: &str) -> f64 {
+pub(super) fn read_multiplier(model: &str) -> f64 {
     match model {
         "claude-fable-5-2" | "claude-mythos-5-2" | "claude-fable-5-1" | "claude-mythos-5-1" => {
             0.025

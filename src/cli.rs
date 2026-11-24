@@ -105,7 +105,7 @@ fn parse_usd_per_mtok(s: &str) -> Result<f64, String> {
 }
 
 /// What to report.
-#[derive(Subcommand, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Every detector, in one pass
     All,
@@ -129,6 +129,13 @@ pub enum Command {
     Models,
     /// Hook durations, cancellations and timeouts (Claude)
     Hooks,
+    /// Compare tokens, cache hit %, cost, turns, compactions and waste across 2 session sets or time windows
+    Diff {
+        /// Baseline session folder or time window (START..END, e.g. 14d..7d or 2026-11-01..2026-11-08)
+        before: String,
+        /// Comparison session folder or time window (START..END, e.g. 7d..now or 2026-11-08..2026-11-15)
+        after: String,
+    },
     /// Generate shell completions for bash, elvish, fish, powershell or zsh
     Completions {
         /// Shell to generate completions for
