@@ -309,3 +309,48 @@ fn diff_deduplicates_skipped_roots_across_windows() {
     let skipped = doc["skipped_roots"].as_array().expect("skipped_roots");
     assert!(!skipped.is_empty());
 }
+
+#[test]
+fn diff_handles_dotdot_dirs_and_rejects_sample_with_folders() {
+    let parent = temp_dir("dotdot");
+    let child = parent.join("child");
+    let dotted = parent.join("a..b");
+    fs::create_dir_all(&child).unwrap();
+    fs::create_dir_all(&dotted).unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
+        .args(["diff", "..", ".", "--json"])
+        .current_dir(&child)
+        .output()
+        .expect("run");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out_dotted = Command::new(env!("CARGO_BIN_EXE_bigsister"))
+        .args(["diff", "a..b", "child", "--json"])
+        .current_dir(&parent)
+        .output()
+        .expect("run");
+    assert_eq!(
+        out_dotted.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out_dotted.stderr)
+    );
+
+    let (code, _, stderr) = run(&[
+        "diff",
+        parent.to_str().unwrap(),
+        child.to_str().unwrap(),
+        "--sample",
+    ]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("--sample cannot be used with session folders"),
+        "{stderr}"
+    );
+}

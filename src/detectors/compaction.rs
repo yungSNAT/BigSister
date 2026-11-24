@@ -75,6 +75,7 @@ impl Health {
     pub(super) fn branch(&mut self) {
         self.pending_pre = None;
         self.low_savings_streak = 0;
+        self.has_compacted = false;
         self.post_turns = 0;
         self.last_msg_id = None;
         self.edited_before.clear();
@@ -96,7 +97,9 @@ impl Health {
                 .or_default()
                 .compactions += 1;
         }
-        self.pending_pre = None;
+        if self.pending_pre.take().is_some() {
+            self.low_savings_streak = 0;
+        }
         let meta = r.value.get("compactMetadata");
         let pre = meta
             .and_then(|m| m.get("preTokens"))
@@ -105,11 +108,12 @@ impl Health {
         let post = meta
             .and_then(|m| m.get("postTokens"))
             .and_then(Value::as_u64);
-        if let Some(pre) = pre {
-            match post {
+        match pre {
+            Some(pre) => match post {
                 Some(post) => self.record_measurement(s, pre, post, r.in_window),
                 None => self.pending_pre = Some((pre, r.in_window)),
-            }
+            },
+            None => self.low_savings_streak = 0,
         }
         let current = std::mem::take(&mut self.edited_current);
         self.edited_before.extend(current);

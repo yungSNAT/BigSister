@@ -73,6 +73,7 @@ pub(super) struct ReplyCtx<'a> {
 struct BustRow {
     count: u64,
     rebuilt: u64,
+    priced_rebuilt: u64,
     write_weighted: f64,
     write_weighted_usd: f64,
     warm_weighted: f64,
@@ -95,6 +96,7 @@ impl BustRow {
         self.warm_weighted += warm_w;
         match price {
             Some(usd) => {
+                self.priced_rebuilt = self.priced_rebuilt.saturating_add(rebuilt);
                 self.write_weighted_usd += write_w * usd;
                 self.warm_weighted_usd += warm_w * usd;
             }
@@ -114,6 +116,14 @@ impl BustRow {
     fn unpriced_for(&self, rate: Option<f64>) -> u64 {
         if rate.is_some() { 0 } else { self.unpriced }
     }
+
+    fn priced_rebuilt_for(&self, rate: Option<f64>) -> u64 {
+        if rate.is_some() {
+            self.rebuilt
+        } else {
+            self.priced_rebuilt
+        }
+    }
 }
 
 /// Tracks sub-TTL cache busts and total input token vs dollar shares across sessions.
@@ -122,10 +132,11 @@ pub(super) struct Tracker {
     last_shape: Option<String>,
     last_msg_count: Option<usize>,
     seen_uuids: HashSet<String>,
-    prev_reply_uuid: Option<String>,
+    prev_reply_uuids: Vec<String>,
     tool_load_since_reply: bool,
     mid_edit_since_reply: bool,
     total_input: u64,
+    priced_input: u64,
     total_weighted: f64,
     total_weighted_usd: f64,
     busts: BTreeMap<(&'static str, BustCause), BustRow>,
@@ -136,7 +147,7 @@ impl Tracker {
         self.last_shape = None;
         self.last_msg_count = None;
         self.seen_uuids.clear();
-        self.prev_reply_uuid = None;
+        self.prev_reply_uuids.clear();
         self.tool_load_since_reply = false;
         self.mid_edit_since_reply = false;
     }
@@ -171,8 +182,11 @@ impl Tracker {
         }
     }
 
-    /// Records tool-load calls on extra blocks of an already-counted reply.
-    pub(super) fn observe_tool_load(&mut self, r: &Record<'_>) {
+    /// Records tool-load calls and UUIDs on extra blocks of an already-counted reply.
+    pub(super) fn observe_extra_block(&mut self, r: &Record<'_>) {
+        if let Some(uuid) = r.value.get("uuid").and_then(Value::as_str) {
+            self.prev_reply_uuids.push(uuid.to_owned());
+        }
         if has_tool_load_call(r) {
             self.tool_load_since_reply = true;
         }
@@ -197,14 +211,10 @@ impl Tracker {
                 );
             }
         }
-        if let Some(prev) = self.prev_reply_uuid.take() {
-            self.seen_uuids.insert(prev);
+        self.seen_uuids.extend(self.prev_reply_uuids.drain(..));
+        if let Some(uuid) = ctx.value.get("uuid").and_then(Value::as_str) {
+            self.prev_reply_uuids.push(uuid.to_owned());
         }
-        self.prev_reply_uuid = ctx
-            .value
-            .get("uuid")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
         self.tool_load_since_reply = has_tool_load_call(r);
         self.mid_edit_since_reply = false;
     }
@@ -281,19 +291,25 @@ impl Tracker {
             json!(round_cents(write_usd)),
             json!(round_cents(penalty_usd)),
             float_ratio(write_usd, total_usd),
-            divergence(b.rebuilt, self.total_input, write_usd, total_usd),
+            divergence(
+                b.priced_rebuilt_for(rate),
+                self.total_priced_input(rate),
+                write_usd,
+                total_usd,
+            ),
             json!(b.unpriced_for(rate)),
         ];
         (penalty_usd, b.rebuilt, key, row)
     }
 
     fn note_shape(&mut self, id: Option<&str>) {
-        if self.last_shape.is_some() && id.is_none_or(|s| self.last_shape.as_deref() != Some(s)) {
+        let Some(id) = id else {
+            return;
+        };
+        if self.last_shape.as_deref().is_some_and(|prev| prev != id) {
             self.tool_load_since_reply = true;
         }
-        if let Some(id) = id {
-            self.last_shape = Some(id.to_owned());
-        }
+        self.last_shape = Some(id.to_owned());
     }
 
     fn note_api_request(&mut self, v: &Value) {
@@ -340,7 +356,16 @@ impl Tracker {
             + ctx.read as f64 * read_mult;
         self.total_weighted += weighted;
         if let Some(usd) = ctx.price {
+            self.priced_input = self.priced_input.saturating_add(sum);
             self.total_weighted_usd += weighted * usd;
+        }
+    }
+
+    fn total_priced_input(&self, rate: Option<f64>) -> u64 {
+        if rate.is_some() {
+            self.total_input
+        } else {
+            self.priced_input
         }
     }
 

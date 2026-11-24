@@ -114,6 +114,13 @@ pub struct Polls {
     programs: Rc<Programs>,
 }
 
+fn polls_prefilter(s: &Session, line: &str) -> bool {
+    match s.agent {
+        Agent::Codex => super::tool_prefilter(s, line),
+        _ => line.contains("\"type\":\"assistant\"") || super::tool_prefilter(s, line),
+    }
+}
+
 impl Detector for Polls {
     fn agents(&self) -> &'static [Agent] {
         &[
@@ -129,7 +136,9 @@ impl Detector for Polls {
     fn wants(&self, s: &Session, line: &str) -> bool {
         match s.agent {
             Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {
-                line.contains("\"tool_use\"") || self.claude.wants(line)
+                line.contains("\"tool_use\"")
+                    || self.claude.wants(line)
+                    || (self.truncation.has_pending() && line.contains("\"type\":\"assistant\""))
             }
             Agent::Codex => codex_call_line(line) || self.codex.wants(line),
         }
@@ -140,7 +149,7 @@ impl Detector for Polls {
     }
 
     fn prefilter(&self) -> Option<crate::scan::Prefilter> {
-        Some(crate::scan::Prefilter::Superset(super::tool_prefilter))
+        Some(crate::scan::Prefilter::Superset(polls_prefilter))
     }
 
     fn begin(&mut self, _s: &Session) {

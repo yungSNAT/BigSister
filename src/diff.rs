@@ -69,6 +69,12 @@ pub fn run(cli: &Cli, before: &str, after: &str) -> Result<String, String> {
     let home = std::env::home_dir().map(|h| display_path(&h.display().to_string(), None));
     let left = parse_target(before, now, home.as_deref())?;
     let right = parse_target(after, now, home.as_deref())?;
+    if cli.sample && (matches!(left, Target::Dir { .. }) || matches!(right, Target::Dir { .. })) {
+        return Err(
+            "--sample cannot be used with session folders; pass START..END time windows instead"
+                .to_owned(),
+        );
+    }
     let prices = Rc::new(read_prices(cli, home.as_deref())?);
     let programs = Rc::new(Programs::from_env());
     let opts = Opts {
@@ -121,7 +127,10 @@ impl Target {
 }
 
 fn parse_target(spec: &str, now: Timestamp, home: Option<&str>) -> Result<Target, String> {
-    if !spec.contains(['/', '\\'])
+    let path = PathBuf::from(spec);
+    if spec != ".."
+        && !spec.contains(['/', '\\'])
+        && !path.is_dir()
         && let Some((raw_start, raw_end)) = spec.split_once("..")
     {
         let start = parse_bound(raw_start, now, spec)?;
@@ -135,7 +144,6 @@ fn parse_target(spec: &str, now: Timestamp, home: Option<&str>) -> Result<Target
             label: format!("{}..{}", rfc3339(start), rfc3339(end)),
         });
     }
-    let path = PathBuf::from(spec);
     let label = display_path(&path.display().to_string(), home);
     if let Some(problem) = folder_problem(&path) {
         return Err(format!("diff folder {problem}: {label}"));
@@ -233,7 +241,7 @@ fn scan_target(
         Target::Dir { path, .. } => {
             let roots = dir_roots(cli, path);
             Ok((
-                scan_range(&roots, Some(Timestamp::UNIX_EPOCH), None, prices, dets),
+                scan_range(&roots, Some(Timestamp::MIN), None, prices, dets),
                 Vec::new(),
             ))
         }
@@ -351,7 +359,7 @@ fn build_section(
         tables: vec![table],
         notes: vec![
             "Compares 2 session folders or half-open time windows [START, END) side by side. Delta is after minus before; delta pct is percentage change relative to before (null when before is 0).".to_owned(),
-            "Usd token divergence pp is input usd delta pct minus input tokens delta pct: a positive gap means dollars rose faster (or fell less) than raw tokens, such as after sub-TTL cache busts. Waste tokens est and waste usd est sum polls, compaction re-reads and idle schemas/skills (which can overlap, as in ranked). An illustration, not a bill.".to_owned(),
+            "Usd token divergence pp is input usd delta pct minus input tokens delta pct: a positive gap means dollars rose faster (or fell less) than raw tokens, such as after sub-TTL cache busts. Turns, token counts, cache hit %, sub-TTL cache busts, input usd est and idle schema tokens come from Claude detectors; compactions, re-reads, polls and truncation re-runs cover every scanned agent those detectors read. Waste tokens est and waste usd est sum polls, compaction re-reads and idle schemas/skills (which can overlap, as in ranked). An illustration, not a bill.".to_owned(),
         ],
     }
 }

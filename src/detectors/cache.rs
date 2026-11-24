@@ -313,7 +313,7 @@ impl Detector for Cache {
             Entry::Reply(reply) => reply,
         };
         if self.ids.contains(reply.id) {
-            self.busts.observe_tool_load(r);
+            self.busts.observe_extra_block(r);
             return;
         }
         self.readable(reply.id);

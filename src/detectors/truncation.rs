@@ -61,8 +61,14 @@ impl Tracker {
         self.unread.clear();
     }
 
+    pub(super) fn has_pending(&self) -> bool {
+        !self.stashed.is_empty()
+    }
+
     pub(super) fn note_claude_turn(&mut self, r: &Record<'_>) {
-        if r.kind() != "assistant" {
+        if r.kind() != "assistant"
+            || r.value.pointer("/message/model").and_then(Value::as_str) == Some("<synthetic>")
+        {
             return;
         }
         let msg_id = r.value.pointer("/message/id").and_then(Value::as_str);

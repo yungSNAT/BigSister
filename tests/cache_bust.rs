@@ -86,7 +86,7 @@ fn fixture_part_b() -> Vec<String> {
         10_000,
         &txt,
     )
-    .replacen('{', r#"{"parentUuid":"u-m1","#, 1);
+    .replacen('{', r#"{"parentUuid":"u-m1b","#, 1);
     let mut v = vec![
         reply("2026-11-08T01:01:00Z", "m4", "claude-sonnet-5-5", 100_000, 5_000, &txt),
         json!({"type": "api-request", "timestamp": "2026-11-08T01:01:20Z", "shape": "sh2", "keep": 1, "tail": ["c"]}).to_string(),
@@ -100,6 +100,7 @@ fn fixture_part_b() -> Vec<String> {
 
 fn fixture_part_c(txt: &Value) -> Vec<String> {
     vec![
+        json!({"type": "api-request-shape", "timestamp": "2026-11-08T01:02:15Z"}).to_string(),
         reply("2026-11-08T01:02:20Z", "m7", "claude-sonnet-5-5", 45_000, 5_000, txt),
         json!({"type": "system", "subtype": "compact_boundary", "timestamp": "2026-11-08T01:02:25Z"}).to_string(),
         reply("2026-11-08T01:02:30Z", "m8", "claude-sonnet-5-5", 30_000, 0, txt),
@@ -204,4 +205,43 @@ fn assert_pricing_and_unpriced(root: &str, unpriced: &[String]) {
         udoc["detectors"]["cache"]["summary"]["sub_ttl_bust_usd_share"],
         Value::Null
     );
+}
+
+#[test]
+fn unpriced_sessions_do_not_inflate_priced_divergence_ratio() {
+    let priced_dir = temp_dir("ratio-priced");
+    let mixed_dir = temp_dir("ratio-mixed");
+    let mut lines = fixture_part_a();
+    lines.extend(fixture_part_b());
+    write_jsonl(&priced_dir, "proj/s1.jsonl", &lines);
+    write_jsonl(&mixed_dir, "proj/s1.jsonl", &lines);
+    let unpriced = vec![
+        reply(
+            "2026-11-08T02:00:00Z",
+            "u1",
+            "claude-custom-unpriced",
+            500_000,
+            0,
+            &json!([]),
+        ),
+        reply(
+            "2026-11-08T02:00:10Z",
+            "u2",
+            "claude-custom-unpriced",
+            400_000,
+            100_000,
+            &json!([]),
+        ),
+    ];
+    write_jsonl(&mixed_dir, "proj/subagents/agent-1.jsonl", &unpriced);
+
+    let pure = run_cache(&["--claude-root", priced_dir.to_str().unwrap()]);
+    let mixed = run_cache(&["--claude-root", mixed_dir.to_str().unwrap()]);
+    let r_pure =
+        find_bust(bust_rows(&pure), "main", "tool load / schema change")["usd_to_token_ratio"]
+            .clone();
+    let r_mixed =
+        find_bust(bust_rows(&mixed), "main", "tool load / schema change")["usd_to_token_ratio"]
+            .clone();
+    assert_eq!(r_pure, r_mixed);
 }
