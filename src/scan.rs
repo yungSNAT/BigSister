@@ -114,8 +114,9 @@ pub trait Detector {
     }
     fn end(&mut self, _s: &Session) {}
     /// A model has read the session's context so far: its uncached input price per
-    /// million tokens, or `None` when it has no price or no model did.
-    fn read_by(&mut self, _s: &Session, _usd_per_mtok: Option<f64>) {}
+    /// million tokens, or `None` when it has no price or no model did. `in_window` is
+    /// whether the reading reply itself falls inside the scan window.
+    fn read_by(&mut self, _s: &Session, _usd_per_mtok: Option<f64>, _in_window: bool) {}
     /// Whether the detector reads Claude Code's request blobs, lines that can be large and
     /// that every other detector is spared.
     fn reads_request_blobs(&self) -> bool {
@@ -185,7 +186,34 @@ pub fn scan(
     prices: &Prices,
     dets: &mut [Box<dyn Detector>],
 ) -> Vec<RootStats> {
-    let window = Window { since, prices };
+    scan_range(roots, since, None, prices, dets)
+}
+
+/// Scans every transcript under each root for records in `[since, until)`.
+pub fn scan_range(
+    roots: &[(Agent, PathBuf)],
+    since: Option<Timestamp>,
+    until: Option<Timestamp>,
+    prices: &Prices,
+    dets: &mut [Box<dyn Detector>],
+) -> Vec<RootStats> {
+    let mut refs: Vec<&mut (dyn Detector + 'static)> = dets.iter_mut().map(Box::as_mut).collect();
+    scan_range_dyn(roots, since, until, prices, &mut refs)
+}
+
+/// Scans every transcript under each root for records in `[since, until)` using borrowed detectors.
+pub(crate) fn scan_range_dyn(
+    roots: &[(Agent, PathBuf)],
+    since: Option<Timestamp>,
+    until: Option<Timestamp>,
+    prices: &Prices,
+    dets: &mut [&mut (dyn Detector + 'static)],
+) -> Vec<RootStats> {
+    let window = Window {
+        since,
+        until,
+        prices,
+    };
     let cutoff = since.map_or(Timestamp::MAX.as_second() + 1, Timestamp::as_second);
     let cutoff = u64::try_from(cutoff)
         .ok()
@@ -240,7 +268,36 @@ pub fn scan_memory(
     prices: &Prices,
     dets: &mut [Box<dyn Detector>],
 ) -> Vec<RootStats> {
-    let window = Window { since, prices };
+    scan_memory_range(files, root, since, None, prices, dets)
+}
+
+/// Scans in-memory transcripts for records in `[since, until)`.
+pub fn scan_memory_range(
+    files: &[Memory],
+    root: &str,
+    since: Option<Timestamp>,
+    until: Option<Timestamp>,
+    prices: &Prices,
+    dets: &mut [Box<dyn Detector>],
+) -> Vec<RootStats> {
+    let mut refs: Vec<&mut (dyn Detector + 'static)> = dets.iter_mut().map(Box::as_mut).collect();
+    scan_memory_range_dyn(files, root, since, until, prices, &mut refs)
+}
+
+/// Scans in-memory transcripts for records in `[since, until)` using borrowed detectors.
+pub(crate) fn scan_memory_range_dyn(
+    files: &[Memory],
+    root: &str,
+    since: Option<Timestamp>,
+    until: Option<Timestamp>,
+    prices: &Prices,
+    dets: &mut [&mut (dyn Detector + 'static)],
+) -> Vec<RootStats> {
+    let window = Window {
+        since,
+        until,
+        prices,
+    };
     let mut agents: Vec<Agent> = Vec::new();
     for f in files {
         if !agents.contains(&f.agent) {
@@ -400,7 +457,7 @@ impl<'a> Prep<'a> {
         self.event_count > self.opts.max_events || self.raw_buf.len() > self.opts.max_raw_bytes
     }
 
-    fn drain_into(&mut self, line: &str, feed: &mut Feed<'_>) {
+    fn drain_into(&mut self, line: &str, feed: &mut Feed<'_, '_>) {
         self.raw_buf.clear();
         self.take(line);
         feed.st.bad_lines += std::mem::take(&mut self.bad_lines);
@@ -593,7 +650,7 @@ fn prepare_file(path: &Path, opts: &PrepareOpts<'_>) -> PreparedFile {
 fn scan_path(
     path: &Path,
     window: &Window<'_>,
-    dets: &mut [Box<dyn Detector>],
+    dets: &mut [&mut (dyn Detector + 'static)],
     active: &[usize],
     st: &mut RootStats,
     earlier: &mut Earlier,
@@ -613,7 +670,7 @@ fn apply_prepared(
     path: &Path,
     file: &PreparedFile,
     window: &Window<'_>,
-    dets: &mut [Box<dyn Detector>],
+    dets: &mut [&mut (dyn Detector + 'static)],
     active: &[usize],
     st: &mut RootStats,
     earlier: &mut Earlier,
@@ -652,7 +709,7 @@ fn apply_prepared(
 fn scan_files(
     files: Vec<PathBuf>,
     window: &Window<'_>,
-    dets: &mut [Box<dyn Detector>],
+    dets: &mut [&mut (dyn Detector + 'static)],
     active: &[usize],
     st: &mut RootStats,
     earlier: &mut Earlier,
@@ -676,7 +733,7 @@ fn scan_files(
 fn scan_files_with_budget(
     files: Vec<PathBuf>,
     window: &Window<'_>,
-    dets: &mut [Box<dyn Detector>],
+    dets: &mut [&mut (dyn Detector + 'static)],
     active: &[usize],
     st: &mut RootStats,
     earlier: &mut Earlier,
@@ -733,7 +790,7 @@ fn indexed(reader: Box<dyn BufRead>, path: &Path) -> Result<(Box<dyn BufRead>, G
 fn scan_opencode(
     root: &Path,
     window: &Window<'_>,
-    dets: &mut [Box<dyn Detector>],
+    dets: &mut [&mut (dyn Detector + 'static)],
     active: &[usize],
     st: &mut RootStats,
     earlier: &mut Earlier,
@@ -962,6 +1019,8 @@ impl Lines {
 struct Window<'a> {
     /// `None` starts the window after every instant.
     since: Option<Timestamp>,
+    /// Exclusive upper bound, or `None` for open-ended scans.
+    until: Option<Timestamp>,
     prices: &'a Prices,
 }
 
@@ -1008,7 +1067,7 @@ fn scan_file(
     rewrite: Option<Rewrite>,
     path: &Path,
     window: &Window<'_>,
-    dets: &mut [Box<dyn Detector>],
+    dets: &mut [&mut (dyn Detector + 'static)],
     active: &[usize],
     st: &mut RootStats,
     earlier: &mut Earlier,
@@ -1074,9 +1133,10 @@ fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
     }
 }
 
-struct Feed<'a> {
+struct Feed<'a, 'b> {
     session: Session,
     since: Option<Timestamp>,
+    until: Option<Timestamp>,
     prices: &'a Prices,
     last_time: Option<Timestamp>,
     /// The model the latest Codex `turn_context` names, if any.
@@ -1090,24 +1150,25 @@ struct Feed<'a> {
     pi_parent: Option<String>,
     /// Whether the lines fed are a pi path given again, which count nowhere.
     replaying: bool,
-    dets: &'a mut [Box<dyn Detector>],
+    dets: &'a mut [&'b mut (dyn Detector + 'static)],
     active: &'a [usize],
     wanting_buf: Vec<usize>,
     st: &'a mut RootStats,
 }
 
-impl<'a> Feed<'a> {
+impl<'a, 'b> Feed<'a, 'b> {
     fn new(
         session: Session,
         window: &Window<'a>,
         earlier: &'a Earlier,
-        dets: &'a mut [Box<dyn Detector>],
+        dets: &'a mut [&'b mut (dyn Detector + 'static)],
         active: &'a [usize],
         st: &'a mut RootStats,
     ) -> Self {
         Feed {
             session,
             since: window.since,
+            until: window.until,
             prices: window.prices,
             last_time: None,
             codex_model: None,
@@ -1121,6 +1182,12 @@ impl<'a> Feed<'a> {
             wanting_buf: Vec::with_capacity(active.len()),
             st,
         }
+    }
+
+    fn in_window(&self) -> bool {
+        let after_since = self.since.zip(self.last_time).is_some_and(|(s, t)| t >= s);
+        let before_until = self.until.zip(self.last_time).is_none_or(|(u, t)| t < u);
+        after_since && before_until
     }
 
     fn apply_event(&mut self, event: &PreparedEvent, raw_buf: &str) {
@@ -1167,12 +1234,6 @@ impl<'a> Feed<'a> {
         let Some(copied) = self.copied(value) else {
             return;
         };
-        // A reply reads the results before it; a copy of one reads nothing.
-        if let Some(price) = reply
-            && !copied
-        {
-            self.read_by(price);
-        }
         if let Some(t) = value
             .get("timestamp")
             .and_then(Value::as_str)
@@ -1180,10 +1241,14 @@ impl<'a> Feed<'a> {
         {
             self.last_time = Some(t);
         }
-        let rec = Record {
-            value,
-            in_window: !copied && self.since.zip(self.last_time).is_some_and(|(s, t)| t >= s),
-        };
+        let in_window = !copied && self.in_window();
+        // A reply reads the results before it; a copy of one reads nothing.
+        if let Some(price) = reply
+            && !copied
+        {
+            self.read_by(price, in_window);
+        }
+        let rec = Record { value, in_window };
         for &i in &self.wanting_buf {
             self.dets[i].record(&self.session, &rec);
         }
@@ -1198,7 +1263,7 @@ impl<'a> Feed<'a> {
         // A Codex turn's model reads its results; a Claude result no reply read stays
         // unpriced.
         if self.session.agent == Agent::Codex {
-            self.read_by(self.codex_price(|| None));
+            self.read_by(self.codex_price(|| None), self.in_window());
         }
         for &i in self.active {
             self.dets[i].end(&self.session);
@@ -1264,13 +1329,14 @@ impl<'a> Feed<'a> {
         })
     }
 
-    fn read_by(&mut self, usd_per_mtok: Option<f64>) {
+    fn read_by(&mut self, usd_per_mtok: Option<f64>, in_window: bool) {
         for &i in self.active {
-            self.dets[i].read_by(&self.session, usd_per_mtok);
+            self.dets[i].read_by(&self.session, usd_per_mtok, in_window);
         }
     }
 
     fn codex_model(&mut self, v: &Value) {
+        let in_window = self.in_window();
         match v.get("type").and_then(Value::as_str) {
             // Codex writes a model call's usage as the call completes, so the call
             // read the results before it, in a prompt of `input_tokens`.
@@ -1286,11 +1352,11 @@ impl<'a> Feed<'a> {
                     v.pointer("/payload/usage/input_tokens")
                         .and_then(Value::as_u64)
                 });
-                self.read_by(price);
+                self.read_by(price, in_window);
             }
             Some("turn_context") => {
                 let ended = self.codex_price(|| None);
-                self.read_by(ended);
+                self.read_by(ended, in_window);
                 self.codex_model = v
                     .pointer("/payload/model")
                     .and_then(Value::as_str)
@@ -1437,15 +1503,18 @@ mod tests {
     fn scan_one(agent: Agent, reader: Box<dyn BufRead>) -> (u64, u64) {
         let mut st = RootStats::new(agent, PathBuf::new());
         let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count::default())];
+        let mut refs: Vec<&mut (dyn Detector + 'static)> =
+            dets.iter_mut().map(Box::as_mut).collect();
         scan_file(
             reader,
             None,
             Path::new("s.jsonl"),
             &Window {
+                until: None,
                 since: Some(Timestamp::MIN),
                 prices: &Prices::bundled(),
             },
-            &mut dets,
+            &mut refs,
             &[0],
             &mut st,
             &mut Earlier::default(),
@@ -1679,15 +1748,18 @@ mod tests {
         }
         let mut st = RootStats::new(Agent::Claude, PathBuf::new());
         let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(Count::default())];
+        let mut refs: Vec<&mut (dyn Detector + 'static)> =
+            dets.iter_mut().map(Box::as_mut).collect();
         let err = scan_file(
             Box::new(BufReader::new(FailAfterFirst(false))),
             None,
             Path::new("s.jsonl"),
             &Window {
+                until: None,
                 since: Some(Timestamp::MIN),
                 prices: &Prices::bundled(),
             },
-            &mut dets,
+            &mut refs,
             &[0],
             &mut st,
             &mut Earlier::default(),
@@ -1759,6 +1831,7 @@ mod tests {
 
         let prices = Prices::bundled();
         let window = Window {
+            until: None,
             since: parse_ts("2026-11-08T01:30:00Z"),
             prices: &prices,
         };
@@ -1767,10 +1840,12 @@ mod tests {
         let mut dets = crate::detectors::build(crate::cli::Command::Models, &programs, &rc_prices);
         let mut st = RootStats::new(Agent::Claude, dir.clone());
         let mut earlier = Earlier::default();
+        let mut refs: Vec<&mut (dyn Detector + 'static)> =
+            dets.iter_mut().map(Box::as_mut).collect();
         scan_files_with_budget(
             vec![file],
             &window,
-            &mut dets,
+            &mut refs,
             &[0],
             &mut st,
             &mut earlier,
@@ -1829,7 +1904,7 @@ mod tests {
             true
         }
         fn record(&mut self, _s: &Session, _r: &Record<'_>) {}
-        fn read_by(&mut self, _s: &Session, p: Option<f64>) {
+        fn read_by(&mut self, _s: &Session, p: Option<f64>, _in_window: bool) {
             self.0.push(p);
         }
         fn section(&self, _opts: &Opts) -> Section {
@@ -2000,19 +2075,18 @@ mod tests {
             max_raw_bytes: MAX_PREP_RAW_BYTES,
         };
         assert!(matches!(prepare_file(&path, &opts), PreparedFile::TooLarge));
-        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(
-            crate::detectors::models::Models::new(std::rc::Rc::new(Prices::bundled())),
-        )];
+        let mut det = crate::detectors::models::Models::new(std::rc::Rc::new(Prices::bundled()));
         let mut st = RootStats::new(Agent::Pi, dir.clone());
         let mut earlier = Earlier::default();
         let window = Window {
+            until: None,
             since: Some(Timestamp::MIN),
             prices: &prices,
         };
         scan_files_with_budget(
             vec![path],
             &window,
-            &mut dets,
+            &mut [&mut det],
             &[0],
             &mut st,
             &mut earlier,

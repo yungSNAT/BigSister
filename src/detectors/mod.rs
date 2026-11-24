@@ -1,6 +1,8 @@
 //! The detectors and the record helpers they share.
 
 pub mod cache;
+mod cache_bust;
+mod compaction;
 pub mod context;
 pub mod hooks;
 pub mod models;
@@ -10,6 +12,7 @@ pub mod rereads;
 pub mod schemas;
 pub mod startup;
 pub mod tools;
+mod truncation;
 
 #[cfg(test)]
 mod codex_tests;
@@ -198,6 +201,123 @@ pub(super) fn codex_result_line(line: &str) -> bool {
         || line.contains("\"CommandExecution\"")
 }
 
+/// True for lines that may hold a Codex turn or model-response boundary.
+pub(super) fn codex_turn_line(line: &str) -> bool {
+    line.contains("\"type\":\"turn_context\"")
+        || line.contains("\"type\":\"token_usage_record\"")
+        || line.contains("\"task_started\"")
+        || line.contains("\"turn_started\"")
+        || line.contains("\"agent_message\"")
+        || (line.contains("\"type\":\"response_item\"") && line.contains("\"assistant\""))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MsgSeen {
+    Event,
+    Item,
+    Both,
+}
+
+/// Tracks distinct Codex turn and model-response boundaries so multi-call turns
+/// count once and intervening text-only turns advance the turn counter.
+#[derive(Default)]
+pub(super) struct CodexTurns {
+    last_turn_id: Option<String>,
+    last_msg_id: Option<String>,
+    last_resp_id: Option<String>,
+    msg_seen: Option<MsgSeen>,
+    awaiting_msg: bool,
+    awaiting_usage: bool,
+}
+
+impl CodexTurns {
+    pub(super) fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Returns `true` when `r` marks a new Codex turn or model response.
+    pub(super) fn note(&mut self, r: &Record<'_>) -> bool {
+        let p = r.value.get("payload");
+        match r.kind() {
+            "turn_context" => self.note_turn_start(codex_str(p, "turn_id")),
+            "event_msg" => match codex_str(p, "type") {
+                Some("task_started" | "turn_started") => {
+                    self.note_turn_start(codex_str(p, "turn_id"))
+                }
+                Some("agent_message") => self.note_msg(MsgSeen::Event, codex_str(p, "id")),
+                _ => false,
+            },
+            "response_item"
+                if codex_str(p, "type") == Some("message")
+                    && codex_str(p, "role") == Some("assistant") =>
+            {
+                self.note_msg(MsgSeen::Item, codex_str(p, "id"))
+            }
+            "token_usage_record" => self.note_usage(codex_str(p, "response_id")),
+            _ => false,
+        }
+    }
+
+    fn note_turn_start(&mut self, id: Option<&str>) -> bool {
+        if id.is_some() && self.last_turn_id.as_deref() == id {
+            return false;
+        }
+        self.last_turn_id = id.map(str::to_owned);
+        self.last_msg_id = None;
+        self.last_resp_id = None;
+        self.msg_seen = None;
+        self.awaiting_msg = true;
+        self.awaiting_usage = true;
+        true
+    }
+
+    fn note_msg(&mut self, family: MsgSeen, id: Option<&str>) -> bool {
+        let opposite = matches!(
+            (self.msg_seen, family),
+            (Some(MsgSeen::Event), MsgSeen::Item) | (Some(MsgSeen::Item), MsgSeen::Event)
+        );
+        if id.is_some() && self.last_msg_id.as_deref() == id {
+            self.msg_seen = if opposite {
+                Some(MsgSeen::Both)
+            } else {
+                self.msg_seen
+            };
+            return false;
+        }
+        if opposite && (id.is_none() || self.last_msg_id.is_none()) {
+            self.last_msg_id = id.map(str::to_owned).or_else(|| self.last_msg_id.take());
+            self.msg_seen = Some(MsgSeen::Both);
+            return false;
+        }
+        self.last_msg_id = id.map(str::to_owned);
+        self.msg_seen = Some(family);
+        self.awaiting_usage = true;
+        if self.awaiting_msg {
+            self.awaiting_msg = false;
+            return false;
+        }
+        true
+    }
+
+    fn note_usage(&mut self, id: Option<&str>) -> bool {
+        if id.is_some() && self.last_resp_id.as_deref() == id {
+            return false;
+        }
+        self.last_resp_id = id.map(str::to_owned);
+        self.msg_seen = None;
+        self.awaiting_msg = false;
+        if self.awaiting_usage {
+            self.awaiting_usage = false;
+            return false;
+        }
+        true
+    }
+}
+
+fn codex_str<'a>(p: Option<&'a Value>, key: &str) -> Option<&'a str> {
+    p?.get(key)?.as_str().filter(|s| !s.is_empty())
+}
+
 /// Stateless superset of `wants` for detectors reading Claude and Codex tool calls.
 pub(super) fn tool_prefilter(s: &crate::scan::Session, line: &str) -> bool {
     match s.agent {
@@ -254,6 +374,8 @@ pub struct CodexOutput {
     pub chars: u64,
     /// The `exec_command` results it printed, in order.
     pub results: Vec<CommandResult>,
+    /// Whether any raw text the cell printed carried a truncation or stash marker.
+    pub visible_truncated: bool,
 }
 
 /// One `exec_command` result as an `exec` cell prints it.
@@ -304,10 +426,12 @@ pub fn codex_output(r: &Record<'_>) -> Option<CodexOutput> {
     if !ordered {
         results.clear();
     }
+    let visible_truncated = texts.iter().any(|t| truncation::text_looks_truncated(t));
     Some(CodexOutput {
         call_id: p.get("call_id")?.as_str()?.to_owned(),
         chars: texts.iter().map(|t| chars(t)).sum(),
         results,
+        visible_truncated,
     })
 }
 
@@ -368,6 +492,8 @@ pub struct Paired {
     /// Characters of the output the cell printed for this command, which reached the
     /// model; 0 when it printed none.
     pub printed_chars: u64,
+    /// Whether the model-visible tool response for this command was truncated or stashed.
+    pub visible_truncated: bool,
 }
 
 /// A `CommandExecution` item kept for the one open call that could have run it.
@@ -655,19 +781,16 @@ impl<T> CodexCalls<T> {
         let paired = runs
             .into_iter()
             .zip(ties)
-            .zip(shown)
             .enumerate()
-            .filter_map(|(k, ((run, tie), shown))| {
+            .filter_map(|(k, (run, tie))| {
                 let p = match tie {
-                    Some(item) => Some(Paired {
-                        printed_chars: shown.map_or(0, |x| chars(&x.output)),
-                        exit_code: item.exit_code,
-                        output: item.output,
-                    }),
+                    Some(item) => Some(pair_tied(k, n, item, &shown, out)),
                     None if by_position => out.results.get(k).map(|x| Paired {
                         exit_code: x.exit_code,
                         output: x.output.clone(),
                         printed_chars: chars(&x.output),
+                        visible_truncated: truncation::text_looks_truncated(&x.output)
+                            || (n == 1 && out.visible_truncated),
                     }),
                     None => None,
                 };
@@ -692,6 +815,45 @@ impl<T> CodexCalls<T> {
         self.seen.clear();
         self.seq = 0;
     }
+}
+
+/// Builds a [`Paired`] entry for a command tied to a `CommandExecution` item, keeping
+/// the archived item output for error analysis whilst judging truncation from the
+/// model-visible tool response.
+fn pair_tied(
+    k: usize,
+    n: usize,
+    item: CommandResult,
+    shown: &[Option<&CommandResult>],
+    out: &CodexOutput,
+) -> Paired {
+    let printed = shown[k];
+    let from_result = match printed {
+        Some(x) => {
+            truncation::text_looks_truncated(&x.output)
+                || (!item.output.is_empty() && x.output.len() < item.output.len())
+        }
+        None => visible_unmatched_truncated(k, n, shown, out),
+    };
+    Paired {
+        printed_chars: printed.map_or(0, |x| chars(&x.output)),
+        exit_code: item.exit_code,
+        output: item.output,
+        visible_truncated: from_result || (n == 1 && out.visible_truncated),
+    }
+}
+
+fn visible_unmatched_truncated(
+    k: usize,
+    n: usize,
+    shown: &[Option<&CommandResult>],
+    out: &CodexOutput,
+) -> bool {
+    let in_place = out.results.len() == n
+        && (n == 1
+            || (0..n)
+                .all(|j| j == k || shown[j].is_some_and(|r| std::ptr::eq(r, &out.results[j]))));
+    in_place && truncation::text_looks_truncated(&out.results[k].output)
 }
 
 /// Each command's result from a call's items: the one item with its text, when the

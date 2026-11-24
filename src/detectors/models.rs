@@ -14,7 +14,7 @@ use crate::scan::{Agent, Detector, Record, Session};
 
 /// Cache reads as a multiple of the uncached input price, by the exact model id, from
 /// <https://platform.claude.com/docs/en/about-claude/pricing> as read on 24 November 2026.
-fn read_multiplier(model: &str) -> f64 {
+pub(super) fn read_multiplier(model: &str) -> f64 {
     match model {
         "claude-fable-5-2" | "claude-mythos-5-2" | "claude-fable-5-1" | "claude-mythos-5-1" => {
             0.025
@@ -237,7 +237,7 @@ impl Detector for Models {
         self.subs.extend(self.sub.take());
     }
 
-    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
+    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>, _in_window: bool) {
         self.price = usd_per_mtok;
     }
 
@@ -368,7 +368,30 @@ fn notes(opts: &Opts) -> Vec<String> {
     notes
 }
 
+/// Unrounded aggregate input-side USD and completeness counts for comparison reports.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct DiffTotals {
+    pub input_usd: f64,
+    pub unpriced_replies: u64,
+    pub skipped_replies: u64,
+}
+
 impl Models {
+    /// Unrounded input-side USD total and unpriced/skipped reply counts across all groups.
+    pub(crate) fn diff_totals(&self, rate: Option<f64>) -> DiffTotals {
+        let input_usd: f64 = self.groups.values().map(|g| g.cost.usd(rate)).sum();
+        let unpriced_replies = if rate.is_some() {
+            0
+        } else {
+            self.groups.values().map(|g| g.unpriced).sum()
+        };
+        DiffTotals {
+            input_usd,
+            unpriced_replies,
+            skipped_replies: self.skipped,
+        }
+    }
+
     /// The section, ranking models by their base price in `prices`.
     #[must_use]
     pub fn new(prices: Rc<Prices>) -> Self {
@@ -782,7 +805,7 @@ mod tests {
         };
         m.begin(&s);
         for (v, price, in_window) in records {
-            m.read_by(&s, *price);
+            m.read_by(&s, *price, *in_window);
             let r = Record {
                 value: v,
                 in_window: *in_window,

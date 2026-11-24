@@ -121,7 +121,10 @@ impl Detector for Schemas {
         self.cur = Current::default();
     }
 
-    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
+    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>, in_window: bool) {
+        if !in_window {
+            return;
+        }
         let same = self.cur.model.is_none_or(|m| m == usd_per_mtok);
         self.cur.model = Some(usd_per_mtok.filter(|_| same));
     }
@@ -256,6 +259,15 @@ impl Detector for Schemas {
 }
 
 impl Schemas {
+    /// Unrounded aggregate idle schema and skill waste USD.
+    pub(crate) fn exact_idle_usd(&self, rate: Option<f64>) -> f64 {
+        self.groups
+            .values()
+            .chain(self.skills.values())
+            .map(|g| g.idle_priced.exact_usd(g.idle_chars, rate))
+            .sum()
+    }
+
     /// The table by scope and skill, most idle characters first.
     fn skill_table(&self, opts: &Opts) -> Table {
         let mut skills: Vec<(u64, Vec<Value>)> = self

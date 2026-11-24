@@ -16,6 +16,10 @@ BigSister is ShaphansAudit renamed, with 4 new report sections, 4 more agents, p
 - `--csv` prints the report's sections as one CSV table, a value a record.
 - `--by-branch` adds a `models` table of input-side cost by the Git branch Claude Code records on each reply.
 - Each section with a dollar column names its price basis in its summary (`usd_basis`: `bundled`, `usd_per_mtok` or `prices_file`).
+- `cache` adds a sub-TTL (< 5 minute) cache-bust table classifying unexpected prefix rebuilds (model swap, tool load / schema change, mid-history edit / rewind, or proxy or prefix change) with avoidable USD penalty and token-share vs dollar-share divergence.
+- `rereads` adds compaction health metrics: post/pre retention ratio (flagging > 95% drops), compaction thrashing (< 10% saved across 2+ consecutive passes) and post-compaction file-churn/revert detection.
+- `polls` adds a truncation-triggered command re-run table flagging identical shell commands re-run within 2 turns of a truncated or stashed tool output.
+- `diff <before> <after>` compares turns, tokens, cache hit %, cost, sub-TTL cache busts, compactions and waste across 2 session folders or `START..END` time windows.
 - `all` starts with `ranked`: polls' output, re-reads after compactions, unused tool schemas and unused skills, each as estimated tokens and dollars over the whole window, most dollars first.
 - `--sample` runs any section on sample transcripts built into `bigsister`, so a first run gives a full report before there are transcripts to read; with no transcript folder, the error suggests it.
 - `schemas` also counts skills listed against skills used, and `polls` the characters every non-blank command's results returned, by verb class.

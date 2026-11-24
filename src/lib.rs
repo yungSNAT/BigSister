@@ -2,6 +2,7 @@
 
 pub mod cli;
 pub mod detectors;
+pub mod diff;
 pub mod gemini;
 pub mod opencode;
 pub mod pi;
@@ -28,11 +29,14 @@ pub fn run(cli: &Cli) -> Result<String, String> {
     if let cli::Command::Completions { shell } = cli.command {
         return Ok(completions(shell));
     }
+    if let cli::Command::Diff { before, after } = &cli.command {
+        return diff::run(cli, before, after);
+    }
     let since = window_start(cli)?;
     let home = std::env::home_dir().map(|h| report::display_path(&h.display().to_string(), None));
     let prices = std::rc::Rc::new(read_prices(cli, home.as_deref())?);
     let mut dets = detectors::build(
-        cli.command,
+        cli.command.clone(),
         &std::rc::Rc::new(programs::Programs::from_env()),
         &prices,
     );
@@ -45,12 +49,31 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         usd_per_mtok: cli.usd_per_mtok,
         prices_file: prices.file().map(str::to_owned),
     };
+    let mut sections = build_sections(cli, &prices, &dets, &stats, &opts);
+    if cli.command == cli::Command::All {
+        sections.insert(0, ranked_section(cli, &prices, &dets, &opts));
+    }
+    let meta = Meta {
+        since: since.unwrap_or(jiff::Timestamp::MAX),
+        roots: &stats,
+        skipped_roots: &skipped,
+        home: home.as_deref(),
+    };
+    Ok(render_report(cli, &meta, &sections))
+}
+
+fn build_sections(
+    cli: &Cli,
+    prices: &prices::Prices,
+    dets: &[Box<dyn scan::Detector>],
+    stats: &[scan::RootStats],
+    opts: &Opts,
+) -> Vec<report::Section> {
     let scanned: Vec<Agent> = stats.iter().map(|s| s.agent).collect();
-    let mut sections: Vec<_> = dets
-        .iter()
+    dets.iter()
         .map(|d| {
-            let mut s = d.section(&opts);
-            price(cli, &prices, &mut s);
+            let mut s = d.section(opts);
+            price(cli, prices, &mut s);
             if !d.agents().iter().any(|a| scanned.contains(a)) {
                 let names: Vec<&str> = d.agents().iter().map(|a| a.name()).collect();
                 s.notes.insert(
@@ -63,17 +86,7 @@ pub fn run(cli: &Cli) -> Result<String, String> {
             }
             s
         })
-        .collect();
-    if cli.command == cli::Command::All {
-        sections.insert(0, ranked_section(cli, &prices, &dets, &opts));
-    }
-    let meta = Meta {
-        since: since.unwrap_or(jiff::Timestamp::MAX),
-        roots: &stats,
-        skipped_roots: &skipped,
-        home: home.as_deref(),
-    };
-    Ok(render_report(cli, &meta, &sections))
+        .collect()
 }
 
 /// The ranked figures, which sum every row of their sections, not the rows --limit keeps.
@@ -107,7 +120,7 @@ fn ranked_section(
     ranked
 }
 
-fn render_report(cli: &Cli, meta: &Meta<'_>, sections: &[report::Section]) -> String {
+pub(crate) fn render_report(cli: &Cli, meta: &Meta<'_>, sections: &[report::Section]) -> String {
     if cli.json {
         report::json(meta, sections)
     } else if cli.csv {
@@ -164,7 +177,7 @@ fn read_transcripts(
 }
 
 /// The bundled prices, or those of the price file `--prices` names.
-fn read_prices(cli: &Cli, home: Option<&str>) -> Result<prices::Prices, String> {
+pub(crate) fn read_prices(cli: &Cli, home: Option<&str>) -> Result<prices::Prices, String> {
     let Some(path) = &cli.prices else {
         return Ok(prices::Prices::bundled());
     };
@@ -175,7 +188,7 @@ fn read_prices(cli: &Cli, home: Option<&str>) -> Result<prices::Prices, String> 
 }
 
 /// Prices a section at `--usd-per-mtok`'s one rate, or names the price file in its note.
-fn price(cli: &Cli, prices: &prices::Prices, s: &mut report::Section) {
+pub(crate) fn price(cli: &Cli, prices: &prices::Prices, s: &mut report::Section) {
     let basis = if let Some(usd) = cli.usd_per_mtok {
         report::price(s, usd);
         "usd_per_mtok"
@@ -201,7 +214,7 @@ fn price(cli: &Cli, prices: &prices::Prices, s: &mut report::Section) {
 type Roots = (Vec<(Agent, PathBuf)>, Vec<String>);
 
 /// The one agent `--agent` names, or `None` for all.
-fn chosen(cli: &Cli) -> Option<Agent> {
+pub(crate) fn chosen(cli: &Cli) -> Option<Agent> {
     match cli.agent {
         AgentChoice::All => None,
         AgentChoice::Claude => Some(Agent::Claude),
@@ -215,7 +228,11 @@ fn chosen(cli: &Cli) -> Option<Agent> {
 
 /// The transcript folders to scan for agents that `--agent` allows and the chosen
 /// detectors read, and notes on default folders that are missing.
-fn resolve_roots(cli: &Cli, read: &[Agent], home: Option<&str>) -> Result<Roots, String> {
+pub(crate) fn resolve_roots(
+    cli: &Cli,
+    read: &[Agent],
+    home: Option<&str>,
+) -> Result<Roots, String> {
     let chosen = chosen(cli);
     let wanted = |a: Agent| read.contains(&a) && chosen.is_none_or(|c| c == a);
     let candidates = [
@@ -270,7 +287,7 @@ fn resolve_roots(cli: &Cli, read: &[Agent], home: Option<&str>) -> Result<Roots,
 }
 
 /// Why a transcript folder cannot be scanned, if it cannot.
-fn folder_problem(path: &std::path::Path) -> Option<&'static str> {
+pub(crate) fn folder_problem(path: &std::path::Path) -> Option<&'static str> {
     if !path.is_dir() {
         Some("not found")
     } else if std::fs::read_dir(path).is_err() {

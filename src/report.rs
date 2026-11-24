@@ -93,6 +93,7 @@ fn usd_column(tokens: &str) -> Option<&'static str> {
         "reread_tokens_est" => Some("reread_usd_est"),
         "idle_tokens_est" => Some("idle_usd_est"),
         "result_tokens_est" => Some("result_usd_est"),
+        "rerun_tokens_est" => Some("rerun_usd_est"),
         _ => None,
     }
 }

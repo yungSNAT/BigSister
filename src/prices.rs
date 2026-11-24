@@ -308,6 +308,22 @@ impl Priced {
         (self.chars_usd / 4.0 / 1e4).round() / 100.0
     }
 
+    /// Unrounded dollars at each reading model's price, or at flat `rate` over `total_chars`.
+    #[must_use]
+    pub(crate) fn exact_usd(&self, total_chars: u64, rate: Option<f64>) -> f64 {
+        match rate {
+            Some(r) => {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "character counts stay far below 2^52"
+                )]
+                let tokens = total_chars as f64 / 4.0;
+                (tokens / 1e6) * r
+            }
+            None => (self.chars_usd / 4.0) / 1e6,
+        }
+    }
+
     /// The part of `est_tokens(total)` not priced, where `total` holds these characters.
     #[must_use]
     pub fn unpriced_tokens(&self, total: u64) -> u64 {

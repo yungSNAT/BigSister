@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Value, json};
 
+use super::compaction::{self, Health};
 use super::tools::printed;
 use super::{
     ClaudeCalls, CodexCalls, EST_NOTE, codex_call, codex_call_line, codex_output, est_tokens,
@@ -88,12 +89,21 @@ pub struct Rereads {
     /// The trigger of the session's latest compaction, which its re-reads count toward.
     trigger: String,
     triggers: BTreeMap<(Agent, String), Trigger>,
+    health: Health,
 }
 
 fn rereads_prefilter(s: &Session, line: &str) -> bool {
     match s.agent {
-        Agent::Codex => line.contains("\"type\":\"compacted\"") || super::tool_prefilter(s, line),
-        _ => line.contains("\"compact_boundary\"") || super::tool_prefilter(s, line),
+        Agent::Codex => {
+            line.contains("\"type\":\"compacted\"")
+                || super::tool_prefilter(s, line)
+                || super::codex_turn_line(line)
+        }
+        _ => {
+            line.contains("\"compact_boundary\"")
+                || line.contains("\"type\":\"assistant\"")
+                || super::tool_prefilter(s, line)
+        }
     }
 }
 
@@ -114,11 +124,13 @@ impl Detector for Rereads {
                 line.contains("\"compact_boundary\"")
                     || line.contains("\"tool_use\"")
                     || self.claude.wants(line)
+                    || self.health.wants_claude(line)
             }
             Agent::Codex => {
                 line.contains("\"type\":\"compacted\"")
                     || codex_call_line(line)
                     || self.codex.wants(line)
+                    || self.health.wants_codex(line)
             }
         }
     }
@@ -138,6 +150,7 @@ impl Detector for Rereads {
         self.claude.clear();
         self.unread.clear();
         self.trigger.clear();
+        self.health.begin();
     }
 
     fn branch(&mut self, _s: &Session) {
@@ -146,9 +159,10 @@ impl Detector for Rereads {
         self.current.clear();
         self.claude.clear();
         self.unread.clear();
+        self.health.branch();
     }
 
-    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
+    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>, _in_window: bool) {
         for (agent, scope, trigger, n) in self.unread.drain(..) {
             let c = self.totals.entry((agent, scope)).or_default();
             c.reread_priced.add(n, usd_per_mtok);
@@ -171,12 +185,16 @@ impl Detector for Rereads {
         }
         match s.agent {
             Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {
+                self.health.on_assistant(s, r);
                 for b in tool_uses(r) {
                     let id = b.get("id").and_then(Value::as_str);
                     let fresh = self.claude.note(id);
                     let mut reread = false;
                     for path in claude_read_paths(b) {
                         reread |= self.read(s, &path, r.in_window);
+                    }
+                    for path in compaction::claude_edit_paths(b) {
+                        self.health.on_edit(s, &path, r.in_window);
                     }
                     if reread
                         && fresh
@@ -231,17 +249,21 @@ impl Detector for Rereads {
             tables.push(self.path_table(opts));
         }
         tables.push(self.trigger_table(opts));
+        tables.push(self.health.table(opts));
         Section {
             name: "rereads",
             title: "files read again after a context compaction",
-            summary: vec![(
+            summary: std::iter::once((
                 "codex_outputs_not_paired".to_owned(),
                 json!(self.codex.unpaired),
-            )],
+            ))
+            .chain(self.health.summary())
+            .collect(),
             tables,
             notes: vec![
                 "A re-read is a file read after a compaction that was read before it and not yet since.".to_owned(),
                 "Reread share divides re-reads by every read in the window, in compacted sessions or not.".to_owned(),
+                compaction::HEALTH_NOTE.to_owned(),
                 "By compaction trigger: the trigger is the compactMetadata trigger Claude Code records on each compaction, such as auto or manual, printed as tool names are ((other) for any other text); Codex, pi, OpenCode and Qwen record none. Pre-compaction tokens are the preTokens it records, measured, not estimated: the median (by nearest rank, so the lower of 2 middle values) and largest of the row's compactions that record them; a row none of whose compactions records them shows null. A re-read, with its result, counts toward the trigger of the latest compaction before its call in its session.".to_owned(),
                 "Reread chars are the characters of text in the results of calls that re-read, each call counted once; a result holds what the tool returned, which can be more or less than the file. A Codex call's result is all the text its exec cell printed; Codex outputs not paired counts the calls in the window that re-read but were a function_call, whose output is not read, or an exec cell that had no call id, shared it with another exec cell in the session or whose output never came.".to_owned(),
                 EST_NOTE.to_owned(),
@@ -252,9 +274,21 @@ impl Detector for Rereads {
 }
 
 impl Rereads {
+    /// Unrounded aggregate re-read waste USD across all agent/scope totals.
+    pub(crate) fn exact_reread_usd(&self, rate: Option<f64>) -> f64 {
+        self.totals
+            .values()
+            .map(|c| c.reread_priced.exact_usd(c.reread_chars, rate))
+            .sum()
+    }
+
     /// Reads a Codex call's reads, or the output of a call that re-read.
     fn codex(&mut self, s: &Session, r: &Record<'_>) {
+        self.health.on_codex_record(r);
         if let Some(call) = codex_call(r) {
+            for path in compaction::codex_patch_paths(r) {
+                self.health.on_edit(s, &path, r.in_window);
+            }
             let from_commands = call.commands().flat_map(read_targets);
             let mut reread = false;
             for path in from_commands.chain(call.reads.iter().cloned()) {
@@ -272,6 +306,7 @@ impl Rereads {
     }
 
     fn boundary(&mut self, s: &Session, r: &Record<'_>) {
+        self.health.on_boundary(s, r);
         let meta = r.value.get("compactMetadata");
         self.trigger = meta
             .and_then(|m| m.get("trigger"))
@@ -316,6 +351,7 @@ impl Rereads {
         if path.is_empty() {
             return false;
         }
+        self.health.on_read(s, &path, in_window);
         let mut reread = false;
         if in_window {
             let c = self.totals.entry((s.agent, s.scope())).or_default();
@@ -405,181 +441,5 @@ fn claude_read_paths(b: &Value) -> Vec<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::*;
-    use crate::detectors::{claude_tool_result, claude_tool_use, replay};
-
-    #[test]
-    fn a_reused_claude_tool_use_id_pairs_with_neither_read() {
-        let read = |path: &str| json!({"file_path": path});
-        let boundary = json!({"type": "system", "subtype": "compact_boundary"});
-        let lines: Vec<(bool, String)> = [
-            claude_tool_use("a", "Read", &read("/work/y.md")),
-            boundary.to_string(),
-            // The re-read and a block reusing its id: the result may be either's.
-            claude_tool_use("b", "Read", &read("/work/y.md")),
-            claude_tool_use("b", "Bash", &json!({"command": "ls"})),
-            claude_tool_result("b", "12345"),
-        ]
-        .into_iter()
-        .map(|l| (true, l))
-        .collect();
-        let s = Session {
-            agent: Agent::Claude,
-            subagent: false,
-        };
-        let mut d = Rereads::default();
-        replay(&mut d, &s, &lines);
-        let c = d.totals[&(Agent::Claude, "main")];
-        assert_eq!((c.rereads, c.reread_chars), (1, 0));
-    }
-
-    /// The rows of `rereads`' table titled `title`, each with the values of `keys`.
-    fn table_cells(d: &Rereads, title: &str, keys: &[&str]) -> Value {
-        let opts = Opts {
-            limit: 100,
-            paths: false,
-            by_branch: false,
-            home: None,
-            usd_per_mtok: None,
-            prices_file: None,
-        };
-        let section = d.section(&opts);
-        let table = section
-            .tables
-            .iter()
-            .find(|t| t.title == title)
-            .unwrap_or_else(|| panic!("no table {title}"));
-        let at = |k: &&str| table.columns.iter().position(|c| c == k).expect("a column");
-        table
-            .rows
-            .iter()
-            .map(|row| keys.iter().map(|k| row[at(k)].clone()).collect::<Value>())
-            .collect()
-    }
-
-    /// A Claude session that compacts by hand twice, automatically once and once
-    /// without metadata, reading the same file again after each.
-    fn trigger_session() -> Vec<(bool, String)> {
-        let read = |id| claude_tool_use(id, "Read", &json!({"file_path": "/work/a.md"}));
-        let boundary = |trigger: &str, tokens: u64| {
-            json!({"type": "system", "subtype": "compact_boundary",
-                   "compactMetadata": {"trigger": trigger, "preTokens": tokens}})
-            .to_string()
-        };
-        vec![
-            (true, read("a")),
-            // Out of the window: sets the trigger but counts no compaction.
-            (false, boundary("manual", 1)),
-            (true, boundary("manual", 5000)),
-            (true, read("b")),
-            (true, claude_tool_result("b", "12345678")),
-            (true, boundary("auto", 9000)),
-            (true, read("c")),
-            (true, boundary("manual", 7000)),
-            (true, read("d")),
-            // No metadata, as pi's, OpenCode's and Qwen's boundaries have.
-            (
-                true,
-                json!({"type": "system", "subtype": "compact_boundary"}).to_string(),
-            ),
-            (true, read("e")),
-        ]
-    }
-
-    #[test]
-    fn a_result_counts_toward_the_trigger_before_its_call() {
-        let boundary = |trigger: &str| {
-            json!({"type": "system", "subtype": "compact_boundary",
-                   "compactMetadata": {"trigger": trigger}})
-            .to_string()
-        };
-        let read = |id| claude_tool_use(id, "Read", &json!({"file_path": "/work/a.md"}));
-        let lines: Vec<(bool, String)> = [
-            read("a"),
-            boundary("manual"),
-            read("b"),
-            // A compaction between the re-read and its result.
-            boundary("auto"),
-            claude_tool_result("b", "1234"),
-        ]
-        .into_iter()
-        .map(|l| (true, l))
-        .collect();
-        let s = Session {
-            agent: Agent::Claude,
-            subagent: false,
-        };
-        let mut d = Rereads::default();
-        replay(&mut d, &s, &lines);
-        let keys = ["trigger", "rereads", "reread_chars"];
-        assert_eq!(
-            table_cells(&d, "By compaction trigger", &keys),
-            json!([["auto", 0, 0], ["manual", 1, 4]])
-        );
-    }
-
-    #[test]
-    fn a_trigger_prints_only_as_a_label() {
-        let boundary = json!({"type": "system", "subtype": "compact_boundary",
-                              "compactMetadata": {"trigger": "secret: do not print"}});
-        let s = Session {
-            agent: Agent::Claude,
-            subagent: false,
-        };
-        let mut d = Rereads::default();
-        replay(&mut d, &s, &[(true, boundary.to_string())]);
-        assert_eq!(
-            table_cells(&d, "By compaction trigger", &["trigger", "compactions"]),
-            json!([["(other)", 1]])
-        );
-    }
-
-    #[test]
-    fn rereads_count_toward_the_trigger_of_the_latest_compaction() {
-        let s = Session {
-            agent: Agent::Claude,
-            subagent: false,
-        };
-        let mut d = Rereads::default();
-        replay(&mut d, &s, &trigger_session());
-        let keys = [
-            "trigger",
-            "compactions",
-            "median_pre_compaction_tokens",
-            "max_pre_compaction_tokens",
-            "rereads",
-            "reread_chars",
-            "rereads_per_compaction",
-        ];
-        // The median of 2 values is the lower, by nearest rank.
-        assert_eq!(
-            table_cells(&d, "By compaction trigger", &keys),
-            json!([
-                ["manual", 2, 5000, 7000, 2, 8, 1.0],
-                ["auto", 1, 9000, 9000, 1, 0, 1.0],
-                ["not recorded", 1, null, null, 1, 0, 1.0]
-            ])
-        );
-    }
-
-    #[test]
-    fn reads_with_no_path_are_not_reads() {
-        let read = |id| claude_tool_use(id, "Read", &json!({"file_path": ""}));
-        let boundary = json!({"type": "system", "subtype": "compact_boundary"});
-        let lines: Vec<(bool, String)> = [read("a"), boundary.to_string(), read("b")]
-            .into_iter()
-            .map(|l| (true, l))
-            .collect();
-        let s = Session {
-            agent: Agent::Claude,
-            subagent: false,
-        };
-        let mut d = Rereads::default();
-        replay(&mut d, &s, &lines);
-        let counts = d.totals.get(&(Agent::Claude, "main"));
-        assert_eq!(counts.map_or((0, 0), |c| (c.reads, c.rereads)), (0, 0));
-    }
-}
+#[path = "rereads_tests.rs"]
+mod tests;

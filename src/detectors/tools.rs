@@ -165,7 +165,7 @@ impl Detector for Tools {
         self.end_run();
     }
 
-    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>) {
+    fn read_by(&mut self, _s: &Session, usd_per_mtok: Option<f64>, _in_window: bool) {
         for (agent, tool, n) in self.unread.drain(..) {
             let c = self.tools.entry((agent, tool)).or_default();
             c.result_priced.add(n, usd_per_mtok);
