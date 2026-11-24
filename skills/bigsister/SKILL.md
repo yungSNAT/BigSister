@@ -1,6 +1,9 @@
 ---
 name: bigsister
 description: Answer plain-language questions about where a coding agent's tokens went (what loads before the first message, which MCP server or tool schema costs most, whether the prompt cache keeps expiring, slow hooks, hidden test failures) by running the local bigsister CLI on the transcripts Claude Code, Codex, pi, OpenCode, Gemini CLI and Qwen Code save on this machine.
+license: Apache-2.0
+metadata:
+  author: yungSNAT
 ---
 
 # BigSister
