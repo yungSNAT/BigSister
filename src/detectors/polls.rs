@@ -258,6 +258,14 @@ fn notes() -> Vec<String> {
 }
 
 impl Polls {
+    /// Unrounded aggregate poll waste USD across all agent/scope totals.
+    pub(crate) fn exact_poll_usd(&self, rate: Option<f64>) -> f64 {
+        self.totals
+            .values()
+            .map(|c| c.poll_priced.exact_usd(c.poll_chars, rate))
+            .sum()
+    }
+
     fn totals_table(&self, opts: &Opts) -> Table {
         let cols = [&["agent", "scope", "commands"][..], &Counts::COLUMNS[..]].concat();
         let mut totals = Table::new("By agent and scope", cols);

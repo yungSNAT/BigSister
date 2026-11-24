@@ -211,6 +211,13 @@ pub(super) fn codex_turn_line(line: &str) -> bool {
         || (line.contains("\"type\":\"response_item\"") && line.contains("\"assistant\""))
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MsgSeen {
+    Event,
+    Item,
+    Both,
+}
+
 /// Tracks distinct Codex turn and model-response boundaries so multi-call turns
 /// count once and intervening text-only turns advance the turn counter.
 #[derive(Default)]
@@ -218,6 +225,7 @@ pub(super) struct CodexTurns {
     last_turn_id: Option<String>,
     last_msg_id: Option<String>,
     last_resp_id: Option<String>,
+    msg_seen: Option<MsgSeen>,
     awaiting_msg: bool,
     awaiting_usage: bool,
 }
@@ -236,14 +244,14 @@ impl CodexTurns {
                 Some("task_started" | "turn_started") => {
                     self.note_turn_start(codex_str(p, "turn_id"))
                 }
-                Some("agent_message") => self.note_msg(codex_str(p, "id")),
+                Some("agent_message") => self.note_msg(MsgSeen::Event, codex_str(p, "id")),
                 _ => false,
             },
             "response_item"
                 if codex_str(p, "type") == Some("message")
                     && codex_str(p, "role") == Some("assistant") =>
             {
-                self.note_msg(codex_str(p, "id"))
+                self.note_msg(MsgSeen::Item, codex_str(p, "id"))
             }
             "token_usage_record" => self.note_usage(codex_str(p, "response_id")),
             _ => false,
@@ -257,16 +265,28 @@ impl CodexTurns {
         self.last_turn_id = id.map(str::to_owned);
         self.last_msg_id = None;
         self.last_resp_id = None;
+        self.msg_seen = None;
         self.awaiting_msg = true;
         self.awaiting_usage = true;
         true
     }
 
-    fn note_msg(&mut self, id: Option<&str>) -> bool {
+    fn note_msg(&mut self, family: MsgSeen, id: Option<&str>) -> bool {
         if id.is_some() && self.last_msg_id.as_deref() == id {
+            self.msg_seen = Some(MsgSeen::Both);
+            return false;
+        }
+        let mirror = matches!(
+            (self.msg_seen, family),
+            (Some(MsgSeen::Event), MsgSeen::Item) | (Some(MsgSeen::Item), MsgSeen::Event)
+        ) && (id.is_none() || self.last_msg_id.is_none());
+        if mirror {
+            self.last_msg_id = id.map(str::to_owned).or_else(|| self.last_msg_id.take());
+            self.msg_seen = Some(MsgSeen::Both);
             return false;
         }
         self.last_msg_id = id.map(str::to_owned);
+        self.msg_seen = Some(family);
         self.awaiting_usage = true;
         if self.awaiting_msg {
             self.awaiting_msg = false;
@@ -280,6 +300,7 @@ impl CodexTurns {
             return false;
         }
         self.last_resp_id = id.map(str::to_owned);
+        self.msg_seen = None;
         self.awaiting_msg = false;
         if self.awaiting_usage {
             self.awaiting_usage = false;
@@ -764,7 +785,8 @@ impl<T> CodexCalls<T> {
                         exit_code: x.exit_code,
                         output: x.output.clone(),
                         printed_chars: chars(&x.output),
-                        visible_truncated: truncation::text_looks_truncated(&x.output),
+                        visible_truncated: truncation::text_looks_truncated(&x.output)
+                            || (n == 1 && out.visible_truncated),
                     }),
                     None => None,
                 };
@@ -802,7 +824,7 @@ fn pair_tied(
     out: &CodexOutput,
 ) -> Paired {
     let printed = shown[k];
-    let visible_truncated = match printed {
+    let from_result = match printed {
         Some(x) => {
             truncation::text_looks_truncated(&x.output)
                 || (!item.output.is_empty() && x.output.len() < item.output.len())
@@ -813,7 +835,7 @@ fn pair_tied(
         printed_chars: printed.map_or(0, |x| chars(&x.output)),
         exit_code: item.exit_code,
         output: item.output,
-        visible_truncated,
+        visible_truncated: from_result || (n == 1 && out.visible_truncated),
     }
 }
 
@@ -827,10 +849,7 @@ fn visible_unmatched_truncated(
         && (n == 1
             || (0..n)
                 .all(|j| j == k || shown[j].is_some_and(|r| std::ptr::eq(r, &out.results[j]))));
-    if in_place {
-        return truncation::text_looks_truncated(&out.results[k].output);
-    }
-    n == 1 && out.results.is_empty() && out.visible_truncated
+    in_place && truncation::text_looks_truncated(&out.results[k].output)
 }
 
 /// Each command's result from a call's items: the one item with its text, when the

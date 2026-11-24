@@ -274,6 +274,14 @@ impl Detector for Rereads {
 }
 
 impl Rereads {
+    /// Unrounded aggregate re-read waste USD across all agent/scope totals.
+    pub(crate) fn exact_reread_usd(&self, rate: Option<f64>) -> f64 {
+        self.totals
+            .values()
+            .map(|c| c.reread_priced.exact_usd(c.reread_chars, rate))
+            .sum()
+    }
+
     /// Reads a Codex call's reads, or the output of a call that re-read.
     fn codex(&mut self, s: &Session, r: &Record<'_>) {
         self.health.on_codex_record(r);

@@ -364,3 +364,84 @@ fn codex_command_execution_uses_model_visible_truncation_not_archived_stdout() {
     assert_eq!(s["truncated_outputs"], 3);
     assert_eq!(s["truncation_reruns"], 3);
 }
+
+#[test]
+fn codex_mirrored_idless_messages_coalesce_at_two_turn_boundary() {
+    let dir = super::temp_dir("tr", "codex-mirror");
+    let ev = json!({"type": "event_msg", "timestamp": "2026-11-08T01:00:05Z", "payload": {"type": "agent_message", "message": "ok"}}).to_string();
+    let item = json!({"type": "response_item", "timestamp": "2026-11-08T01:00:05Z", "payload": {"type": "message", "role": "assistant"}}).to_string();
+    for (name, pairs, expect) in [("within", 2_usize, 1_u64), ("past", 3, 0)] {
+        let mut lines = vec![
+            json!({"type": "turn_context", "timestamp": "2026-11-08T01:00:00Z", "payload": {"turn_id": "t1"}}).to_string(),
+            codex_exec("2026-11-08T01:00:01Z", "m1", "git status"),
+            codex_out("2026-11-08T01:00:02Z", "m1", 0, "[output truncated]"),
+            ev.clone(),
+            item.clone(),
+        ];
+        for i in 0..pairs {
+            if i % 2 == 0 {
+                lines.extend([ev.clone(), item.clone()]);
+            } else {
+                lines.extend([item.clone(), ev.clone()]);
+            }
+        }
+        lines.push(codex_exec("2026-11-08T01:00:20Z", "m2", "git status"));
+        lines.push(codex_out("2026-11-08T01:00:21Z", "m2", 0, "clean"));
+        super::write_jsonl(&dir, &format!("{name}/2026/rollout.jsonl"), &lines);
+        let doc = super::run_json("polls", &["--codex-root", dir.join(name).to_str().unwrap()]);
+        assert_eq!(
+            doc["detectors"]["polls"]["summary"]["truncation_reruns"], expect,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn codex_separate_truncation_notice_flags_single_call_only() {
+    let dir = super::temp_dir("tr", "codex-notice");
+    let ts = "2026-11-08T01:00:00.000Z";
+    let ms = 1_794_099_600_000_i64;
+    let notice_out = |id: &str| {
+        let body = json!({"exit_code": 0, "output": "head"}).to_string();
+        json!({"type": "response_item", "timestamp": ts, "payload": {"type": "custom_tool_call_output", "call_id": id, "output": [{"type": "input_text", "text": body}, {"type": "input_text", "text": "[output truncated]"}]}}).to_string()
+    };
+    let multi_exec = json!({"type": "response_item", "timestamp": ts, "payload": {"type": "custom_tool_call", "name": "exec", "call_id": "mc1", "input": "text(await tools.exec_command({cmd: \"rustc --version\"})); text(await tools.exec_command({cmd: \"cargo check\"}));"}}).to_string();
+    let multi_out = json!({"type": "response_item", "timestamp": ts, "payload": {"type": "custom_tool_call_output", "call_id": "mc1", "output": [{"type": "input_text", "text": r#"{"exit_code":0,"output":"ok"}"#}, {"type": "input_text", "text": r#"{"exit_code":0,"output":"[output truncated]"}"#}]}}).to_string();
+    let lines = vec![
+        // Single-command tied to archived CommandExecution + separate [output truncated] notice.
+        codex_exec(ts, "s1", "git status"),
+        codex_item(ts, &["git", "status"], 0, "head", ms + 1),
+        notice_out("s1"),
+        codex_exec(ts, "s2", "git status"),
+        codex_out(ts, "s2", 0, "clean"),
+        // Single-command untied (by_position) + separate [output truncated] notice.
+        codex_exec(ts, "u1", "git diff"),
+        notice_out("u1"),
+        codex_exec(ts, "u2", "git diff"),
+        codex_out(ts, "u2", 0, "clean"),
+        // Multi-command tied cell: clean command must NOT inherit sibling's truncation marker.
+        multi_exec,
+        codex_item(ts, &["rustc", "--version"], 0, "ok", ms + 2),
+        codex_item(ts, &["cargo", "check"], 0, "full archived check", ms + 3),
+        multi_out,
+        codex_exec(ts, "mc2", "rustc --version"),
+        codex_out(ts, "mc2", 0, "ok"),
+        codex_exec(ts, "mc3", "cargo check"),
+        codex_out(ts, "mc3", 0, "ok"),
+    ];
+    super::write_jsonl(&dir, "2026/rollout.jsonl", &lines);
+    let doc = super::run_json("polls", &["--codex-root", dir.to_str().unwrap()]);
+    let s = &doc["detectors"]["polls"]["summary"];
+    assert_eq!(
+        (
+            s["truncated_outputs"].clone(),
+            s["truncation_reruns"].clone()
+        ),
+        (json!(3), json!(3))
+    );
+    let rows = super::table_rows(&doc, "polls", "Truncation-triggered command re-runs");
+    assert!(
+        rows.iter().all(|r| r["verb"] != "rustc"),
+        "clean sibling must not be flagged: {rows:?}"
+    );
+}

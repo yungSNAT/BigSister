@@ -191,3 +191,67 @@ fn diff_window_schema_waste_is_invariant_to_appending_replies_after_end() {
     assert!(w1 > 0.0, "expected priced idle schema waste, got {w1}");
     assert_eq!(w1, w2);
 }
+
+fn poll_session_lines(tag: &str, count: usize) -> Vec<String> {
+    let payload = "x".repeat(4_000);
+    let mut lines = vec![
+        super::reply(
+            "2026-11-08T01:00:00Z",
+            &format!("{tag}0"),
+            "claude-opus-5-5",
+            10,
+            0,
+            0,
+            &json!([{"type": "tool_use", "id": format!("{tag}-0"), "name": "Bash", "input": {"command": "git status"}}]),
+        ),
+        json!({"type": "user", "timestamp": "2026-11-08T01:00:01Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": format!("{tag}-0"), "content": "ok"}]}}).to_string(),
+    ];
+    for i in 1..=count {
+        let id = format!("{tag}-{i}");
+        lines.push(super::reply(
+            "2026-11-08T01:00:10Z",
+            &format!("{tag}{i}"),
+            "claude-opus-5-5",
+            10,
+            0,
+            0,
+            &json!([{"type": "tool_use", "id": id, "name": "Bash", "input": {"command": "git status"}}]),
+        ));
+        lines.push(json!({"type": "user", "timestamp": "2026-11-08T01:00:11Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": id, "content": payload}]}}).to_string());
+    }
+    lines.push(effort_reply(
+        "2026-11-08T01:00:20Z",
+        &format!("{tag}end"),
+        "claude-opus-5-5",
+        "high",
+        10,
+    ));
+    lines
+}
+
+#[test]
+fn diff_waste_usd_is_invariant_to_regrouping_sub_cent_rows() {
+    let root = super::temp_dir("diff", "waste-regroup");
+    // Two 4,000-char (1,000-token) polls at $4/M ($0.004 each = $0.008 -> $0.01).
+    super::write_jsonl(&root, "before/proj/s.jsonl", &poll_session_lines("b", 2));
+    super::write_jsonl(&root, "after/proj/s.jsonl", &poll_session_lines("a1", 1));
+    super::write_jsonl(
+        &root,
+        "after/proj/s/subagents/agent-1.jsonl",
+        &poll_session_lines("a2", 1),
+    );
+    for extra in [&[][..], &["--usd-per-mtok", "4"][..]] {
+        let doc = diff_json(&root.join("before"), &root.join("after"), extra);
+        let w = metric_row(&doc, "waste_usd_est");
+        assert_eq!(
+            (w["before"].clone(), w["after"].clone()),
+            (json!(0.01), json!(0.01)),
+            "{extra:?}"
+        );
+        assert_eq!(
+            (w["delta"].clone(), w["delta_pct"].clone()),
+            (json!(0.0), json!(0.0)),
+            "{extra:?}"
+        );
+    }
+}

@@ -169,6 +169,9 @@ fn measure(
     };
     let exact_models = models_det.diff_totals(opts.usd_per_mtok);
     let exact_bust_usd = cache_det.exact_sub_ttl_penalty_usd(opts.usd_per_mtok);
+    let exact_waste_usd = polls_det.exact_poll_usd(opts.usd_per_mtok)
+        + rereads_det.exact_reread_usd(opts.usd_per_mtok)
+        + schemas_det.exact_idle_usd(opts.usd_per_mtok);
     let sections: Vec<Section> = [
         &models_det as &dyn Detector,
         &cache_det,
@@ -191,7 +194,7 @@ fn measure(
         "bundled"
     };
     Ok(Measured {
-        snap: extract(&sections, exact_models, exact_bust_usd),
+        snap: extract(&sections, exact_models, exact_bust_usd, exact_waste_usd),
         stats,
         skipped,
         basis,
@@ -274,6 +277,7 @@ fn extract(
     sections: &[Section],
     exact_models: models::DiffTotals,
     exact_bust_usd: Option<f64>,
+    exact_waste_usd: f64,
 ) -> Snapshot {
     let mut s = Snapshot::default();
     let models = &sections[0];
@@ -303,11 +307,9 @@ fn extract(
     s.extreme_compactions = summary_u64(rereads, "extreme_loss_compactions");
     s.compaction_thrashing = summary_u64(rereads, "compaction_thrashing_passes");
     s.reread_est = sum_u64(rereads, 0, "reread_tokens_est");
-    let reread_usd = sum_f64(rereads, 0, "reread_usd_est");
 
     let polls = &sections[3];
     s.poll_est = sum_u64(polls, 0, "poll_tokens_est");
-    let poll_usd = sum_f64(polls, 0, "poll_usd_est");
     s.truncation_reruns = summary_u64(polls, "truncation_reruns");
 
     let schemas = &sections[4];
@@ -316,13 +318,12 @@ fn extract(
         1,
         "idle_tokens_est",
     ));
-    let schema_usd = sum_f64(schemas, 0, "idle_usd_est") + sum_f64(schemas, 1, "idle_usd_est");
 
     s.waste_est = s
         .poll_est
         .saturating_add(s.reread_est)
         .saturating_add(s.idle_schema_est);
-    s.waste_usd = poll_usd + reread_usd + schema_usd;
+    s.waste_usd = exact_waste_usd;
     s
 }
 
@@ -337,16 +338,6 @@ fn sum_u64(s: &Section, table: usize, col: &str) -> u64 {
         .iter()
         .filter_map(|r| r.get(at)?.as_u64())
         .fold(0, u64::saturating_add)
-}
-
-fn sum_f64(s: &Section, table: usize, col: &str) -> f64 {
-    let t = &s.tables[table];
-    let at = t
-        .columns
-        .iter()
-        .position(|c| *c == col)
-        .unwrap_or(usize::MAX);
-    t.rows.iter().filter_map(|r| r.get(at)?.as_f64()).sum()
 }
 
 fn summary_u64(s: &Section, key: &str) -> u64 {

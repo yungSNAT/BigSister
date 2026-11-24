@@ -300,3 +300,34 @@ fn assert_codex_spaced_text_turns(dir: &std::path::Path) {
         (json!(0), json!(0))
     );
 }
+
+#[test]
+fn codex_mirrored_idless_messages_coalesce_at_five_turn_compaction_boundary() {
+    let dir = super::temp_dir("ct", "codex-mirror");
+    let ev = json!({"type": "event_msg", "timestamp": "2026-11-08T01:01:05Z", "payload": {"type": "agent_message", "message": "ok"}}).to_string();
+    let item = json!({"type": "response_item", "timestamp": "2026-11-08T01:01:05Z", "payload": {"type": "message", "role": "assistant"}}).to_string();
+    for (name, pairs, expect) in [("within", 5_usize, 1_u64), ("past", 6, 0)] {
+        let mut lines = vec![
+            codex_patch("2026-11-08T01:00:00Z", "p1", "/work/m.rs"),
+            json!({"type": "compacted", "timestamp": "2026-11-08T01:01:00Z"}).to_string(),
+        ];
+        for _ in 0..pairs {
+            lines.extend([ev.clone(), item.clone()]);
+        }
+        lines.push(codex_exec_cmd(
+            "2026-11-08T01:02:00Z",
+            "r1",
+            "cat /work/m.rs",
+        ));
+        lines.push(codex_patch("2026-11-08T01:02:05Z", "p2", "/work/m.rs"));
+        super::write_jsonl(&dir, &format!("{name}/2026/rollout.jsonl"), &lines);
+        let doc = super::run_json(
+            "rereads",
+            &["--codex-root", dir.join(name).to_str().unwrap()],
+        );
+        assert_eq!(
+            doc["detectors"]["rereads"]["summary"]["post_compaction_revert_cycles"], expect,
+            "{name}"
+        );
+    }
+}
