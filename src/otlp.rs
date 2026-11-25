@@ -171,7 +171,8 @@ fn tool_records(span: &Value, a: &Attrs<'_>, id: &str, session: &str, ts: &Value
     let error = span.pointer("/status/code").and_then(Value::as_u64) == Some(2)
         || a.get("error.type").is_some();
     let call_block = json!({"type": "tool_use", "id": call, "name": name, "input": {}});
-    let result = json!({"type": "tool_result", "tool_use_id": call, "content": "", "is_error": error});
+    let result =
+        json!({"type": "tool_result", "tool_use_id": call, "content": "", "is_error": error});
     vec![
         json!({"type": "assistant", "sessionId": session, "uuid": format!("{id}-call"),
                "message": {"role": "assistant", "content": [call_block]}, "timestamp": ts})
@@ -218,8 +219,14 @@ mod tests {
                 attr("gen_ai.request.model", json!({"stringValue": "m-req"})),
                 attr("gen_ai.response.model", json!({"stringValue": "m-resp"})),
                 attr("gen_ai.usage.input_tokens", json!({"intValue": "1000"})),
-                attr("gen_ai.usage.cache_read.input_tokens", json!({"intValue": 600})),
-                attr("gen_ai.usage.cache_creation.input_tokens", json!({"intValue": "100"})),
+                attr(
+                    "gen_ai.usage.cache_read.input_tokens",
+                    json!({"intValue": 600}),
+                ),
+                attr(
+                    "gen_ai.usage.cache_creation.input_tokens",
+                    json!({"intValue": "100"}),
+                ),
                 attr("gen_ai.usage.output_tokens", json!({"intValue": "50"})),
             ],
         );
@@ -247,8 +254,14 @@ mod tests {
                 attr("gen_ai.request.model", json!({"stringValue": "m"})),
                 attr("gen_ai.conversation.id", json!({"stringValue": "conv"})),
                 attr("gen_ai.usage.input_tokens", json!({"intValue": "100"})),
-                attr("gen_ai.usage.cache_write.input_tokens", json!({"intValue": "40"})),
-                attr("gen_ai.usage.cache_creation.input_tokens", json!({"intValue": "90"})),
+                attr(
+                    "gen_ai.usage.cache_write.input_tokens",
+                    json!({"intValue": "40"}),
+                ),
+                attr(
+                    "gen_ai.usage.cache_creation.input_tokens",
+                    json!({"intValue": "90"}),
+                ),
             ],
         );
         let (out, _) = records(&export(&[span]));
@@ -269,14 +282,20 @@ mod tests {
             vec![
                 model.clone(),
                 attr("gen_ai.usage.input_tokens", json!({"intValue": "10"})),
-                attr("gen_ai.usage.cache_read.input_tokens", json!({"intValue": "600"})),
+                attr(
+                    "gen_ai.usage.cache_read.input_tokens",
+                    json!({"intValue": "600"}),
+                ),
                 attr("gen_ai.usage.output_tokens", json!({"intValue": "5"})),
             ],
         );
         let output_only = inference(
             "b",
             "2",
-            vec![model, attr("gen_ai.usage.output_tokens", json!({"intValue": "5"}))],
+            vec![
+                model,
+                attr("gen_ai.usage.output_tokens", json!({"intValue": "5"})),
+            ],
         );
         let (out, bad) = records(&export(&[over, output_only]));
         assert_eq!(bad, 0);
@@ -290,28 +309,31 @@ mod tests {
     #[test]
     fn a_tool_span_is_a_call_and_its_result_with_no_content() {
         let ok = json!({"traceId": "t", "spanId": "x1", "endTimeUnixNano": "20",
-            "attributes": [
-                attr("gen_ai.operation.name", json!({"stringValue": "execute_tool"})),
-                attr("gen_ai.tool.name", json!({"stringValue": "search"})),
-                attr("gen_ai.tool.call.id", json!({"stringValue": "call-9"})),
-                attr("gen_ai.tool.call.arguments", json!({"stringValue": "SENTINEL"})),
-            ]});
+        "attributes": [
+            attr("gen_ai.operation.name", json!({"stringValue": "execute_tool"})),
+            attr("gen_ai.tool.name", json!({"stringValue": "search"})),
+            attr("gen_ai.tool.call.id", json!({"stringValue": "call-9"})),
+            attr("gen_ai.tool.call.arguments", json!({"stringValue": "SENTINEL"})),
+        ]});
         let failed = json!({"traceId": "t", "spanId": "x2", "endTimeUnixNano": "10",
-            "status": {"code": 2},
-            "attributes": [
-                attr("gen_ai.operation.name", json!({"stringValue": "execute_tool"})),
-                attr("gen_ai.tool.name", json!({"stringValue": "fetch"})),
-            ]});
+        "status": {"code": 2},
+        "attributes": [
+            attr("gen_ai.operation.name", json!({"stringValue": "execute_tool"})),
+            attr("gen_ai.tool.name", json!({"stringValue": "fetch"})),
+        ]});
         let typed = json!({"traceId": "t", "spanId": "x3", "endTimeUnixNano": "30",
-            "attributes": [
-                attr("gen_ai.operation.name", json!({"stringValue": "execute_tool"})),
-                attr("gen_ai.tool.name", json!({"stringValue": "fetch"})),
-                attr("error.type", json!({"stringValue": "timeout"})),
-            ]});
+        "attributes": [
+            attr("gen_ai.operation.name", json!({"stringValue": "execute_tool"})),
+            attr("gen_ai.tool.name", json!({"stringValue": "fetch"})),
+            attr("error.type", json!({"stringValue": "timeout"})),
+        ]});
         let mut out = Vec::new();
         assert_eq!(read(&export(&[ok, failed, typed]), &mut out), 0);
         assert!(!out.concat().contains("SENTINEL"));
-        let out: Vec<Value> = out.iter().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let out: Vec<Value> = out
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
         assert_eq!(out.len(), 6);
         // In end-time order: x2, x1, x3.
         let call = &out[0]["message"]["content"][0];

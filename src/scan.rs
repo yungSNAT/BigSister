@@ -52,12 +52,7 @@ impl Agent {
     pub fn claude_shaped(self) -> bool {
         matches!(
             self,
-            Agent::Claude
-                | Agent::Pi
-                | Agent::OpenCode
-                | Agent::Gemini
-                | Agent::Qwen
-                | Agent::Otlp
+            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen | Agent::Otlp
         )
     }
 }

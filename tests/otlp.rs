@@ -67,14 +67,20 @@ fn inference_spans_give_input_side_cost_by_model() {
         // Cache tokens are taken out of the input that counts them; the pretty-printed
         // file's reply is the second; the span before the window counts nowhere.
         let sonnet = row(models, "model", "claude-sonnet-4-5-20250929");
-        assert_eq!(cells(sonnet, &tokens), json!(["main", 2, 400, 100, 1000, 33]));
+        assert_eq!(
+            cells(sonnet, &tokens),
+            json!(["main", 2, 400, 100, 1000, 33])
+        );
         assert!(sonnet["input_usd_est"].as_f64().expect("priced") > 0.0);
         let other = row(models, "model", "synthetic-model-x");
         assert_eq!(cells(other, &tokens), json!(["main", 1, 50, 0, 0, 5]));
         assert_eq!(other["unpriced_replies"], json!(1));
         assert_eq!(models.len(), 2, "{models:?}");
         // The span whose cache tokens exceed its input is skipped, not guessed.
-        assert_eq!(doc["detectors"]["models"]["summary"]["replies_skipped"], json!(1));
+        assert_eq!(
+            doc["detectors"]["models"]["summary"]["replies_skipped"],
+            json!(1)
+        );
         let roots = doc["roots"].as_array().expect("roots");
         assert_eq!(roots.len(), 1, "{roots:?}");
         assert_eq!(roots[0]["agent"], json!("otlp"));
@@ -88,9 +94,15 @@ fn tool_spans_count_calls_and_errors_but_no_cascade_or_churn() {
     let doc = report(&[]);
     let tools = rows(&doc, "tools");
     let keys = ["agent", "calls", "errors", "result_chars"];
-    assert_eq!(cells(row(tools, "tool", "search"), &keys), json!(["otlp", 1, 0, 0]));
+    assert_eq!(
+        cells(row(tools, "tool", "search"), &keys),
+        json!(["otlp", 1, 0, 0])
+    );
     // 3 erring calls of one tool with the same (empty) input, in a row across 2 traces.
-    assert_eq!(cells(row(tools, "tool", "fetch"), &keys), json!(["otlp", 3, 3, 0]));
+    assert_eq!(
+        cells(row(tools, "tool", "fetch"), &keys),
+        json!(["otlp", 3, 3, 0])
+    );
     let summary = &doc["detectors"]["tools"]["summary"];
     assert_eq!(summary["cascades"], json!(0));
     assert_eq!(summary["retry_churn_calls"], json!(0));
