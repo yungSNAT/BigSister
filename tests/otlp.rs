@@ -71,7 +71,7 @@ fn inference_spans_give_input_side_cost_by_model() {
             cells(sonnet, &tokens),
             json!(["main", 2, 400, 100, 1000, 33])
         );
-        assert!(sonnet["input_usd_est"].as_f64().expect("priced") > 0.0);
+        assert_eq!(sonnet["unpriced_replies"], json!(0));
         let other = row(models, "model", "synthetic-model-x");
         assert_eq!(cells(other, &tokens), json!(["main", 1, 50, 0, 0, 5]));
         assert_eq!(other["unpriced_replies"], json!(1));
