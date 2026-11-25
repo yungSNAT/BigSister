@@ -86,42 +86,7 @@ impl Antigravity {
         let ts = v.get("created_at").cloned().unwrap_or(Value::Null);
         match kind(&v) {
             "PLANNER_RESPONSE" => {
-                let calls: Vec<&Value> = v
-                    .get("tool_calls")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .collect();
-                let uses: Vec<Value> = calls
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| tool_use(&format!("ag-{n}-{i}"), c))
-                    .collect();
-                let paired = self.runs.get(&n).is_some_and(|(c, g)| c == g);
-                self.pending = paired.then(|| {
-                    uses.iter()
-                        .rev()
-                        .filter_map(|u| u["id"].as_str().map(str::to_owned))
-                        .collect()
-                });
-                let count = |k: &str| v.get(k).and_then(Value::as_u64);
-                let mut usage = Map::new();
-                for (from, to) in [
-                    ("input_tokens", "input_tokens"),
-                    ("cache_read_tokens", "cache_read_input_tokens"),
-                    ("output_tokens", "output_tokens"),
-                ] {
-                    if let Some(x) = count(from) {
-                        usage.insert(to.to_owned(), x.into());
-                    }
-                }
-                out.push(assistant(
-                    n,
-                    v.get("model"),
-                    uses,
-                    &Value::Object(usage),
-                    &ts,
-                ));
+                out.push(self.reply(n, &v, &ts));
                 0
             }
             "GENERIC" => {
@@ -129,19 +94,7 @@ impl Antigravity {
                     out.push(json!({"type": "antigravity", "timestamp": ts}).to_string());
                     return 1;
                 };
-                let content = ["content", "error"]
-                    .iter()
-                    .find_map(|k| v.get(*k).and_then(Value::as_str))
-                    .unwrap_or("");
-                let error = v.get("status").and_then(Value::as_str) == Some("ERROR");
-                out.push(
-                    json!({"type": "user", "uuid": format!("ag-{n}"),
-                           "message": {"role": "user", "content": [
-                               {"type": "tool_result", "tool_use_id": id,
-                                "content": content, "is_error": error}]},
-                           "timestamp": ts})
-                    .to_string(),
-                );
+                out.push(result(n, &id, &v, &ts));
                 0
             }
             _ => {
@@ -151,6 +104,52 @@ impl Antigravity {
             }
         }
     }
+
+    /// Reply `v` on line `n` as a Claude `assistant` record, awaiting the steps after it
+    /// for its calls when they number the same.
+    fn reply(&mut self, n: u64, v: &Value, ts: &Value) -> String {
+        let calls = v.get("tool_calls").and_then(Value::as_array);
+        let uses: Vec<Value> = calls
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(i, c)| tool_use(&format!("ag-{n}-{i}"), c))
+            .collect();
+        let paired = self.runs.get(&n).is_some_and(|(c, g)| c == g);
+        self.pending = paired.then(|| {
+            uses.iter()
+                .rev()
+                .filter_map(|u| u["id"].as_str().map(str::to_owned))
+                .collect()
+        });
+        let mut usage = Map::new();
+        for (from, to) in [
+            ("input_tokens", "input_tokens"),
+            ("cache_read_tokens", "cache_read_input_tokens"),
+            ("output_tokens", "output_tokens"),
+        ] {
+            if let Some(x) = v.get(from).and_then(Value::as_u64) {
+                usage.insert(to.to_owned(), x.into());
+            }
+        }
+        assistant(n, v.get("model"), uses, &Value::Object(usage), ts)
+    }
+}
+
+/// `GENERIC` step `v` on line `n` as a Claude `user` record holding the result of call
+/// `id`: its `content`, or its `error` when it has no content, an error when its status is
+/// `ERROR`.
+fn result(n: u64, id: &str, v: &Value, ts: &Value) -> String {
+    let content = ["content", "error"]
+        .iter()
+        .find_map(|k| v.get(*k).and_then(Value::as_str).filter(|s| !s.is_empty()))
+        .unwrap_or("");
+    let error = v.get("status").and_then(Value::as_str) == Some("ERROR");
+    json!({"type": "user", "uuid": format!("ag-{n}"),
+           "message": {"role": "user", "content": [
+               {"type": "tool_result", "tool_use_id": id, "content": content, "is_error": error}]},
+           "timestamp": ts})
+    .to_string()
 }
 
 fn object(line: &str) -> Option<Value> {
@@ -266,6 +265,7 @@ mod tests {
         let second = &out[2]["message"]["content"][0];
         assert_eq!(second["tool_use_id"], uses[1]["id"]);
         assert_eq!(second["is_error"], json!(true));
+        assert_eq!(second["content"], json!("two"));
         assert_eq!(out[2]["timestamp"], json!("2026-11-09T06:00:00Z"));
     }
 
