@@ -4105,6 +4105,8 @@ fn antigravity_reads_one_log_per_conversation_preferring_the_full_one() {
     );
     assert_eq!(bash["calls"], json!(1));
     let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A scan that finds no record in the window says so, in text and JSON, rather than
 /// printing zeroed sections that read as a clean result: an empty folder, and a folder
 /// whose transcript holds only records before the window, a line that is not JSON and a
