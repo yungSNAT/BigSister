@@ -15,6 +15,8 @@ pub struct Opts {
     pub paths: bool,
     /// Whether `models` also gives a table by Git branch.
     pub by_branch: bool,
+    /// Whether `models` also gives a table by local day.
+    pub by_day: bool,
     /// The home folder with forward slashes, shown as `~`; compared case-insensitively.
     pub home: Option<String>,
     /// The rate given with `--usd-per-mtok`, for measured tokens a section prices itself.

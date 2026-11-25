@@ -45,6 +45,7 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         limit: cli.limit,
         paths: cli.paths,
         by_branch: cli.by_branch,
+        by_day: cli.by_day,
         home: home.clone(),
         usd_per_mtok: cli.usd_per_mtok,
         prices_file: prices.file().map(str::to_owned),

@@ -297,6 +297,11 @@ fn cache_dollars_take_the_given_rate_times_the_write_multiplier() {
 const MODELS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/models");
 
 fn models_report(extra: &[&str]) -> Value {
+    models_report_in(extra, &[])
+}
+
+/// `models_report` with environment variables `env` set.
+fn models_report_in(extra: &[&str], env: &[(&str, &Path)]) -> Value {
     let mut args = vec![
         "models",
         "--claude-root",
@@ -308,7 +313,7 @@ fn models_report(extra: &[&str]) -> Value {
         "--json",
     ];
     args.extend_from_slice(extra);
-    let (code, stdout, stderr) = run(&args);
+    let (code, stdout, stderr) = run_env(&args, env);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
     serde_json::from_str(&stdout).expect("valid JSON")
@@ -446,6 +451,37 @@ fn models_give_cost_by_git_branch_only_when_asked() {
         .map(|row| row["input_usd_est"].as_f64().unwrap_or(0.0))
         .sum();
     assert!((first - by_branch).abs() < 0.015, "{first} {by_branch}");
+}
+
+#[test]
+fn models_give_cost_by_local_day_only_when_asked() {
+    // Every reply in the window is from 2026-11-08 01:00 to 01:04 UTC: the evening
+    // before in Los Angeles, and the day itself in UTC and Sydney.
+    for (zone, day) in [
+        ("UTC", "2026-11-08"),
+        ("America/Los_Angeles", "2026-11-07"),
+        ("Australia/Sydney", "2026-11-08"),
+    ] {
+        let tz: &[(&str, &Path)] = &[("TZ", Path::new(zone))];
+        let doc = models_report_in(&["--by-day"], tz);
+        let tables = &doc["detectors"]["models"]["tables"];
+        assert_eq!(tables.as_array().map(Vec::len), Some(2), "{zone}");
+        let r = rows(&doc, "models", 1);
+        let got: Value = r
+            .iter()
+            .map(|row| cells(row, &["day", "replies"]))
+            .collect();
+        assert_eq!(got, json!([[day, 7]]), "{zone}");
+        let notes = doc["detectors"]["models"]["notes"].to_string();
+        assert!(notes.contains("--by-day"), "{notes}");
+    }
+    // With --by-branch too, the day table comes after the branch table.
+    let both = models_report(&["--by-branch", "--by-day"]);
+    assert!(rows(&both, "models", 1)[0].get("branch").is_some());
+    assert!(rows(&both, "models", 2)[0].get("day").is_some());
+    let plain = models_report(&[]);
+    let notes = plain["detectors"]["models"]["notes"].to_string();
+    assert!(!notes.contains("--by-day"), "{notes}");
 }
 
 #[test]

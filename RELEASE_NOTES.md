@@ -51,4 +51,5 @@ From this release BigSister is under Apache-2.0. v0.1.0 stays under FSL-1.1-ALv2
 - `rereads`: compaction health metrics covering post/pre retention ratio (flagging > 95% drops), compaction thrashing (< 10% saved across 2+ consecutive passes) and post-compaction file-churn/revert detection (including pi `edit`/`write` `path` mapping and Codex `exec`-cell `apply_patch`, `writeFile` and `writeFileSync` edits).
 - `polls`: truncation-triggered command re-run table flagging identical shell commands re-run within 2 turns of a truncated or stashed tool output.
 - `diff <before> <after>`: side-by-side comparison of turns, tokens, cache hit %, cost, sub-TTL cache busts, compactions and waste across 2 session folders or `START..END` time windows.
+- `--by-day` adds a `models` table of input-side cost by the local day of each reply, latest first.
 - `scan`: scope cross-file UUID deduplication to Claude Code and pi so Gemini CLI, Qwen Code and OpenCode per-session short IDs never collide across files or agents.

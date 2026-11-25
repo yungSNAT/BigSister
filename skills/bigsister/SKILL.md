@@ -37,6 +37,7 @@ The JSON holds `roots` (what was scanned, with lines skipped), `since` and `dete
 | Which tools or skills load but are never used? | `schemas` | Rows by `idle_chars`, `idle_tokens_est` and `idle_usd_est`, against `sessions_loaded` and `sessions_called` |
 | Is my cache expiring? | `cache` | `summary.idle_rebuild_share` and `idle_rebuilds`; the table splits write tokens by `cause` and highlights sub-5-minute cache busts |
 | Which model or subagent costs most? | `models` | Input-side cost by model, effort and subagent type; `subagent_sessions_on_top_model` |
+| Which day cost most? | `models --by-day` | The by-day table, latest first |
 | Which tool results are largest or keep erroring? | `tools` | Per tool calls, result characters, errors, cascades and retry churn |
 | Is the agent polling or re-reading files? | `polls`, `rereads` | Repeated commands after failures or truncated outputs; compaction health (`post_pre_ratio`, thrashing, churn) and post-compaction re-reads |
 | Are tests failing behind a pipe? | `pipes` | Test runs piped into `tail` or `head` without `pipefail` |
