@@ -796,9 +796,31 @@ fn scan_js_string(bytes: &[u8], start: usize) -> Option<usize> {
     None
 }
 
+/// Scans template-literal text from `start` (after `` ` `` or a closing `}` of `${...}`),
+/// stopping after an unescaped `${` (pushing brace depth `0`), after the closing `` ` ``,
+/// or at end of input.
+fn advance_template(bytes: &[u8], mut i: usize, template_braces: &mut Vec<usize>) -> usize {
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+        if bytes[i] == b'`' {
+            return i + 1;
+        }
+        if bytes[i] == b'$' && bytes.get(i + 1) == Some(&b'{') {
+            template_braces.push(0);
+            return i + 2;
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
 /// If `input[after_ident..]` opens a call whose first argument is a JS string literal,
 /// returns `(next_cursor, Some(unescaped))` when the literal is a whole value, or
-/// `(next_cursor, None)` when it is composite or unterminated.
+/// `(next_cursor, None)` when it is composite or unterminated (returning `None` for
+/// interpolated template literals so the outer scanner still visits `${...}`).
 fn call_first_string_arg(input: &str, after_ident: usize) -> Option<(usize, Option<String>)> {
     let bytes = input.as_bytes();
     let j = after_ident
@@ -821,17 +843,50 @@ fn call_first_string_arg(input: &str, after_ident: usize) -> Option<(usize, Opti
     let Some(end) = scan_js_string(bytes, k) else {
         return Some((bytes.len(), None));
     };
+    if bytes[k] == b'`' && substitutes(&input[k..end]) {
+        return None;
+    }
     let val = is_whole_lit(input, k, end).then(|| js_unescape(&input[k..end]));
     Some((end, val))
 }
 
+fn scan_edit_ident(
+    input: &str,
+    start: usize,
+    patches: &mut Vec<String>,
+    writes: &mut Vec<String>,
+) -> usize {
+    let bytes = input.as_bytes();
+    let mut i = start;
+    while i < bytes.len()
+        && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+    {
+        i += 1;
+    }
+    let name = &input[start..i];
+    if matches!(name, "apply_patch" | "writeFile" | "writeFileSync")
+        && let Some((next, val)) = call_first_string_arg(input, i)
+    {
+        if let Some(val) = val {
+            if name == "apply_patch" {
+                patches.push(val);
+            } else if is_literal_path(&val) {
+                writes.push(val);
+            }
+        }
+        return next;
+    }
+    i
+}
+
 /// Patch texts from `apply_patch(...)` and literal paths from `writeFile(...)` /
-/// `writeFileSync(...)` in a Codex `exec` cell, skipping JS comments and enclosing string
-/// literals so commented or patch-embedded text is never counted as an edit.
+/// `writeFileSync(...)` in a Codex `exec` cell, skipping JS comments and non-interpolated
+/// string/template text whilst scanning executable `${...}` template expressions.
 #[must_use]
 pub fn codex_edit_targets(input: &str) -> (Vec<String>, Vec<String>) {
     let bytes = input.as_bytes();
     let (mut patches, mut writes) = (Vec::new(), Vec::new());
+    let mut template_braces = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         match bytes[i] {
@@ -846,29 +901,27 @@ pub fn codex_edit_targets(input: &str) -> (Vec<String>, Vec<String>) {
                     .find("*/")
                     .map_or(bytes.len(), |p| i + 2 + p + 2);
             }
-            b'"' | b'\'' | b'`' => {
-                i = scan_js_string(bytes, i).unwrap_or(bytes.len());
+            b'"' | b'\'' => i = scan_js_string(bytes, i).unwrap_or(bytes.len()),
+            b'`' => i = advance_template(bytes, i + 1, &mut template_braces),
+            b'{' => {
+                if let Some(depth) = template_braces.last_mut() {
+                    *depth += 1;
+                }
+                i += 1;
             }
-            b if b.is_ascii_alphabetic() || b == b'_' || b == b'$' => {
-                let start = i;
-                while i < bytes.len()
-                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
-                {
+            b'}' => match template_braces.last_mut() {
+                Some(depth) if *depth > 0 => {
+                    *depth -= 1;
                     i += 1;
                 }
-                let name = &input[start..i];
-                if matches!(name, "apply_patch" | "writeFile" | "writeFileSync")
-                    && let Some((next, val)) = call_first_string_arg(input, i)
-                {
-                    if let Some(val) = val {
-                        if name == "apply_patch" {
-                            patches.push(val);
-                        } else if is_literal_path(&val) {
-                            writes.push(val);
-                        }
-                    }
-                    i = next;
+                Some(_) => {
+                    template_braces.pop();
+                    i = advance_template(bytes, i + 1, &mut template_braces);
                 }
+                None => i += 1,
+            },
+            b if b.is_ascii_alphabetic() || b == b'_' || b == b'$' => {
+                i = scan_edit_ident(input, i, &mut patches, &mut writes);
             }
             _ => i += 1,
         }
@@ -1365,6 +1418,17 @@ const s = readFile('C:\\hub\\b.md'); await tools.apply_patch(p);"#;
             codex_edit_targets("// trailing line comment without newline"),
             (Vec::new(), Vec::new())
         );
+        // Executable edits inside `${...}` template interpolations (including nested braces
+        // and nested template literals) count, whilst literal template text and `\${...}` do not.
+        let tpl_exec = concat!(
+            "const a = `${writeFile('interp.rs', 'ok')} writeFile('tpl_lit.rs', 'no') \\${writeFile('esc.rs', 'no')}`;\n",
+            "const b = `${(() => { /* writeFile('c.rs', 'no') */ return `${writeFileSync('nested_interp.rs', 'ok')}`; })()} writeFile('after.rs', 'no')`;\n",
+            "const c = { k: 1 };\n",
+            "const d = `unterminated template",
+        );
+        let (tpl_patches, tpl_writes) = codex_edit_targets(tpl_exec);
+        assert!(tpl_patches.is_empty());
+        assert_eq!(tpl_writes, vec!["interp.rs", "nested_interp.rs"]);
     }
 
     #[test]
