@@ -1873,6 +1873,7 @@ fn default_folders_that_cannot_be_listed_are_skipped_with_a_note() {
             "opencode transcript folder not found: ~/.local/share/opencode",
             "gemini transcript folder unreadable: ~/.gemini/tmp",
             "qwen transcript folder not found: ~/.qwen/projects",
+            "antigravity transcript folder not found: ~/.gemini/antigravity/brain",
             "codex transcript folder unreadable: ~/.codex/archived_sessions"
         ])
     );
@@ -3434,7 +3435,8 @@ fn a_missing_pi_folder_is_an_error_when_asked_for_and_noted_otherwise() {
             "pi transcript folder not found: ~/.pi/agent/sessions",
             "opencode transcript folder not found: ~/.local/share/opencode",
             "gemini transcript folder not found: ~/.gemini/tmp",
-            "qwen transcript folder not found: ~/.qwen/projects"
+            "qwen transcript folder not found: ~/.qwen/projects",
+            "antigravity transcript folder not found: ~/.gemini/antigravity/brain"
         ])
     );
     assert_eq!(doc["roots"].as_array().expect("roots").len(), 2, "{doc}");
