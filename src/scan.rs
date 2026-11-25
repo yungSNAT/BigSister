@@ -27,6 +27,8 @@ pub enum Agent {
     OpenCode,
     Gemini,
     Qwen,
+    /// GenAI spans in OTLP/JSON trace files ([`crate::otlp`]).
+    Otlp,
 }
 
 impl Agent {
@@ -39,17 +41,23 @@ impl Agent {
             Agent::OpenCode => "opencode",
             Agent::Gemini => "gemini",
             Agent::Qwen => "qwen",
+            Agent::Otlp => "otlp",
         }
     }
 
     /// Whether the agent's records reach the detectors as Claude Code records: pi's,
-    /// OpenCode's, Gemini CLI's and Qwen Code's are rewritten into them ([`crate::pi`],
-    /// [`crate::opencode`], [`crate::gemini`]).
+    /// OpenCode's, Gemini CLI's, Qwen Code's and OTLP spans are rewritten into them
+    /// ([`crate::pi`], [`crate::opencode`], [`crate::gemini`], [`crate::otlp`]).
     #[must_use]
     pub fn claude_shaped(self) -> bool {
         matches!(
             self,
-            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen
+            Agent::Claude
+                | Agent::Pi
+                | Agent::OpenCode
+                | Agent::Gemini
+                | Agent::Qwen
+                | Agent::Otlp
         )
     }
 }
@@ -234,8 +242,9 @@ pub(crate) fn scan_range_dyn(
             out.push(st);
             continue;
         }
-        let mut files = list_files(root, cutoff, &mut st);
-        if agent.claude_shaped() {
+        let mut files = list_files(root, cutoff, *agent == Agent::Otlp, &mut st);
+        // An OTLP line has no top-level time, and its spans copy no others.
+        if agent.claude_shaped() && *agent != Agent::Otlp {
             // A copied record keeps its time, so reading by each file's first time reads
             // an original before a copy of part of it, whose first record is later. A pi
             // fork's header is written when it is made, after the entries it copies.
@@ -374,6 +383,10 @@ fn open_for_agent(
             .map(|(r, index)| (r, Some(Rewrite::Gemini(index))))
             .map_err(OpenError::Unreadable),
         Agent::Qwen => Ok((reader, Some(Rewrite::Qwen))),
+        Agent::Otlp if path.extension().is_some_and(|x| x == "json") => {
+            Ok((one_line(reader), Some(Rewrite::Otlp)))
+        }
+        Agent::Otlp => Ok((reader, Some(Rewrite::Otlp))),
         _ => Ok((reader, None)),
     }
 }
@@ -823,7 +836,24 @@ fn scan_opencode(
     }
 }
 
-fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBuf> {
+/// A `*.json` OTLP file, which holds one object, compact or not, as one compact line, so
+/// that it reads as a `*.jsonl` file of one line does. A file that is not one JSON value,
+/// or is longer than `MAX_LINE`, is read as it is, so its lines count as skipped.
+fn one_line(mut reader: Box<dyn BufRead>) -> Box<dyn BufRead> {
+    let mut text = Vec::new();
+    let read = reader.by_ref().take(MAX_LINE + 1).read_to_end(&mut text);
+    if read.is_ok()
+        && text.len() as u64 <= MAX_LINE
+        && let Ok(v) = serde_json::from_slice::<Value>(&text)
+    {
+        text = v.to_string().into_bytes();
+    }
+    Box::new(io::Cursor::new(text).chain(reader))
+}
+
+/// The transcripts under `root` modified at or after `cutoff`: `*.jsonl` and `*.jsonl.zst`
+/// files, and `*.json` ones too when `json`.
+fn list_files(root: &Path, cutoff: SystemTime, json: bool, st: &mut RootStats) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -846,7 +876,8 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
                     .file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.ends_with(".jsonl.zst"));
-                if !compressed && path.extension().is_none_or(|x| x != "jsonl") {
+                let wanted = |x: &std::ffi::OsStr| x == "jsonl" || (json && x == "json");
+                if !compressed && !path.extension().is_some_and(wanted) {
                     continue;
                 }
                 match entry.metadata().and_then(|m| m.modified()) {
@@ -1057,7 +1088,7 @@ impl Earlier {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
                 self.pi.insert(name.into_owned(), uuids);
             }
-            Agent::Codex | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {}
+            Agent::Codex | Agent::OpenCode | Agent::Gemini | Agent::Qwen | Agent::Otlp => {}
         }
     }
 }
@@ -1133,7 +1164,7 @@ fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
                 .and_then(Value::as_str)
                 .is_some_and(|p| !p.is_empty())
         }),
-        Agent::Pi | Agent::Gemini | Agent::Qwen => false,
+        Agent::Pi | Agent::Gemini | Agent::Qwen | Agent::Otlp => false,
         Agent::OpenCode => serde_json::from_str::<Value>(first)
             .is_ok_and(|v| v.get("subagent") == Some(&Value::Bool(true))),
     }
@@ -1600,12 +1631,21 @@ mod tests {
             fs::write(dir.join(name), "{}\n").expect("stub");
         }
         let mut st = RootStats::new(Agent::Claude, dir.clone());
-        let mut got = list_files(&dir, SystemTime::UNIX_EPOCH, &mut st);
+        let mut got = list_files(&dir, SystemTime::UNIX_EPOCH, false, &mut st);
         got.sort();
+        let otlp = list_files(&dir, SystemTime::UNIX_EPOCH, true, &mut st);
         fs::remove_dir_all(&dir).expect("clean up");
         assert_eq!(
             got,
             [dir.join("a.jsonl"), dir.join("sub").join("b.jsonl.zst")]
+        );
+        assert_eq!(
+            otlp,
+            [
+                dir.join("a.jsonl"),
+                dir.join("c.json"),
+                dir.join("sub").join("b.jsonl.zst")
+            ]
         );
         assert_eq!(st.unreadable, 0);
     }

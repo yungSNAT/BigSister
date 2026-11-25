@@ -16,7 +16,7 @@
 
 </div>
 
-`bigsister` reads the transcripts that Claude Code, Codex, [pi](https://github.com/earendil-works/pi), [OpenCode](https://github.com/anomalyco/opencode), [Gemini CLI](https://github.com/google-gemini/gemini-cli) and [Qwen Code](https://github.com/QwenLM/qwen-code) save on your machine and reports where tokens and checks are wasted, from context loaded before the first reply to slow hooks; the table under [Use](#use) lists each measure.
+`bigsister` reads the transcripts that Claude Code, Codex, [pi](https://github.com/earendil-works/pi), [OpenCode](https://github.com/anomalyco/opencode), [Gemini CLI](https://github.com/google-gemini/gemini-cli) and [Qwen Code](https://github.com/QwenLM/qwen-code) save on your machine and reports where tokens and checks are wasted, from context loaded before the first reply to slow hooks; the table under [Use](#use) lists each measure. For any other agent that records OpenTelemetry GenAI spans, it reads the OTLP/JSON trace files in a folder you name (`--otlp-root`) for cost by model and tool errors.
 
 It prints names, paths, counts, sizes and times, as listed under [Privacy](#privacy). It never prints message text, tool inputs or tool outputs, and it makes no network calls.
 
@@ -154,9 +154,9 @@ bigsister context --sample
 | `pipes` | Claude, Codex, pi, OpenCode, Gemini, Qwen | Test runs piped into `tail` or `head` without `pipefail` or `PIPESTATUS`, and how many printed a failure whilst the call reported success, in total and by agent |
 | `polls` | Claude, Codex, pi, OpenCode, Gemini, Qwen | Commands repeated exactly within a session, split into polls (no file edit since the last run) and reruns after an edit, the polls of a command whose previous run's result was an error, the characters polls returned, each verb class's total command result characters and identical commands re-run within 2 turns of a truncated or stashed output |
 | `rereads` | Claude, Codex, pi, OpenCode, Qwen | Files read again after a context compaction that had been read before it, and the characters those re-reads returned; also compactions by recorded trigger (auto or manual) and compaction health: post/pre retention ratio (flagging > 95% drops), thrashing (< 10% saved across 2+ consecutive passes) and post-compaction file-churn/revert loops |
-| `tools` | Claude, pi, OpenCode, Gemini, Qwen | Per tool: calls, the characters their results returned, errors, and image and document blocks; also runs of 3 or more errors in a row (cascades) and calls repeated with the same input after erring twice (retry churn) |
+| `tools` | Claude, pi, OpenCode, Gemini, Qwen, OTLP | Per tool: calls, the characters their results returned, errors, and image and document blocks; also runs of 3 or more errors in a row (cascades) and calls repeated with the same input after erring twice (retry churn) |
 | `cache` | Claude | Cache write tokens split into new context and context cached again (rebuilt) after an idle gap, a model switch or otherwise, plus sub-TTL (< 5 minute) cache busts classified by cause with raw token share vs cache-weighted USD share divergence |
-| `models` | Claude | Input-side cost by scope, model, reasoning effort and subagent type, and how many subagent sessions ran on their parent session's top-priced model |
+| `models` | Claude, OTLP | Input-side cost by scope, model, reasoning effort and subagent type, and how many subagent sessions ran on their parent session's top-priced model |
 | `hooks` | Claude | Hook runs, cancellations, timeouts and durations, by event, matcher and hook |
 | `diff` | Claude, Codex, pi, OpenCode, Gemini, Qwen | Side-by-side comparison (`bigsister diff <before> <after>`) of turns, tokens, cache hit %, cost, sub-TTL cache busts, compactions and waste across 2 session folders or `START..END` time windows |
 
@@ -164,13 +164,14 @@ bigsister context --sample
 |---|---|---|
 | `--since` | `7d` | Start of the window: `Nd`, `Nh`, a date (local midnight) or an RFC 3339 time |
 | `--sample` | off | Read the sample transcripts built into `bigsister` instead of your folders, from 2026-11-01; not with `--since` or a folder option |
-| `--agent` | `all` | `claude`, `codex`, `pi`, `opencode`, `gemini`, `qwen` or `all` |
+| `--agent` | `all` | `claude`, `codex`, `pi`, `opencode`, `gemini`, `qwen`, `otlp` or `all` |
 | `--claude-root DIR` | `~/.claude/projects` | Claude Code transcript folder |
 | `--codex-root DIR` | `~/.codex/sessions` and `~/.codex/archived_sessions` | Codex transcript folder; a given folder replaces both |
 | `--pi-root DIR` | `~/.pi/agent/sessions` | pi session folder |
 | `--opencode-root DIR` | `~/.local/share/opencode` | OpenCode data folder, holding `opencode.db` |
 | `--gemini-root DIR` | `~/.gemini/tmp` | Gemini CLI session folder |
 | `--qwen-root DIR` | `~/.qwen/projects` | Qwen Code session folder |
+| `--otlp-root DIR` | none | Folder of OTLP/JSON trace files holding GenAI spans (`*.json`, `*.jsonl`, `*.jsonl.zst`), as a collector's file exporter writes them; read only when given |
 | `--json` | off | Print one JSON object with `schema_version` 2 |
 | `--csv` | off | Print the report's sections as one CSV table, one value a record; not with `--json` |
 | `--limit N` | 20 | Rows per table |
@@ -206,7 +207,7 @@ The tests run on synthetic fixtures. They plant sentinel strings in message text
 
 ## Limits
 
-Claude Code's, Codex's, Gemini CLI's and Qwen Code's transcript formats are undocumented and change between releases; Gemini CLI's and Qwen Code's are read as versions 0.69.0 and 0.28.0 wrote them on 19 November 2026, and Gemini CLI's older `.json` sessions are not read. `bigsister` skips a line it cannot parse and reports how many it skipped, and reports the Codex commands whose results it could not pair (`codex_commands_not_paired`). [docs/DESIGN.md](docs/DESIGN.md) defines how each format is read and each measure taken.
+Claude Code's, Codex's, Gemini CLI's and Qwen Code's transcript formats are undocumented and change between releases; Gemini CLI's and Qwen Code's are read as versions 0.69.0 and 0.28.0 wrote them on 19 November 2026, and Gemini CLI's older `.json` sessions are not read. OTLP spans are read by the GenAI semantic conventions as at November 2026, which are still in development; spans carry no message text or tool input, so OTLP files feed only `models` and `tools`, with no result sizes, cascades or retry churn. `bigsister` skips a line it cannot parse and reports how many it skipped, and reports the Codex commands whose results it could not pair (`codex_commands_not_paired`). [docs/DESIGN.md](docs/DESIGN.md) defines how each format is read and each measure taken.
 
 For full usage and cost totals, use a dedicated usage counter. Comparable third-party tools and [Claude Code](https://github.com/anthropics/claude-code) 2.1.323 `/usage` report priced setup waste, cache rehydration, unused tool schemas and skills, lower-cost model suggestions or hook failures and blocks, and comparable tools export records as JSON or CSV. None documented reporting test failures hidden by a pipe, polls split from reruns after an edit, re-reads after a compaction or per-hook duration percentiles from saved transcripts without telemetry. Claude Code's `/usage`, [`/doctor`](https://code.claude.com/docs/en/skills), [`/skill-doctor`](https://code.claude.com/docs/en/commands) and Codex's `/status` are built in, where `bigsister` needs an install; `bigsister` reads past transcripts across all 6 supported agents in one report without a model. Claude Code's [OpenTelemetry](https://code.claude.com/docs/en/monitoring-usage) event `claude_code.hook_execution_complete` and span `claude_code.hook` (the span only under detailed beta tracing) give each hook event's cancelled hooks and the duration of all its matching hooks together, for sessions run with telemetry on; `bigsister`'s `hooks` section adds timeouts and each hook's median, 90th percentile and maximum, from transcripts already saved.
 

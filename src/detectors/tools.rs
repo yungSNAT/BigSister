@@ -74,7 +74,12 @@ impl Tools {
         c.images += blocks("image");
         c.documents += blocks("document");
         let key = (call.tool, call.input);
-        if b.get("is_error").and_then(Value::as_bool) == Some(true) {
+        let error = b.get("is_error").and_then(Value::as_bool) == Some(true);
+        // An OTLP file interleaves its traces' spans and records no tool input, so a run
+        // of errors or a repeated input there may join unrelated calls.
+        if agent == Agent::Otlp {
+            c.errors += u64::from(error);
+        } else if error {
             c.errors += 1;
             c.error_chars += chars;
             self.run += 1;
@@ -111,7 +116,7 @@ fn notes() -> Vec<String> {
     vec![
         "Result chars are the characters of text in each call's result, which the agent sends to the model; errors are results the agent marked as an error, which a hook's denial also is. Web search and fetch rows measure what their results added to context, not what could have been avoided.".to_owned(),
         "Images and documents are counted, not sized: their tokens depend on pixels and pages, which the transcript does not record.".to_owned(),
-        "A cascade is a run of 3 or more erroring results in a row within a session, counted once with its calls. Retry churn counts a call whose tool and exact input erred twice before without succeeding in between, from its third erroring result on. A call can be in both. Results outside the window, and copies of an earlier session's records, count nowhere and neither extend nor end a run.".to_owned(),
+        "A cascade is a run of 3 or more erroring results in a row within a session, counted once with its calls. Retry churn counts a call whose tool and exact input erred twice before without succeeding in between, from its third erroring result on. A call can be in both. Results outside the window, and copies of an earlier session's records, count nowhere and neither extend nor end a run. OTLP rows count calls and errors only: spans record no result text or input, so they are in no cascade or churn.".to_owned(),
         EST_NOTE.to_owned(),
         prices::NOTE.to_owned(),
     ]
@@ -137,6 +142,7 @@ impl Detector for Tools {
             Agent::OpenCode,
             Agent::Gemini,
             Agent::Qwen,
+            Agent::Otlp,
         ]
     }
 

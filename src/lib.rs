@@ -5,6 +5,7 @@ pub mod detectors;
 pub mod diff;
 pub mod gemini;
 pub mod opencode;
+pub mod otlp;
 pub mod pi;
 pub mod prices;
 pub mod programs;
@@ -223,6 +224,7 @@ pub(crate) fn chosen(cli: &Cli) -> Option<Agent> {
         AgentChoice::Opencode => Some(Agent::OpenCode),
         AgentChoice::Gemini => Some(Agent::Gemini),
         AgentChoice::Qwen => Some(Agent::Qwen),
+        AgentChoice::Otlp => Some(Agent::Otlp),
     }
 }
 
@@ -246,6 +248,7 @@ pub(crate) fn resolve_roots(
         ),
         (Agent::Gemini, cli.gemini_root.clone(), ".gemini/tmp"),
         (Agent::Qwen, cli.qwen_root.clone(), ".qwen/projects"),
+        (Agent::Otlp, cli.otlp_root.clone(), ""),
     ];
     let mut roots = Vec::new();
     let mut skipped = Vec::new();
@@ -256,6 +259,11 @@ pub(crate) fn resolve_roots(
         let given = explicit.is_some();
         let path = match explicit {
             Some(p) => p,
+            // OTLP files have no usual folder: they are read only from one given.
+            None if agent == Agent::Otlp && cli.agent == AgentChoice::Otlp => {
+                return Err("--agent otlp reads only the folder --otlp-root gives".to_owned());
+            }
+            None if agent == Agent::Otlp => continue,
             None => PathBuf::from(home.ok_or("cannot find the home folder")?).join(default),
         };
         let Some(problem) = folder_problem(&path) else {
