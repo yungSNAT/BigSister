@@ -4143,6 +4143,8 @@ fn permissions_count_decisions_by_tool_and_category() {
         .map(|r| cells(r, &["classifier_category", "blocks"]))
         .collect();
     assert_eq!(categories, [json!(["external_system_writes", 1])]);
+}
+
 /// A scan that finds no record in the window says so, in text and JSON, rather than
 /// printing zeroed sections that read as a clean result: an empty folder, and a folder
 /// whose transcript holds only records before the window, a line that is not JSON and a
