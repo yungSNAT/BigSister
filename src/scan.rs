@@ -1526,11 +1526,11 @@ mod tests {
         let path = dir.join("transcript.jsonl.zst");
         let first_pass = || Box::new(io::Cursor::new(b"{}\n")) as Box<dyn BufRead>;
         fs::write(&path, b"replacement").expect("write changed transcript");
-        let changed = indexed(first_pass(), &path)
+        let changed = indexed(first_pass(), &path, Gemini::index)
             .err()
             .expect("reject the replacement");
         fs::remove_file(&path).expect("remove transcript");
-        let removed = indexed(first_pass(), &path)
+        let removed = indexed(first_pass(), &path, Gemini::index)
             .err()
             .expect("report a missing transcript");
         fs::remove_dir(&dir).expect("remove test directory");
