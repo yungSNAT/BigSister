@@ -66,7 +66,7 @@ const CAUSES: [&str; 7] = [
 
 /// A field of `d` as printed: `(none)` when absent, itself when `allowed` lists it,
 /// else `(other)`.
-fn field(d: &Value, key: &str, allowed: &[&str]) -> &'static str {
+fn field(d: &Value, key: &str, allowed: &[&'static str]) -> &'static str {
     match d.get(key) {
         None | Some(Value::Null) => "(none)",
         Some(v) => v
