@@ -91,6 +91,7 @@ fuzz_target!(|data: &[u8]| {
         roots: &stats,
         skipped_roots: &[],
         home: None,
+        records_scanned: stats.iter().any(|r| r.files_with_records > 0),
     };
     let _ = report::text(&meta, &sections);
     let json = report::json(&meta, &sections);
