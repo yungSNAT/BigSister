@@ -244,10 +244,6 @@ impl Detector for Models {
     fn record(&mut self, s: &Session, r: &Record<'_>) {
         // The scan gives a reply's price just before the reply, and none for a copy.
         let price = self.price.take();
-        // An OTLP tool span's call is a reply record with no usage, not a reply.
-        if s.agent == Agent::Otlp && r.value.pointer("/message/usage").is_none() {
-            return;
-        }
         let reply = match read(r, read_reply) {
             Entry::Reply(reply) => reply,
             Entry::Skipped(id) => {

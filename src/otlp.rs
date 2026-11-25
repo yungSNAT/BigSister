@@ -22,7 +22,8 @@
 //!   exceed its input tokens breaks that rule, and its input is left out rather than
 //!   guessed, so `models` counts the reply as skipped.
 //! - A tool span has `gen_ai.operation.name` `execute_tool` and a `gen_ai.tool.name`. It
-//!   becomes an `assistant` record holding one `tool_use` block, with an empty input, and a
+//!   becomes a synthetic `assistant` record, which `models` passes over, holding one
+//!   `tool_use` block with an empty input, and a
 //!   `user` record holding its `tool_result`, with no content, which is an error when the
 //!   span's status code is 2 (error) or it has an `error.type`. Tool inputs and results
 //!   are never read.
@@ -57,44 +58,52 @@ pub fn read(line: &str, out: &mut Vec<String>) -> u64 {
         .filter_map(|s| s.get("spans").and_then(Value::as_array))
         .flatten();
     for span in all {
-        let a = Attrs(span.get("attributes").and_then(Value::as_array));
-        let tool = a.str("gen_ai.operation.name") == Some("execute_tool")
-            && a.str("gen_ai.tool.name").is_some_and(|n| !n.is_empty());
-        let model = a
-            .str("gen_ai.response.model")
-            .or_else(|| a.str("gen_ai.request.model"))
-            .filter(|m| !m.is_empty());
-        let usage = a.int("gen_ai.usage.input_tokens").is_some()
-            || a.int("gen_ai.usage.output_tokens").is_some();
-        let inference = model.is_some() && usage;
-        if !tool && !inference {
-            continue;
+        match span_records(span) {
+            Ok(Some(found)) => spans.push(found),
+            Ok(None) => {}
+            Err(()) => bad += 1,
         }
-        let id = span
-            .get("spanId")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty());
-        let end = span.get("endTimeUnixNano").and_then(nanos);
-        let ts = end.and_then(|n| jiff::Timestamp::from_nanosecond(n).ok());
-        let (Some(id), Some(end), Some(ts)) = (id, end, ts) else {
-            bad += 1;
-            continue;
-        };
-        let ts = Value::from(ts.to_string());
-        let session = a
-            .str("gen_ai.conversation.id")
-            .or_else(|| span.get("traceId").and_then(Value::as_str))
-            .unwrap_or("");
-        let records = if tool {
-            tool_records(span, &a, id, session, &ts)
-        } else {
-            vec![reply(&a, model.unwrap_or(""), id, session, &ts)]
-        };
-        spans.push((end, records));
     }
     spans.sort_by_key(|(end, _)| *end);
     out.extend(spans.into_iter().flat_map(|(_, r)| r));
     bad
+}
+
+/// A GenAI span's end time and its records; `None` for another span, and an error for a
+/// GenAI span without a span id or an end time.
+fn span_records(span: &Value) -> Result<Option<(i128, Vec<String>)>, ()> {
+    let a = Attrs(span.get("attributes").and_then(Value::as_array));
+    let tool = a.str("gen_ai.operation.name") == Some("execute_tool")
+        && a.str("gen_ai.tool.name").is_some_and(|n| !n.is_empty());
+    let model = a
+        .str("gen_ai.response.model")
+        .or_else(|| a.str("gen_ai.request.model"))
+        .filter(|m| !m.is_empty());
+    let usage = a.int("gen_ai.usage.input_tokens").is_some()
+        || a.int("gen_ai.usage.output_tokens").is_some();
+    if !tool && !(model.is_some() && usage) {
+        return Ok(None);
+    }
+    let id = span
+        .get("spanId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty());
+    let end = span.get("endTimeUnixNano").and_then(nanos);
+    let ts = end.and_then(|n| jiff::Timestamp::from_nanosecond(n).ok());
+    let (Some(id), Some(end), Some(ts)) = (id, end, ts) else {
+        return Err(());
+    };
+    let ts = Value::from(ts.to_string());
+    let session = a
+        .str("gen_ai.conversation.id")
+        .or_else(|| span.get("traceId").and_then(Value::as_str))
+        .unwrap_or("");
+    let records = if tool {
+        tool_records(span, &a, id, session, &ts)
+    } else {
+        vec![reply(&a, model.unwrap_or(""), id, session, &ts)]
+    };
+    Ok(Some((end, records)))
 }
 
 /// A span's attributes.
@@ -175,7 +184,7 @@ fn tool_records(span: &Value, a: &Attrs<'_>, id: &str, session: &str, ts: &Value
         json!({"type": "tool_result", "tool_use_id": call, "content": "", "is_error": error});
     vec![
         json!({"type": "assistant", "sessionId": session, "uuid": format!("{id}-call"),
-               "message": {"role": "assistant", "content": [call_block]}, "timestamp": ts})
+               "message": {"model": "<synthetic>", "role": "assistant", "content": [call_block]}, "timestamp": ts})
         .to_string(),
         json!({"type": "user", "sessionId": session, "uuid": format!("{id}-result"),
                "message": {"role": "user", "content": [result]}, "timestamp": ts})
@@ -340,6 +349,7 @@ mod tests {
         assert_eq!(call["id"], "x2");
         assert_eq!(call["name"], "fetch");
         assert_eq!(call["input"], json!({}));
+        assert_eq!(out[0]["message"]["model"], "<synthetic>");
         let result = &out[1]["message"]["content"][0];
         assert_eq!(result["tool_use_id"], "x2");
         assert_eq!(result["is_error"], true);

@@ -177,17 +177,11 @@ impl Detector for Rereads {
     }
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
-        let boundary = match s.agent {
-            Agent::Claude
-            | Agent::Pi
-            | Agent::OpenCode
-            | Agent::Gemini
-            | Agent::Qwen
-            | Agent::Otlp => {
-                r.kind() == "system"
-                    && r.value.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
-            }
-            Agent::Codex => r.kind() == "compacted",
+        let boundary = if s.agent == Agent::Codex {
+            r.kind() == "compacted"
+        } else {
+            r.kind() == "system"
+                && r.value.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
         };
         if boundary {
             self.boundary(s, r);

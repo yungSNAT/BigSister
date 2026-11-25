@@ -173,6 +173,9 @@ fn read_transcripts(
             Vec::new(),
         ));
     }
+    if cli.agent == AgentChoice::Otlp && cli.otlp_root.is_none() {
+        return Err("--agent otlp reads only the folder --otlp-root gives".to_owned());
+    }
     let (roots, skipped) = resolve_roots(cli, &read, home)?;
     Ok((scan::scan(&roots, since, prices, dets), skipped))
 }
@@ -228,16 +231,9 @@ pub(crate) fn chosen(cli: &Cli) -> Option<Agent> {
     }
 }
 
-/// The transcript folders to scan for agents that `--agent` allows and the chosen
-/// detectors read, and notes on default folders that are missing.
-pub(crate) fn resolve_roots(
-    cli: &Cli,
-    read: &[Agent],
-    home: Option<&str>,
-) -> Result<Roots, String> {
-    let chosen = chosen(cli);
-    let wanted = |a: Agent| read.contains(&a) && chosen.is_none_or(|c| c == a);
-    let candidates = [
+/// Each agent, the folder its option gives and its usual folder under the home folder.
+fn candidates(cli: &Cli) -> [(Agent, Option<PathBuf>, &'static str); 7] {
+    [
         (Agent::Claude, cli.claude_root.clone(), ".claude/projects"),
         (Agent::Codex, cli.codex_root.clone(), ".codex/sessions"),
         (Agent::Pi, cli.pi_root.clone(), ".pi/agent/sessions"),
@@ -249,10 +245,21 @@ pub(crate) fn resolve_roots(
         (Agent::Gemini, cli.gemini_root.clone(), ".gemini/tmp"),
         (Agent::Qwen, cli.qwen_root.clone(), ".qwen/projects"),
         (Agent::Otlp, cli.otlp_root.clone(), ""),
-    ];
+    ]
+}
+
+/// The transcript folders to scan for agents that `--agent` allows and the chosen
+/// detectors read, and notes on default folders that are missing.
+pub(crate) fn resolve_roots(
+    cli: &Cli,
+    read: &[Agent],
+    home: Option<&str>,
+) -> Result<Roots, String> {
+    let chosen = chosen(cli);
+    let wanted = |a: Agent| read.contains(&a) && chosen.is_none_or(|c| c == a);
     let mut roots = Vec::new();
     let mut skipped = Vec::new();
-    for (agent, explicit, default) in candidates {
+    for (agent, explicit, default) in candidates(cli) {
         if !wanted(agent) {
             continue;
         }
@@ -260,9 +267,6 @@ pub(crate) fn resolve_roots(
         let path = match explicit {
             Some(p) => p,
             // OTLP files have no usual folder: they are read only from one given.
-            None if agent == Agent::Otlp && cli.agent == AgentChoice::Otlp => {
-                return Err("--agent otlp reads only the folder --otlp-root gives".to_owned());
-            }
             None if agent == Agent::Otlp => continue,
             None => PathBuf::from(home.ok_or("cannot find the home folder")?).join(default),
         };
