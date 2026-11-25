@@ -41,7 +41,7 @@ The JSON holds `roots` (what was scanned, with lines skipped), `since` and `dete
 | Is the agent polling or re-reading files? | `polls`, `rereads` | Repeated commands after failures or truncated outputs; compaction health (`post_pre_ratio`, thrashing, churn) and post-compaction re-reads |
 | Are tests failing behind a pipe? | `pipes` | Test runs piped into `tail` or `head` without `pipefail` |
 | Are hooks slow? | `hooks` | Runs, cancellations, timeouts and median, p90 and max milliseconds by hook |
-| What did hooks, auto mode or rules block? | `permissions` | `summary.blocked` and the `blocked_by_*` counts; the 'By tool' table; `tool_results_without_decision` counts results from versions that recorded none |
+| What did hooks, auto mode or rules block? | `permissions` | `summary.blocked` and the `blocked_by_*` counts, which sum to it; the 'By tool' table; `tool_results_without_decision` counts results from versions that recorded none |
 | How did 2 windows or folders compare? | `diff <before> <after>` | Side-by-side deltas for tokens, cache hit %, cost, turns, compactions and waste |
 
 Most sections cover Claude Code only; `bigsister --help` lists the agents each one reads.

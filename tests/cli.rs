@@ -1262,8 +1262,8 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[1]["files"], 2);
     assert_eq!(doc["schema_version"], 2);
     assert_eq!(doc["tool"], "bigsister");
-    // 10 detectors and the ranked figures.
-    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(11));
+    // 11 detectors and the ranked figures.
+    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(12));
 }
 
 /// `bigsister all` over the Claude transcripts in a fixture folder, which must hold 2.
@@ -4088,17 +4088,17 @@ fn permissions_count_decisions_by_cause() {
     let doc = permissions_report();
     let p = &doc["detectors"]["permissions"];
     for (k, v) in [
-        ("decisions", 7),
+        ("decisions", 8),
         ("allowed", 3),
-        ("blocked", 4),
-        ("answered_by_you", 2),
+        ("blocked", 5),
+        ("answered_by_you", 3),
         ("blocked_by_you", 1),
         ("blocked_by_hook", 1),
         ("blocked_by_safety_check", 1),
         ("blocked_by_auto_mode", 1),
-        ("blocked_by_rule", 0),
+        ("blocked_by_rule", 1),
         ("blocked_by_mode", 0),
-        ("blocked_other", 0),
+        ("blocked_by_other", 0),
         ("tool_results_without_decision", 1),
     ] {
         assert_eq!(p["summary"][k], json!(v), "{k}");
@@ -4132,10 +4132,10 @@ fn permissions_count_decisions_by_tool_and_category() {
     assert_eq!(
         tools,
         [
-            json!(["Bash", 4, 1, 3, 0]),
+            json!(["Bash", 5, 1, 4, 0]),
             json!(["Write", 1, 0, 1, 1]),
             json!(["Edit", 1, 1, 0, 1]),
-            json!(["Read", 1, 1, 0, 0])
+            json!(["Read", 1, 1, 0, 1])
         ]
     );
     let categories: Vec<Value> = rows(&doc, "permissions", 3)

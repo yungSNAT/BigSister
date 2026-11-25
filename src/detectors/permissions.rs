@@ -5,7 +5,8 @@
 //! `tool_result` block of a `user` record: `decision` (`accept` or `reject`), `source`,
 //! and optionally `reasonType`, `reasonCode`, `ruleSource`, `classifierCategory` and
 //! `circuitBreaker`. `reasonCode` can hold the text of a rule, so it is never read.
-//! Every other field prints only as one of the values below, else `(other)`.
+//! Every other field prints only as one of the values below, else `(other)`. A decision
+//! on a record with no `tool_result` block is not counted; none was seen up to 2.1.330.
 
 use std::collections::BTreeMap;
 
@@ -87,28 +88,33 @@ fn decision(d: &Value) -> &'static str {
 }
 
 /// The one cause of a decision, the first of [`CAUSES`] that applies: `you` when you
-/// answered a prompt for it, `hook` when a hook decided, `safety_check` for Claude Code's
-/// own safety check, `auto_mode` for auto mode's classifier, `rule` for a permission rule
-/// (one you saved by answering 'always' included), `mode` for the permission mode, else
-/// `other`.
+/// answered a prompt for it ('always' included), `hook` when a hook decided,
+/// `safety_check` for Claude Code's own safety check, `auto_mode` for auto mode's
+/// classifier, `rule` for a permission rule (a recorded `ruleSource`), `mode` for the
+/// permission mode, else `other`.
 fn cause(d: &Value) -> &'static str {
     let source = d.get("source").and_then(Value::as_str).unwrap_or("");
     let reason = d.get("reasonType").and_then(Value::as_str).unwrap_or("");
-    if matches!(source, "user_temporary" | "user_reject") {
+    if matches!(source, "user_temporary" | "user_permanent" | "user_reject") {
         "you"
     } else if source == "hook" || reason == "hook" {
         "hook"
-    } else if reason == "safetyCheck" || d.get("circuitBreaker").is_some_and(|v| !v.is_null()) {
+    } else if reason == "safetyCheck" || tripped(d.get("circuitBreaker")) {
         "safety_check"
     } else if reason == "classifier" {
         "auto_mode"
-    } else if reason == "rule" || source == "user_permanent" {
+    } else if reason == "rule" || d.get("ruleSource").is_some_and(|v| !v.is_null()) {
         "rule"
     } else if reason == "mode" {
         "mode"
     } else {
         "other"
     }
+}
+
+/// Whether a recorded `circuitBreaker` names one: a string, or `true`.
+fn tripped(v: Option<&Value>) -> bool {
+    v.is_some_and(|v| v.is_string() || v.as_bool() == Some(true))
 }
 
 #[derive(Default)]
@@ -202,21 +208,24 @@ impl Detector for Permissions {
                 self.calls.wait(id, printed(name_of(b)));
             }
         }
-        // A record carries one decision; it answers its first tool result.
-        let first = tool_results(r).next().map(|b| {
-            let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
-            self.calls.take(id)
-        });
-        let Some(tool) = first else {
-            return;
-        };
-        if !r.in_window {
+        // A record carries one decision; it answers its first tool result, and any other
+        // result in the record carries none.
+        let tools: Vec<Option<String>> = tool_results(r)
+            .map(|b| {
+                let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
+                self.calls.take(id)
+            })
+            .collect();
+        if !r.in_window || tools.is_empty() {
             return;
         }
-        match r.value.get("permissionDecision").filter(|d| d.is_object()) {
-            Some(d) => self.count(d, tool.unwrap_or_else(|| "(unpaired)".to_owned())),
-            None => self.results_without += 1,
+        let mut tools = tools.into_iter();
+        if let Some(d) = r.value.get("permissionDecision").filter(|d| d.is_object())
+            && let Some(tool) = tools.next()
+        {
+            self.count(d, tool.unwrap_or_else(|| "(unpaired)".to_owned()));
         }
+        self.results_without += tools.count() as u64;
     }
 
     fn section(&self, opts: &Opts) -> Section {
@@ -258,12 +267,7 @@ impl Permissions {
         ];
         for c in CAUSES {
             let n = self.by_cause.get(&("blocked", c)).copied().unwrap_or(0);
-            let key = if c == "other" {
-                "blocked_other".to_owned()
-            } else {
-                format!("blocked_by_{c}")
-            };
-            summary.push((key, json!(n)));
+            summary.push((format!("blocked_by_{c}"), json!(n)));
         }
         summary.push((
             "tool_results_without_decision".to_owned(),
@@ -346,8 +350,8 @@ impl Permissions {
 
 fn notes() -> Vec<String> {
     vec![
-        "Claude Code records a permission decision on each tool result, from about version 2.1.299: tool results without decision counts the results in the window that carry none, as older versions wrote, so a 0 there means every tool result in the window carried one.".to_owned(),
-        "Each decision has one cause, the first that applies of: you (you answered a prompt for it), hook, safety_check (Claude Code's own safety check), auto_mode (auto mode's classifier), rule (a permission rule, including one you saved by answering 'always'), mode (the permission mode, such as bypassPermissions or dontAsk) and other. The recorded fields table gives the values each decision recorded, which the causes are read from.".to_owned(),
+        "Claude Code records a permission decision on each tool result, from about version 2.1.299: tool results without decision counts the results in the window that carry none, as older versions wrote, so a 0 there means every tool result in the window carried one. A decision answers the first tool result of its record; any other result in the record counts as without.".to_owned(),
+        "Each decision has one cause, the first that applies of: you (you answered a prompt for it, 'always' included; whether Claude Code also records later calls under an answer for the session as yours is unverified), hook, safety_check (Claude Code's own safety check), auto_mode (auto mode's classifier), rule (a permission rule, read from a recorded rule source), mode (the permission mode, such as bypassPermissions or dontAsk) and other. The recorded fields table gives the values each decision recorded, which the causes are read from.".to_owned(),
         "The rule's text and reason code are never printed. A recorded value not known to bigsister prints as (other); (none) means the field was not recorded. A tool is (unpaired) when the call the result answers was not read.".to_owned(),
     ]
 }
@@ -416,8 +420,16 @@ mod tests {
                 "rule",
             ),
             (
-                json!({"decision": "accept", "source": "user_permanent"}),
+                json!({"decision": "accept", "source": "user_permanent", "ruleSource": "userSettings"}),
+                "you",
+            ),
+            (
+                json!({"decision": "reject", "source": "config", "reasonType": "subcommandResults", "ruleSource": "userSettings"}),
                 "rule",
+            ),
+            (
+                json!({"decision": "reject", "source": "config", "reasonType": "other", "circuitBreaker": false}),
+                "other",
             ),
             (
                 json!({"decision": "accept", "source": "config", "reasonType": "mode"}),
@@ -448,10 +460,12 @@ mod tests {
             result("c", &json!({"decision": "accept", "source": "config", "reasonType": "mode"})),
             claude_tool_use("d", "Edit", &json!({"file_path": "/w/a"})),
             result("d", &json!({"decision": "accept", "source": "user_temporary", "grantScope": "once"})),
-            // A result with no decision, as older versions wrote.
+            // 2 results with no decision, as older versions wrote, in one record.
             claude_tool_use("e", "Read", &json!({"file_path": "/w/b"})),
+            claude_tool_use("f", "Read", &json!({"file_path": "/w/c"})),
             json!({"type": "user", "message": {"content": [
-                {"type": "tool_result", "tool_use_id": "e", "content": "x"}]}}).to_string(),
+                {"type": "tool_result", "tool_use_id": "e", "content": "x"},
+                {"type": "tool_result", "tool_use_id": "f", "content": "x"}]}}).to_string(),
         ]
         .into_iter()
         .map(|l| (true, l))
@@ -465,8 +479,8 @@ mod tests {
             ("blocked_by_auto_mode", 1),
             ("blocked_by_hook", 1),
             ("blocked_by_you", 0),
-            ("blocked_other", 0),
-            ("tool_results_without_decision", 1),
+            ("blocked_by_other", 0),
+            ("tool_results_without_decision", 2),
         ] {
             assert_eq!(summary(&s, k), json!(v), "{k}");
         }
