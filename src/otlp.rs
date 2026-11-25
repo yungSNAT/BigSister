@@ -17,7 +17,8 @@
 //!   span's, in the session named by `gen_ai.conversation.id`, else the trace. Cache reads
 //!   are `gen_ai.usage.cache_read.input_tokens` and cache writes
 //!   `gen_ai.usage.cache_write.input_tokens`, or the older
-//!   `gen_ai.usage.cache_creation.input_tokens`. The conventions count both inside
+//!   `gen_ai.usage.cache_creation.input_tokens`; an absent count is 0, as the conventions
+//!   record one only when it is available and not 0. The conventions count both inside
 //!   `gen_ai.usage.input_tokens`, so they are taken out of it; a span whose cache tokens
 //!   exceed its input tokens breaks that rule, and its input is left out rather than
 //!   guessed, so `models` counts the reply as skipped.
@@ -141,26 +142,23 @@ fn nanos(v: &Value) -> Option<i128> {
 /// An inference span as a Claude `assistant` record. Written as text: `model` must come
 /// first in the message, where the scan looks for a reply's model.
 fn reply(a: &Attrs<'_>, model: &str, id: &str, session: &str, ts: &Value) -> String {
-    let read = a.int("gen_ai.usage.cache_read.input_tokens");
+    // The conventions record a count when it is available and not 0.
+    let read = a.int("gen_ai.usage.cache_read.input_tokens").unwrap_or(0);
     let write = a
         .int("gen_ai.usage.cache_write.input_tokens")
-        .or_else(|| a.int("gen_ai.usage.cache_creation.input_tokens"));
+        .or_else(|| a.int("gen_ai.usage.cache_creation.input_tokens"))
+        .unwrap_or(0);
     let mut usage = Map::new();
-    let cached = read.unwrap_or(0).saturating_add(write.unwrap_or(0));
+    let cached = read.saturating_add(write);
     if let Some(input) = a.int("gen_ai.usage.input_tokens")
         && cached <= input
     {
         usage.insert("input_tokens".to_owned(), (input - cached).into());
     }
-    if let Some(r) = read {
-        usage.insert("cache_read_input_tokens".to_owned(), r.into());
-    }
-    if let Some(w) = write {
-        usage.insert("cache_creation_input_tokens".to_owned(), w.into());
-    }
-    if let Some(o) = a.int("gen_ai.usage.output_tokens") {
-        usage.insert("output_tokens".to_owned(), o.into());
-    }
+    usage.insert("cache_read_input_tokens".to_owned(), read.into());
+    usage.insert("cache_creation_input_tokens".to_owned(), write.into());
+    let output = a.int("gen_ai.usage.output_tokens").unwrap_or(0);
+    usage.insert("output_tokens".to_owned(), output.into());
     format!(
         "{{\"type\":\"assistant\",\"sessionId\":{},\"message\":{{\"model\":{},\"id\":{},\"role\":\"assistant\",\"content\":[],\"usage\":{}}},\"timestamp\":{ts}}}",
         Value::from(session),
@@ -278,7 +276,8 @@ mod tests {
         assert_eq!(out[0]["message"]["model"], "m");
         assert_eq!(
             out[0]["message"]["usage"],
-            json!({"input_tokens": 60, "cache_creation_input_tokens": 40})
+            json!({"input_tokens": 60, "cache_read_input_tokens": 0,
+                   "cache_creation_input_tokens": 40, "output_tokens": 0})
         );
     }
 
@@ -310,9 +309,14 @@ mod tests {
         assert_eq!(bad, 0);
         assert_eq!(
             out[0]["message"]["usage"],
-            json!({"cache_read_input_tokens": 600, "output_tokens": 5})
+            json!({"cache_read_input_tokens": 600, "cache_creation_input_tokens": 0,
+                   "output_tokens": 5})
         );
-        assert_eq!(out[1]["message"]["usage"], json!({"output_tokens": 5}));
+        assert_eq!(
+            out[1]["message"]["usage"],
+            json!({"cache_read_input_tokens": 0, "cache_creation_input_tokens": 0,
+                   "output_tokens": 5})
+        );
     }
 
     #[test]
