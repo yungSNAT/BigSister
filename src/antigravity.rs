@@ -308,6 +308,13 @@ mod tests {
                 (json!(name), json!("/w/a.rs"))
             );
         }
+        // Any other tool keeps its name and arguments.
+        let c = json!({"name": "grep_search", "args": {"Query": "x"}});
+        let u = tool_use("id", &c);
+        assert_eq!(
+            (u["name"].clone(), u["input"].clone()),
+            (json!("grep_search"), json!({"Query": "x"}))
+        );
     }
 
     #[test]
