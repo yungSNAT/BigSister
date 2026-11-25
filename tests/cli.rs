@@ -4112,3 +4112,36 @@ fn an_empty_scan_says_nothing_was_scanned() {
     let (_, text, _) = run(&fixture_args("pipes", &[]));
     assert!(!text.contains("Nothing scanned"), "{text}");
 }
+
+/// A file `startup` stops reading early, at a session begun before the window, still
+/// counts its records in the window; `diff` says which side holds none.
+#[test]
+fn a_file_read_in_part_still_counts_its_records_in_the_window() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("resumed-scan");
+    let empty = Path::new(env!("CARGO_TARGET_TMPDIR")).join("empty-side");
+    for d in [&dir, &empty] {
+        let _ = std::fs::remove_dir_all(d);
+        std::fs::create_dir_all(d).expect("folder");
+    }
+    std::fs::create_dir_all(dir.join("proj")).expect("folder");
+    std::fs::write(
+        dir.join("proj/s.jsonl"),
+        concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"message\":{}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-11-10T00:00:00Z\",\"message\":{}}\n",
+        ),
+    )
+    .expect("transcript");
+    let path = dir.to_str().expect("UTF-8 path");
+    let args = ["startup", "--claude-root", path, "--agent", "claude"];
+    let (code, stdout, stderr) = run(&[&args[..], &["--since", SINCE, "--json"]].concat());
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(doc["records_scanned"], json!(true));
+    assert_eq!(doc["roots"][0]["files_with_records"], json!(1));
+    let empty = empty.to_str().expect("UTF-8 path");
+    let (code, text, stderr) = run(&["diff", empty, path, "--since", SINCE]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(text.contains(": Nothing scanned"), "{text}");
+    assert_eq!(text.matches("Nothing scanned").count(), 1, "{text}");
+}

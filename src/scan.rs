@@ -1119,9 +1119,25 @@ fn scan_file(
             Err(e) => break Err(e),
         }
     };
-    let (uuids, replies) = feed.finish(lines.over_long, None);
+    let over_long = seek_window(&mut lines, &mut feed, result.is_ok() && rewrite.is_none());
+    let (uuids, replies) = feed.finish(over_long, None);
     earlier.add(agent, path, uuids, replies);
     result
+}
+
+/// Reads the rest of a file its detectors stopped early, such as `startup` at a session
+/// that began before the window, only for a record time in the window, so that the file
+/// still counts as holding records in the window, when `seek` allows. Returns the lines
+/// skipped for length before it, which are the file's.
+fn seek_window(lines: &mut Lines, feed: &mut Feed<'_, '_>, seek: bool) -> u64 {
+    let over_long = lines.over_long;
+    while seek && !feed.saw_record {
+        let Ok(Some(line)) = lines.next_line() else {
+            break;
+        };
+        feed.saw_record = raw_timestamp(&line).is_some_and(|t| feed.covers(Some(t)));
+    }
+    over_long
 }
 
 // shortcut: a Claude subagent is told apart by its `subagents` folder and a Codex one
@@ -1204,8 +1220,13 @@ impl<'a, 'b> Feed<'a, 'b> {
     }
 
     fn in_window(&self) -> bool {
-        let after_since = self.since.zip(self.last_time).is_some_and(|(s, t)| t >= s);
-        let before_until = self.until.zip(self.last_time).is_none_or(|(u, t)| t < u);
+        self.covers(self.last_time)
+    }
+
+    /// Whether time `t` falls in the window.
+    fn covers(&self, t: Option<Timestamp>) -> bool {
+        let after_since = self.since.zip(t).is_some_and(|(s, t)| t >= s);
+        let before_until = self.until.zip(t).is_none_or(|(u, t)| t < u);
         after_since && before_until
     }
 
