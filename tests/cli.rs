@@ -4143,4 +4143,89 @@ fn permissions_count_decisions_by_tool_and_category() {
         .map(|r| cells(r, &["classifier_category", "blocks"]))
         .collect();
     assert_eq!(categories, [json!(["external_system_writes", 1])]);
+/// A scan that finds no record in the window says so, in text and JSON, rather than
+/// printing zeroed sections that read as a clean result: an empty folder, and a folder
+/// whose transcript holds only records before the window, a line that is not JSON and a
+/// record with no time.
+#[test]
+fn an_empty_scan_says_nothing_was_scanned() {
+    let empty = Path::new(env!("CARGO_TARGET_TMPDIR")).join("empty-scan");
+    let old = Path::new(env!("CARGO_TARGET_TMPDIR")).join("old-scan");
+    for dir in [&empty, &old] {
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).expect("folder");
+    }
+    std::fs::create_dir_all(old.join("proj")).expect("folder");
+    std::fs::write(
+        old.join("proj/s.jsonl"),
+        concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"a\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\"}}]}}\n",
+            "not JSON\n",
+            "{\"type\":\"summary\"}\n",
+        ),
+    )
+    .expect("transcript");
+    for (dir, files) in [(&empty, 0), (&old, 1)] {
+        let dir = dir.to_str().expect("UTF-8 path");
+        let args = [
+            "all",
+            "--claude-root",
+            dir,
+            "--agent",
+            "claude",
+            "--since",
+            SINCE,
+        ];
+        let (code, text, stderr) = run(&args);
+        assert_eq!(code, 0, "stderr: {stderr}");
+        assert!(
+            text.contains("Nothing scanned: no transcript record falls in the window"),
+            "{text}"
+        );
+        let (code, stdout, stderr) = run(&[&args[..], &["--json"]].concat());
+        assert_eq!(code, 0, "stderr: {stderr}");
+        let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+        assert_eq!(doc["records_scanned"], json!(false));
+        assert_eq!(
+            cells(&doc["roots"][0], &["files", "files_with_records"]),
+            json!([files, 0])
+        );
+    }
+    let doc = report("all", &[]);
+    assert_eq!(doc["records_scanned"], json!(true));
+    let (_, text, _) = run(&fixture_args("pipes", &[]));
+    assert!(!text.contains("Nothing scanned"), "{text}");
+}
+
+/// A file `startup` stops reading early, at a session begun before the window, still
+/// counts its records in the window; `diff` says which side holds none.
+#[test]
+fn a_file_read_in_part_still_counts_its_records_in_the_window() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("resumed-scan");
+    let empty = Path::new(env!("CARGO_TARGET_TMPDIR")).join("empty-side");
+    for d in [&dir, &empty] {
+        let _ = std::fs::remove_dir_all(d);
+        std::fs::create_dir_all(d).expect("folder");
+    }
+    std::fs::create_dir_all(dir.join("proj")).expect("folder");
+    std::fs::write(
+        dir.join("proj/s.jsonl"),
+        concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"message\":{}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-11-10T00:00:00Z\",\"message\":{}}\n",
+        ),
+    )
+    .expect("transcript");
+    let path = dir.to_str().expect("UTF-8 path");
+    let args = ["startup", "--claude-root", path, "--agent", "claude"];
+    let (code, stdout, stderr) = run(&[&args[..], &["--since", SINCE, "--json"]].concat());
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(doc["records_scanned"], json!(true));
+    assert_eq!(doc["roots"][0]["files_with_records"], json!(1));
+    let empty = empty.to_str().expect("UTF-8 path");
+    let (code, text, stderr) = run(&["diff", empty, path, "--since", SINCE]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(text.contains(": Nothing scanned"), "{text}");
+    assert_eq!(text.matches("Nothing scanned").count(), 1, "{text}");
 }
