@@ -1298,8 +1298,8 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[1]["files"], 2);
     assert_eq!(doc["schema_version"], 2);
     assert_eq!(doc["tool"], "bigsister");
-    // 10 detectors and the ranked figures.
-    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(11));
+    // 11 detectors and the ranked figures.
+    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(12));
 }
 
 /// `bigsister all` over the Claude transcripts in a fixture folder, which must hold 2.
@@ -3960,14 +3960,15 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// One folder holding the main Claude fixtures and the request-log fixture, as the sample
-/// does.
+/// One folder holding the main Claude fixtures, the request-log fixture and the
+/// permission-decision fixture, as the sample does.
 fn sample_claude_root() -> PathBuf {
     let claude = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sample-claude");
     let _ = std::fs::remove_dir_all(&claude);
     std::fs::create_dir_all(&claude).expect("folder");
     copy_tree(Path::new(CLAUDE), &claude);
     copy_tree(Path::new(CONTEXT), &claude);
+    copy_tree(Path::new(PERMISSIONS), &claude);
     claude
 }
 
@@ -4009,7 +4010,7 @@ fn sample_reports_the_bundled_fixtures_with_no_transcripts_on_the_machine() {
     assert_eq!(
         roots,
         [
-            json!(["claude", "(bundled sample)", 5]),
+            json!(["claude", "(bundled sample)", 6]),
             json!(["codex", "(bundled sample)", 2]),
             json!(["pi", "(bundled sample)", 2])
         ]
@@ -4093,4 +4094,176 @@ fn completions_print_a_script_for_each_supported_shell() {
         assert_eq!(code, 0, "{shell}: {stderr}");
         assert!(stdout.contains("bigsister"), "{shell}: {stdout}");
     }
+}
+
+const PERMISSIONS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/permissions/claude"
+);
+
+/// `permissions` over the permission fixture, as JSON.
+fn permissions_report() -> Value {
+    let args = [
+        "permissions",
+        "--claude-root",
+        PERMISSIONS,
+        "--since",
+        SINCE,
+        "--json",
+    ];
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+/// `permissions` counts each recorded decision once, by its cause, and prints no rule
+/// text, reason code, tool input or output.
+#[test]
+fn permissions_count_decisions_by_cause() {
+    let doc = permissions_report();
+    let p = &doc["detectors"]["permissions"];
+    for (k, v) in [
+        ("decisions", 8),
+        ("allowed", 3),
+        ("blocked", 5),
+        ("answered_by_you", 3),
+        ("blocked_by_you", 1),
+        ("blocked_by_hook", 1),
+        ("blocked_by_safety_check", 1),
+        ("blocked_by_auto_mode", 1),
+        ("blocked_by_rule", 1),
+        ("blocked_by_mode", 0),
+        ("blocked_by_other", 0),
+        ("tool_results_without_decision", 1),
+    ] {
+        assert_eq!(p["summary"][k], json!(v), "{k}");
+    }
+    let (code, text, stderr) = run(&[
+        "permissions",
+        "--claude-root",
+        PERMISSIONS,
+        "--since",
+        SINCE,
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!text.to_lowercase().contains("sentinel"), "{text}");
+    assert!(text.contains("blocked by auto mode: 1"), "{text}");
+}
+
+/// `permissions` gives each tool's decisions, most blocked first, and auto mode's blocks
+/// by category.
+#[test]
+fn permissions_count_decisions_by_tool_and_category() {
+    let doc = permissions_report();
+    let tools: Vec<Value> = rows(&doc, "permissions", 2)
+        .iter()
+        .map(|r| {
+            cells(
+                r,
+                &["tool", "decisions", "allowed", "blocked", "answered_by_you"],
+            )
+        })
+        .collect();
+    assert_eq!(
+        tools,
+        [
+            json!(["Bash", 5, 1, 4, 0]),
+            json!(["Write", 1, 0, 1, 1]),
+            json!(["Edit", 1, 1, 0, 1]),
+            json!(["Read", 1, 1, 0, 1])
+        ]
+    );
+    let categories: Vec<Value> = rows(&doc, "permissions", 3)
+        .iter()
+        .map(|r| cells(r, &["classifier_category", "blocks"]))
+        .collect();
+    assert_eq!(categories, [json!(["external_system_writes", 1])]);
+}
+
+/// A scan that finds no record in the window says so, in text and JSON, rather than
+/// printing zeroed sections that read as a clean result: an empty folder, and a folder
+/// whose transcript holds only records before the window, a line that is not JSON and a
+/// record with no time.
+#[test]
+fn an_empty_scan_says_nothing_was_scanned() {
+    let empty = Path::new(env!("CARGO_TARGET_TMPDIR")).join("empty-scan");
+    let old = Path::new(env!("CARGO_TARGET_TMPDIR")).join("old-scan");
+    for dir in [&empty, &old] {
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).expect("folder");
+    }
+    std::fs::create_dir_all(old.join("proj")).expect("folder");
+    std::fs::write(
+        old.join("proj/s.jsonl"),
+        concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"a\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\"}}]}}\n",
+            "not JSON\n",
+            "{\"type\":\"summary\"}\n",
+        ),
+    )
+    .expect("transcript");
+    for (dir, files) in [(&empty, 0), (&old, 1)] {
+        let dir = dir.to_str().expect("UTF-8 path");
+        let args = [
+            "all",
+            "--claude-root",
+            dir,
+            "--agent",
+            "claude",
+            "--since",
+            SINCE,
+        ];
+        let (code, text, stderr) = run(&args);
+        assert_eq!(code, 0, "stderr: {stderr}");
+        assert!(
+            text.contains("Nothing scanned: no transcript record falls in the window"),
+            "{text}"
+        );
+        let (code, stdout, stderr) = run(&[&args[..], &["--json"]].concat());
+        assert_eq!(code, 0, "stderr: {stderr}");
+        let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+        assert_eq!(doc["records_scanned"], json!(false));
+        assert_eq!(
+            cells(&doc["roots"][0], &["files", "files_with_records"]),
+            json!([files, 0])
+        );
+    }
+    let doc = report("all", &[]);
+    assert_eq!(doc["records_scanned"], json!(true));
+    let (_, text, _) = run(&fixture_args("pipes", &[]));
+    assert!(!text.contains("Nothing scanned"), "{text}");
+}
+
+/// A file `startup` stops reading early, at a session begun before the window, still
+/// counts its records in the window; `diff` says which side holds none.
+#[test]
+fn a_file_read_in_part_still_counts_its_records_in_the_window() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("resumed-scan");
+    let empty = Path::new(env!("CARGO_TARGET_TMPDIR")).join("empty-side");
+    for d in [&dir, &empty] {
+        let _ = std::fs::remove_dir_all(d);
+        std::fs::create_dir_all(d).expect("folder");
+    }
+    std::fs::create_dir_all(dir.join("proj")).expect("folder");
+    std::fs::write(
+        dir.join("proj/s.jsonl"),
+        concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"message\":{}}\n",
+            "{\"type\":\"user\",\"timestamp\":\"2026-11-10T00:00:00Z\",\"message\":{}}\n",
+        ),
+    )
+    .expect("transcript");
+    let path = dir.to_str().expect("UTF-8 path");
+    let args = ["startup", "--claude-root", path, "--agent", "claude"];
+    let (code, stdout, stderr) = run(&[&args[..], &["--since", SINCE, "--json"]].concat());
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert_eq!(doc["records_scanned"], json!(true));
+    assert_eq!(doc["roots"][0]["files_with_records"], json!(1));
+    let empty = empty.to_str().expect("UTF-8 path");
+    let (code, text, stderr) = run(&["diff", empty, path, "--since", SINCE]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(text.contains(": Nothing scanned"), "{text}");
+    assert_eq!(text.matches("Nothing scanned").count(), 1, "{text}");
 }

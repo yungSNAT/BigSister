@@ -69,7 +69,13 @@ pub struct Meta<'a> {
     pub roots: &'a [RootStats],
     pub skipped_roots: &'a [String],
     pub home: Option<&'a str>,
+    /// Whether any file scanned held a record in the window. With none, every count is 0
+    /// for want of records, which is no clean result.
+    pub records_scanned: bool,
 }
+
+/// The line a report prints when no record fell in the window.
+pub const NOTHING_SCANNED: &str = "Nothing scanned: no transcript record falls in the window, so the sections below are empty, not clean.";
 
 impl Meta<'_> {
     fn root(&self, r: &RootStats) -> String {
@@ -236,6 +242,9 @@ pub fn text(meta: &Meta<'_>, sections: &[Section]) -> String {
     for s in meta.skipped_roots {
         let _ = writeln!(out, "{s}");
     }
+    if !meta.records_scanned {
+        let _ = writeln!(out, "{NOTHING_SCANNED}");
+    }
     for s in sections {
         let _ = write!(out, "\n== {}: {} ==\n", s.name, s.title);
         for (k, v) in &s.summary {
@@ -318,6 +327,7 @@ pub fn json(meta: &Meta<'_>, sections: &[Section]) -> String {
             json!({"agent": r.agent.name(), "root": meta.root(r), "files": r.files,
                    "unreadable": r.unreadable, "lines_skipped": r.bad_lines,
                    "compressed_skipped": r.compressed,
+                   "files_with_records": r.files_with_records,
                    "unreadable_reasons": r.unreadable_reasons.iter()
                        .map(|(reason, n)| json!({"reason": reason, "count": n}))
                        .collect::<Vec<_>>()})
@@ -334,6 +344,7 @@ pub fn json(meta: &Meta<'_>, sections: &[Section]) -> String {
         "since": rfc3339(meta.since),
         "roots": roots,
         "skipped_roots": meta.skipped_roots,
+        "records_scanned": meta.records_scanned,
         "detectors": detectors,
     });
     let mut s = serde_json::to_string_pretty(&doc).unwrap_or_default();

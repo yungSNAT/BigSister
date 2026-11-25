@@ -133,6 +133,8 @@ pub enum Command {
     Models,
     /// Hook durations, cancellations and timeouts (Claude)
     Hooks,
+    /// Permission decisions on tool calls, allowed and blocked, by cause and tool (Claude)
+    Permissions,
     /// Compare tokens, cache hit %, cost, turns, compactions and waste across 2 session sets or time windows
     Diff {
         /// Baseline session folder or time window (START..END, e.g. 14d..7d or 2026-11-01..2026-11-08)
