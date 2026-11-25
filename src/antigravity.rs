@@ -242,6 +242,7 @@ mod tests {
                 {"name": "run_command", "args": {"CommandLine": "ls", "Cwd": "/w"}},
                 {"name": "read_file", "args": {"Path": "/w/a.rs", "StartLine": 1}}]}),
             ),
+            String::new(),
             step("GENERIC", &json!({"content": "one"})),
             step(
                 "GENERIC",
@@ -295,6 +296,18 @@ mod tests {
             Some(2)
         );
         assert!(out.iter().all(|r| r["type"] != json!("user")), "{out:?}");
+    }
+
+    #[test]
+    fn file_tools_are_named_as_claude_code_s() {
+        for (tool, name) in [("edit_file", "Edit"), ("write_file", "Write")] {
+            let c = json!({"name": tool, "args": {"Path": "/w/a.rs"}});
+            let u = tool_use("id", &c);
+            assert_eq!(
+                (u["name"].clone(), u["input"]["file_path"].clone()),
+                (json!(name), json!("/w/a.rs"))
+            );
+        }
     }
 
     #[test]

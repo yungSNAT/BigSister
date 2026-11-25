@@ -871,16 +871,29 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
                 if !compressed && path.extension().is_none_or(|x| x != "jsonl") {
                     continue;
                 }
-                match entry.metadata().and_then(|m| m.modified()) {
-                    Ok(m) if m >= cutoff => out.push(path),
-                    Ok(_) => {}
-                    Err(e) => st.count_unreadable(format!("a file's time cannot be read: {e}")),
-                }
+                let modified = entry.metadata().and_then(|m| m.modified());
+                keep_recent(path, modified, cutoff, &mut out, st);
             }
         }
     }
     out.sort();
     out
+}
+
+/// Adds `path` to `out` when it was `modified` at or after `cutoff`, or counts why its
+/// time cannot be read.
+fn keep_recent(
+    path: PathBuf,
+    modified: io::Result<SystemTime>,
+    cutoff: SystemTime,
+    out: &mut Vec<PathBuf>,
+    st: &mut RootStats,
+) {
+    match modified {
+        Ok(m) if m >= cutoff => out.push(path),
+        Ok(_) => {}
+        Err(e) => st.count_unreadable(format!("a file's time cannot be read: {e}")),
+    }
 }
 
 /// Antigravity's log of each conversation folder in `root` modified at or after
@@ -891,11 +904,11 @@ fn antigravity_logs(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<
     let Some(entries) = st.readable(fs::read_dir(root), "a folder cannot be listed") else {
         return Vec::new();
     };
+    let entries: Vec<_> = entries
+        .filter_map(|entry| st.readable(entry, "a folder entry cannot be read"))
+        .collect();
     let mut out = Vec::new();
     for entry in entries {
-        let Some(entry) = st.readable(entry, "a folder entry cannot be read") else {
-            continue;
-        };
         let logs = entry.path().join(".system_generated").join("logs");
         let full = logs.join("transcript_full.jsonl");
         let path = if full.is_file() {
@@ -903,13 +916,9 @@ fn antigravity_logs(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<
         } else {
             logs.join("transcript.jsonl")
         };
-        if !path.is_file() {
-            continue;
-        }
-        match fs::metadata(&path).and_then(|m| m.modified()) {
-            Ok(m) if m >= cutoff => out.push(path),
-            Ok(_) => {}
-            Err(e) => st.count_unreadable(format!("a file's time cannot be read: {e}")),
+        if path.is_file() {
+            let modified = fs::metadata(&path).and_then(|m| m.modified());
+            keep_recent(path, modified, cutoff, &mut out, st);
         }
     }
     out.sort();
@@ -1518,6 +1527,24 @@ mod tests {
         }];
         assert!(scan_memory(&files, "sample", since, &prices, &mut dets).is_empty());
         assert_eq!(counted(&dets), 0);
+    }
+
+    #[test]
+    fn antigravity_lists_only_conversation_logs_in_the_window() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- a test fixture folder; no security decision rests on it
+        let dir = std::env::temp_dir().join(format!("bigsister-agy-{}", std::process::id()));
+        let logs = dir.join("b").join(".system_generated").join("logs");
+        fs::create_dir_all(dir.join("a")).expect("a conversation with no log");
+        fs::create_dir_all(&logs).expect("a conversation with a log");
+        fs::write(logs.join("transcript_full.jsonl"), b"{}\n").expect("write log");
+        let mut st = RootStats::new(Agent::Antigravity, dir.clone());
+        let later = SystemTime::now() + Duration::from_secs(3600);
+        assert!(antigravity_logs(&dir, later, &mut st).is_empty());
+        let found = antigravity_logs(&dir, SystemTime::UNIX_EPOCH, &mut st);
+        assert_eq!(found, [logs.join("transcript_full.jsonl")]);
+        assert!(antigravity_logs(&dir.join("missing"), later, &mut st).is_empty());
+        assert_eq!(st.unreadable, 1);
+        fs::remove_dir_all(&dir).expect("remove test directory");
     }
 
     #[test]
