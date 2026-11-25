@@ -36,6 +36,7 @@ pub const FILES: &[Memory] = &[
         "context/claude",
         "proj-x/s-ctx/subagents/agent-1.jsonl"
     ),
+    fixture!(Agent::Claude, "permissions/claude", "proj-p/s-perm.jsonl"),
     fixture!(Agent::Codex, "codex", "2026/11/08/rollout-main.jsonl"),
     fixture!(Agent::Codex, "codex", "2026/11/08/rollout-sub.jsonl"),
     fixture!(
