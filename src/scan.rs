@@ -1119,7 +1119,7 @@ fn scan_file(
             Err(e) => break Err(e),
         }
     };
-    let over_long = seek_window(&mut lines, &mut feed, result.is_ok() && rewrite.is_none());
+    let over_long = seek_window(&mut lines, &mut feed, result.is_ok());
     let (uuids, replies) = feed.finish(over_long, None);
     earlier.add(agent, path, uuids, replies);
     result
