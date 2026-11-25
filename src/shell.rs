@@ -40,16 +40,6 @@ static READ_CALL: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid regex")
 });
-static WRITE_CALL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r#"(?s)\bwriteFile(?:Sync)?\(\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)"#,
-    )
-    .expect("valid regex")
-});
-static APPLY_PATCH_CALL: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?s)\bapply_patch\(\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)"#)
-        .expect("valid regex")
-});
 /// The text an `apply_patch` call writes, from the string literal that opens it. A
 /// `readFile(` line it adds is not a read.
 static PATCH_BODY: LazyLock<Regex> = LazyLock::new(|| {
@@ -788,15 +778,101 @@ pub fn codex_read_calls(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// Returns the index straight after the closing quote of a JS string literal starting at
+/// `start`, or `None` when the literal runs to the end of `bytes` without closing.
+fn scan_js_string(bytes: &[u8], start: usize) -> Option<usize> {
+    let quote = bytes[start];
+    let mut i = start + 1;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            i = (i + 2).min(bytes.len());
+            continue;
+        }
+        if bytes[i] == quote {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// If `input[after_ident..]` opens a call whose first argument is a JS string literal,
+/// returns `(next_cursor, Some(unescaped))` when the literal is a whole value, or
+/// `(next_cursor, None)` when it is composite or unterminated.
+fn call_first_string_arg(input: &str, after_ident: usize) -> Option<(usize, Option<String>)> {
+    let bytes = input.as_bytes();
+    let j = after_ident
+        + input[after_ident..]
+            .bytes()
+            .take_while(u8::is_ascii_whitespace)
+            .count();
+    if bytes.get(j) != Some(&b'(') {
+        return None;
+    }
+    let k = j
+        + 1
+        + input[j + 1..]
+            .bytes()
+            .take_while(u8::is_ascii_whitespace)
+            .count();
+    if !matches!(bytes.get(k), Some(b'"' | b'\'' | b'`')) {
+        return None;
+    }
+    let Some(end) = scan_js_string(bytes, k) else {
+        return Some((bytes.len(), None));
+    };
+    let val = is_whole_lit(input, k, end).then(|| js_unescape(&input[k..end]));
+    Some((end, val))
+}
+
 /// Patch texts from `apply_patch(...)` and literal paths from `writeFile(...)` /
-/// `writeFileSync(...)` in a Codex `exec` cell.
+/// `writeFileSync(...)` in a Codex `exec` cell, skipping JS comments and enclosing string
+/// literals so commented or patch-embedded text is never counted as an edit.
 #[must_use]
 pub fn codex_edit_targets(input: &str) -> (Vec<String>, Vec<String>) {
-    let patches = js_call_literals(input, &APPLY_PATCH_CALL).collect();
-    let clean = without_patch_bodies(input);
-    let writes = js_call_literals(&clean, &WRITE_CALL)
-        .filter(|p| is_literal_path(p))
-        .collect();
+    let bytes = input.as_bytes();
+    let (mut patches, mut writes) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                i = bytes[i + 2..]
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map_or(bytes.len(), |p| i + 2 + p + 1);
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                i = input[i + 2..]
+                    .find("*/")
+                    .map_or(bytes.len(), |p| i + 2 + p + 2);
+            }
+            b'"' | b'\'' | b'`' => {
+                i = scan_js_string(bytes, i).unwrap_or(bytes.len());
+            }
+            b if b.is_ascii_alphabetic() || b == b'_' || b == b'$' => {
+                let start = i;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+                {
+                    i += 1;
+                }
+                let name = &input[start..i];
+                if matches!(name, "apply_patch" | "writeFile" | "writeFileSync")
+                    && let Some((next, val)) = call_first_string_arg(input, i)
+                {
+                    if let Some(val) = val {
+                        if name == "apply_patch" {
+                            patches.push(val);
+                        } else if is_literal_path(&val) {
+                            writes.push(val);
+                        }
+                    }
+                    i = next;
+                }
+            }
+            _ => i += 1,
+        }
+    }
     (patches, writes)
 }
 
@@ -806,8 +882,12 @@ pub fn codex_edit_targets(input: &str) -> (Vec<String>, Vec<String>) {
 /// A literal joined to a value with `+` or a method would otherwise stand for every
 /// command built from it.
 fn whole_literal(input: &str, lit: &regex::Match<'_>) -> bool {
-    let text = lit.as_str();
-    let rest = input[lit.end()..].trim_start();
+    is_whole_lit(input, lit.start(), lit.end())
+}
+
+fn is_whole_lit(input: &str, start: usize, end: usize) -> bool {
+    let text = &input[start..end];
+    let rest = input[end..].trim_start();
     !(text.starts_with('`') && substitutes(text))
         && (rest.is_empty()
             || rest.starts_with([',', ')', ']', '}', ';'])
@@ -1252,6 +1332,39 @@ const s = readFile('C:\\hub\\b.md'); await tools.apply_patch(p);"#;
         let after_url = "await fetch('https://x.test'); await tools.apply_patch(`*** Begin Patch\n\
             +readFileSync('cfg.json');\n*** End Patch`);";
         assert_eq!(codex_read_calls(after_url), Vec::<String>::new());
+    }
+
+    #[test]
+    fn codex_edit_targets_skips_comments_strings_and_nested_patches() {
+        let input = concat!(
+            "// writeFile('ghost_line.rs', 'x');\n",
+            "// apply_patch('*** Begin Patch\\n*** Add File: ghost_line_p.rs\\n*** End Patch');\n",
+            "/* writeFileSync('ghost_block.rs', 'x'); apply_patch(`*** Begin Patch\n*** Add File: ghost_block_p.rs\n*** End Patch`); */\n",
+            "const note = \"writeFile('ghost_str.rs', 'x')\";\n",
+            "const tpl = `apply_patch('*** Begin Patch\\n*** Add File: ghost_tpl.rs\\n*** End Patch')`;\n",
+            "writeFile('real_outer.rs', `*** Begin Patch\n+apply_patch('*** Begin Patch\\n*** Add File: ghost_nested.rs\\n*** End Patch')\n*** End Patch`);\n",
+            "await tools.apply_patch(\"*** Begin Patch\\n*** Update File: outer.rs\\n+writeFile('ghost_in_patch.rs', 'x')\\n+apply_patch('*** Begin Patch\\\\n*** Add File: inner.rs\\\\n*** End Patch')\\n*** End Patch\");\n",
+            "fs.writeFileSync('escaped\\'quote.rs', 'ok');\n",
+            "my_writeFile('ignored_ident.rs', 'x');\n",
+            "writeFile('dyn/' + part, 'x'); writeFileSync(`${dir}/v.rs`, 'x');\n",
+            "writeFile('unterminated",
+        );
+        let (patches, writes) = codex_edit_targets(input);
+        assert_eq!(patches.len(), 1);
+        assert!(patches[0].contains("*** Update File: outer.rs"));
+        assert_eq!(writes, vec!["real_outer.rs", "escaped'quote.rs"]);
+        assert_eq!(
+            codex_edit_targets("const broken = 'eof"),
+            (Vec::new(), Vec::new())
+        );
+        assert_eq!(
+            codex_edit_targets("/* unterminated comment"),
+            (Vec::new(), Vec::new())
+        );
+        assert_eq!(
+            codex_edit_targets("// trailing line comment without newline"),
+            (Vec::new(), Vec::new())
+        );
     }
 
     #[test]
