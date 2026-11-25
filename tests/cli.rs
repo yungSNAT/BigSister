@@ -4065,21 +4065,27 @@ const PERMISSIONS: &str = concat!(
     "/tests/fixtures/permissions/claude"
 );
 
-/// `permissions` counts each recorded decision once, by its cause and the tool it
-/// answers, and prints no rule text, reason code, tool input or output.
-#[test]
-fn permissions_count_decisions_by_cause_and_tool() {
-    let (code, stdout, stderr) = run(&[
+/// `permissions` over the permission fixture, as JSON.
+fn permissions_report() -> Value {
+    let args = [
         "permissions",
         "--claude-root",
         PERMISSIONS,
         "--since",
         SINCE,
         "--json",
-    ]);
+    ];
+    let (code, stdout, stderr) = run(&args);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
-    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+/// `permissions` counts each recorded decision once, by its cause, and prints no rule
+/// text, reason code, tool input or output.
+#[test]
+fn permissions_count_decisions_by_cause() {
+    let doc = permissions_report();
     let p = &doc["detectors"]["permissions"];
     for (k, v) in [
         ("decisions", 7),
@@ -4097,6 +4103,23 @@ fn permissions_count_decisions_by_cause_and_tool() {
     ] {
         assert_eq!(p["summary"][k], json!(v), "{k}");
     }
+    let (code, text, stderr) = run(&[
+        "permissions",
+        "--claude-root",
+        PERMISSIONS,
+        "--since",
+        SINCE,
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!text.to_lowercase().contains("sentinel"), "{text}");
+    assert!(text.contains("blocked by auto mode: 1"), "{text}");
+}
+
+/// `permissions` gives each tool's decisions, most blocked first, and auto mode's blocks
+/// by category.
+#[test]
+fn permissions_count_decisions_by_tool_and_category() {
+    let doc = permissions_report();
     let tools: Vec<Value> = rows(&doc, "permissions", 2)
         .iter()
         .map(|r| {
@@ -4120,14 +4143,4 @@ fn permissions_count_decisions_by_cause_and_tool() {
         .map(|r| cells(r, &["classifier_category", "blocks"]))
         .collect();
     assert_eq!(categories, [json!(["external_system_writes", 1])]);
-    let (code, text, stderr) = run(&[
-        "permissions",
-        "--claude-root",
-        PERMISSIONS,
-        "--since",
-        SINCE,
-    ]);
-    assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(!text.to_lowercase().contains("sentinel"), "{text}");
-    assert!(text.contains("blocked by auto mode: 1"), "{text}");
 }

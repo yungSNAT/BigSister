@@ -220,9 +220,27 @@ impl Detector for Permissions {
     }
 
     fn section(&self, opts: &Opts) -> Section {
-        let allowed = self.total("allowed");
-        let blocked = self.total("blocked");
-        let decisions: u64 = self.by_cause.values().sum();
+        let mut tables = vec![
+            self.cause_table(),
+            self.field_table(),
+            self.tool_table(),
+            self.category_table(),
+        ];
+        for t in &mut tables {
+            t.truncate(opts.limit);
+        }
+        Section {
+            name: "permissions",
+            title: "permission decisions on tool calls, allowed and blocked, by cause (Claude)",
+            summary: self.summary(),
+            tables,
+            notes: notes(),
+        }
+    }
+}
+
+impl Permissions {
+    fn summary(&self) -> Vec<(String, Value)> {
         let answered: u64 = self
             .by_cause
             .iter()
@@ -230,9 +248,12 @@ impl Detector for Permissions {
             .map(|(_, n)| n)
             .sum();
         let mut summary = vec![
-            ("decisions".to_owned(), json!(decisions)),
-            ("allowed".to_owned(), json!(allowed)),
-            ("blocked".to_owned(), json!(blocked)),
+            (
+                "decisions".to_owned(),
+                json!(self.by_cause.values().sum::<u64>()),
+            ),
+            ("allowed".to_owned(), json!(self.total("allowed"))),
+            ("blocked".to_owned(), json!(self.total("blocked"))),
             ("answered_by_you".to_owned(), json!(answered)),
         ];
         for c in CAUSES {
@@ -248,23 +269,28 @@ impl Detector for Permissions {
             "tool_results_without_decision".to_owned(),
             json!(self.results_without),
         ));
+        summary
+    }
 
-        let mut causes = Table::new(
+    fn cause_table(&self) -> Table {
+        let mut t = Table::new(
             "By decision and cause",
             vec!["decision", "cause", "decisions"],
         );
         for d in ["blocked", "allowed", "(other)"] {
             for c in CAUSES {
                 if let Some(n) = self.by_cause.get(&(d, c)) {
-                    causes.rows.push(vec![json!(d), json!(c), json!(n)]);
+                    t.rows.push(vec![json!(d), json!(c), json!(n)]);
                 }
             }
         }
-        causes.truncate(opts.limit);
+        t
+    }
 
+    fn field_table(&self) -> Table {
         let mut raw: Vec<(&[&str; 4], &u64)> = self.raw.iter().collect();
         raw.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-        let mut fields = Table::new(
+        let mut t = Table::new(
             "By recorded fields, most first",
             vec![
                 "decision",
@@ -274,57 +300,53 @@ impl Detector for Permissions {
                 "decisions",
             ],
         );
-        fields.rows = raw
+        t.rows = raw
             .into_iter()
             .map(|(k, n)| vec![json!(k[0]), json!(k[1]), json!(k[2]), json!(k[3]), json!(n)])
             .collect();
-        fields.truncate(opts.limit);
+        t
+    }
 
+    fn tool_table(&self) -> Table {
         let mut tools: Vec<(&String, &ToolCounts)> = self.tools.iter().collect();
         tools.sort_by_key(|(_, t)| std::cmp::Reverse((t.blocked, t.decisions)));
-        let mut by_tool = Table::new(
+        let mut t = Table::new(
             "By tool, most blocked first",
             vec!["tool", "decisions", "allowed", "blocked", "answered_by_you"],
         );
-        by_tool.rows = tools
+        t.rows = tools
             .into_iter()
-            .map(|(name, t)| {
+            .map(|(name, c)| {
                 vec![
                     json!(name),
-                    json!(t.decisions),
-                    json!(t.allowed),
-                    json!(t.blocked),
-                    json!(t.answered_by_you),
+                    json!(c.decisions),
+                    json!(c.allowed),
+                    json!(c.blocked),
+                    json!(c.answered_by_you),
                 ]
             })
             .collect();
-        by_tool.truncate(opts.limit);
+        t
+    }
 
+    fn category_table(&self) -> Table {
         let mut cats: Vec<(&&str, &u64)> = self.categories.iter().collect();
         cats.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
-        let mut auto = Table::new(
+        let mut t = Table::new(
             "Auto mode blocks by category",
             vec!["classifier_category", "blocks"],
         );
-        auto.rows = cats
+        t.rows = cats
             .into_iter()
             .map(|(c, n)| vec![json!(c), json!(n)])
             .collect();
-        auto.truncate(opts.limit);
-
-        Section {
-            name: "permissions",
-            title: "permission decisions on tool calls, allowed and blocked, by cause (Claude)",
-            summary,
-            tables: vec![causes, fields, by_tool, auto],
-            notes: notes(),
-        }
+        t
     }
 }
 
 fn notes() -> Vec<String> {
     vec![
-        "Claude Code records a permission decision on each tool result, from about version 2.1.299: tool results without decision counts the results in the window that carry none, as older versions wrote, so a 0 there means every result was read.".to_owned(),
+        "Claude Code records a permission decision on each tool result, from about version 2.1.299: tool results without decision counts the results in the window that carry none, as older versions wrote, so a 0 there means every tool result in the window carried one.".to_owned(),
         "Each decision has one cause, the first that applies of: you (you answered a prompt for it), hook, safety_check (Claude Code's own safety check), auto_mode (auto mode's classifier), rule (a permission rule, including one you saved by answering 'always'), mode (the permission mode, such as bypassPermissions or dontAsk) and other. The recorded fields table gives the values each decision recorded, which the causes are read from.".to_owned(),
         "The rule's text and reason code are never printed. A recorded value not known to bigsister prints as (other); (none) means the field was not recorded. A tool is (unpaired) when the call the result answers was not read.".to_owned(),
     ]
@@ -448,13 +470,11 @@ mod tests {
         ] {
             assert_eq!(summary(&s, k), json!(v), "{k}");
         }
-        let blocked_causes: u64 = s
-            .summary
-            .iter()
-            .filter(|(k, _)| k.starts_with("blocked_"))
-            .filter_map(|(_, v)| v.as_u64())
-            .sum();
-        assert_eq!(blocked_causes, 2);
+        let blocked_causes = s.summary.iter().filter(|(k, _)| k.starts_with("blocked_"));
+        assert_eq!(
+            blocked_causes.filter_map(|(_, v)| v.as_u64()).sum::<u64>(),
+            2
+        );
         assert_eq!(
             json!(s.tables[2].rows),
             json!([
