@@ -20,6 +20,7 @@ thread_local! {
     /// A folder of its own for this process's transcripts and `diff` trees.
     static DIR: PathBuf = {
         let dir = std::env::temp_dir().join(format!("bigsister-fuzz-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("scan")).expect("fuzz scan folder");
         for sub in ["before", "after"] {
             for agent in ["claude", "codex", "pi", "gemini", "qwen", "opencode"] {
                 std::fs::create_dir_all(dir.join(sub).join(agent)).expect("fuzz diff folder");
@@ -53,19 +54,20 @@ fn diff_cli(before: String, after: String, json: bool, csv: bool) -> Cli {
 
 fuzz_target!(|data: &[u8]| {
     let dir = DIR.with(Clone::clone);
+    let scan_dir = dir.join("scan");
     for name in ["s.jsonl", "s.jsonl.zst"] {
-        std::fs::write(dir.join(name), data).expect("transcript");
+        std::fs::write(scan_dir.join(name), data).expect("transcript");
     }
-    std::fs::write(dir.join("opencode.db"), data).expect("opencode db");
+    std::fs::write(scan_dir.join("opencode.db"), data).expect("opencode db");
     let prices = Rc::new(Prices::bundled());
     let mut dets = PROGRAMS.with(|p| build(Command::All, p, &prices));
     let roots = [
-        (Agent::Claude, dir.clone()),
-        (Agent::Codex, dir.clone()),
-        (Agent::Pi, dir.clone()),
-        (Agent::Gemini, dir.clone()),
-        (Agent::Qwen, dir.clone()),
-        (Agent::OpenCode, dir.clone()),
+        (Agent::Claude, scan_dir.clone()),
+        (Agent::Codex, scan_dir.clone()),
+        (Agent::Pi, scan_dir.clone()),
+        (Agent::Gemini, scan_dir.clone()),
+        (Agent::Qwen, scan_dir.clone()),
+        (Agent::OpenCode, scan_dir),
     ];
     let since = Timestamp::UNIX_EPOCH;
     let stats = scan(&roots, Some(since), &prices, &mut dets);
