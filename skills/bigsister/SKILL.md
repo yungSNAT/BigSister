@@ -8,7 +8,7 @@ metadata:
 
 # BigSister
 
-Use this skill when the user asks where their coding agent's usage or tokens went, or why sessions cost more than expected. `bigsister` must be installed (see the README's Install section); with the v0.1.0 release the executable is `shaphan`, which predates `context`, `tools`, `cache`, `models` and `--sample`.
+Use this skill when the user asks where their coding agent's usage or tokens went, why sessions cost more than expected, or how 2 session folders or time windows compare. `bigsister` must be installed (see the README's Install section); the earlier v0.1.0 release shipped as `shaphan`, which predates v0.2.0, `diff` and post-v0.2.0 forensics.
 
 ## Run it
 
@@ -19,6 +19,7 @@ bigsister all --json
 This reads the last 7 days of the agents' default transcript folders and prints one JSON object (`schema_version` 2). Narrow it when the question is narrow:
 
 - `bigsister <section> --json` runs one section: `startup`, `context`, `schemas`, `pipes`, `polls`, `rereads`, `tools`, `cache`, `models` or `hooks`.
+- `bigsister diff <before> <after> --json` compares 2 session folders or `START..END` time windows side by side (tokens, cache hit %, cost, turns, compactions and waste).
 - `--since 24h` (or `30d`, a date, or an RFC 3339 time) sets the window; `--agent claude` (or `codex`, `pi`, `opencode`, `gemini`, `qwen`) limits it to one agent; `--limit N` sets the rows per table.
 - `--sample` runs on synthetic transcripts built into `bigsister`, to show the user a report before reading theirs.
 
@@ -34,12 +35,13 @@ The JSON holds `roots` (what was scanned, with lines skipped), `since` and `dete
 | What loads before my first message? | `startup` | `summary.median_total_chars` and the 'By source' table (instruction files, hook output, listings, tool schemas, MCP instructions) |
 | Which MCP server costs most? | `context` | The 'By MCP server' table, by `est_input_tokens` (needs the request log recent Claude Code versions write) |
 | Which tools or skills load but are never used? | `schemas` | Rows by `idle_chars`, `idle_tokens_est` and `idle_usd_est`, against `sessions_loaded` and `sessions_called` |
-| Is my cache expiring? | `cache` | `summary.idle_rebuild_share` and `idle_rebuilds`; the table splits write tokens by `cause` |
+| Is my cache expiring? | `cache` | `summary.idle_rebuild_share` and `idle_rebuilds`; the table splits write tokens by `cause` and highlights sub-5-minute cache busts |
 | Which model or subagent costs most? | `models` | Input-side cost by model, effort and subagent type; `subagent_sessions_on_top_model` |
 | Which tool results are largest or keep erroring? | `tools` | Per tool calls, result characters, errors, cascades and retry churn |
-| Is the agent polling or re-reading files? | `polls`, `rereads` | Repeated commands with no edit between; files read again after a compaction |
+| Is the agent polling or re-reading files? | `polls`, `rereads` | Repeated commands after failures or truncated outputs; compaction health (`post_pre_ratio`, thrashing, churn) and post-compaction re-reads |
 | Are tests failing behind a pipe? | `pipes` | Test runs piped into `tail` or `head` without `pipefail` |
 | Are hooks slow? | `hooks` | Runs, cancellations, timeouts and median, p90 and max milliseconds by hook |
+| How did 2 windows or folders compare? | `diff <before> <after>` | Side-by-side deltas for tokens, cache hit %, cost, turns, compactions and waste |
 
 Most sections cover Claude Code only; `bigsister --help` lists the agents each one reads.
 

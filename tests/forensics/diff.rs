@@ -242,14 +242,17 @@ fn diff_reports_clear_errors_for_bad_targets() {
     assert_eq!(code, 1);
     assert!(stderr.contains("expected START..END"), "{stderr}");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
-        .args(["diff", "9999-12-31..now", "2026-11-01..now"])
-        .env("TZ", "UTC")
-        .output()
-        .expect("run");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(out.status.code(), Some(1));
-    assert!(stderr.contains("out of range"), "{stderr}");
+    #[cfg(unix)]
+    {
+        let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
+            .args(["diff", "9999-12-31..now", "2026-11-01..now"])
+            .env("TZ", "UTC")
+            .output()
+            .expect("run");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(stderr.contains("out of range"), "{stderr}");
+    }
 
     // Relative directory path containing `..` is treated as a folder, not a time window.
     let rel_missing = format!("{}/../definitely-not-a-dir", dir.display());

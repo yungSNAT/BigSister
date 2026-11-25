@@ -3119,6 +3119,8 @@ fn pi_sessions_feed_pipes_polls_and_rereads_once_despite_a_fork() {
     // The re-read's 4,000 characters, read by Claude Fable 5.1 at US$10 per million.
     assert_eq!(rereads["reread_chars"], json!(4000));
     assert_eq!(rereads["reread_usd_est"], json!(0.01));
+    let health = find(rows(&doc, "rereads", 2), &[("agent", json!("pi"))]);
+    assert_eq!(health["churn_rereads"], json!(1));
     let roots = doc["roots"].as_array().expect("roots");
     assert_eq!(roots.len(), 1, "{roots:?}");
     assert_eq!(roots[0]["agent"], json!("pi"));
@@ -3293,6 +3295,33 @@ fn gemini_and_qwen_tool_calls_count_once_under_claude_names() {
             );
         }
     }
+}
+
+#[test]
+fn multiple_gemini_sessions_with_repeated_short_ids_count_every_session() {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("gemini-short-ids");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("proj/chats")).expect("chats folder");
+    let sample = std::fs::read_to_string(
+        Path::new(GEMINI).join("proj/chats/session-2026-11-09T06-00-0c1a2b3d.jsonl"),
+    )
+    .expect("gemini fixture");
+    for name in [
+        "session-2026-11-09T06-00-00000001.jsonl",
+        "session-2026-11-09T07-00-00000002.jsonl",
+    ] {
+        std::fs::write(dir.join("proj/chats").join(name), &sample).expect("write session");
+    }
+    let doc = agent_report("gemini", "--gemini-root", dir.to_str().expect("UTF-8 path"));
+    assert_eq!(doc["roots"][0]["files"], json!(2));
+    let pipes = find(rows(&doc, "pipes", 0), &[("agent", json!("gemini"))]);
+    assert_eq!(pipes["test_runs"], json!(2));
+    let bash = find(
+        rows(&doc, "tools", 0),
+        &[("agent", json!("gemini")), ("tool", json!("Bash"))],
+    );
+    assert_eq!(bash["calls"], json!(6));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

@@ -167,20 +167,28 @@ fn message(m: &Value, uuid: &Value, ts: &Value) -> Option<String> {
 
 /// A `toolCall` block as a Claude `tool_use` block, with pi's built-in tools named as
 /// Claude Code's: `bash` and `powershell` run commands as `Bash` does, `read` reads a
-/// path as `Read` reads `file_path`, and `edit` and `write` change files.
+/// path as `Read` reads `file_path`, and `edit` and `write` change `path` as `Edit` and
+/// `Write` change `file_path` (keeping other fields, so retry churn stays distinct).
 fn tool_use(b: &Value) -> Option<Value> {
     if b.get("type").and_then(Value::as_str) != Some("toolCall") {
         return None;
     }
     let args = b.get("arguments").cloned().unwrap_or(Value::Null);
+    let with_file_path = || {
+        let mut fields = args.as_object().cloned().unwrap_or_default();
+        if let Some(path) = fields.remove("path") {
+            fields.insert("file_path".to_owned(), path);
+        }
+        Value::Object(fields)
+    };
     let (name, input) = match b.get("name").and_then(Value::as_str).unwrap_or("") {
         "bash" | "powershell" => ("Bash", args),
         "read" => {
             let path = args.get("path").cloned().unwrap_or(Value::Null);
             ("Read", json!({"file_path": path}))
         }
-        "edit" => ("Edit", args),
-        "write" => ("Write", args),
+        "edit" => ("Edit", with_file_path()),
+        "write" => ("Write", with_file_path()),
         other => (other, args),
     };
     Some(
@@ -240,13 +248,15 @@ mod tests {
 
     #[test]
     fn a_write_is_a_claude_write_and_another_tool_keeps_its_name() {
-        let line = r#"{"type":"message","id":"a2","parentId":null,"timestamp":"2026-11-09T06:00:00.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"write","arguments":{"path":"/w/b.rs","content":"x"}},{"type":"toolCall","id":"c2","name":"grep","arguments":{"pattern":"y"}}],"model":"m"}}"#;
+        let line = r#"{"type":"message","id":"a2","parentId":null,"timestamp":"2026-11-09T06:00:00.000Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"c1","name":"write","arguments":{"path":"/w/b.rs","content":"x"}},{"type":"toolCall","id":"c2","name":"edit","arguments":{"path":"/w/c.rs","edits":[{"oldText":"a","newText":"b"}]}},{"type":"toolCall","id":"c3","name":"grep","arguments":{"pattern":"y"}}],"model":"m"}}"#;
         assert_eq!(
             parsed(line)["message"]["content"],
             json!([
                 {"type": "tool_use", "id": "c1", "name": "Write",
-                 "input": {"path": "/w/b.rs", "content": "x"}},
-                {"type": "tool_use", "id": "c2", "name": "grep", "input": {"pattern": "y"}},
+                 "input": {"file_path": "/w/b.rs", "content": "x"}},
+                {"type": "tool_use", "id": "c2", "name": "Edit",
+                 "input": {"file_path": "/w/c.rs", "edits": [{"oldText": "a", "newText": "b"}]}},
+                {"type": "tool_use", "id": "c3", "name": "grep", "input": {"pattern": "y"}},
             ])
         );
     }

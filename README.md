@@ -22,49 +22,49 @@ It prints names, paths, counts, sizes and times, as listed under [Privacy](#priv
 
 ## Install
 
-Each [release](https://github.com/yungSNAT/BigSister/releases) carries the executable for Windows (x86_64) and Linux (x86_64, statically linked), with a `SHA256SUMS` file and signed build provenance. There is no macOS build yet; install from source there.
+Each [release](https://github.com/yungSNAT/BigSister/releases) carries 6 prebuilt executables for Linux (`x86_64` and `aarch64`, statically linked with musl), macOS (`x86_64` and `aarch64`) and Windows (`x86_64` and `aarch64`), with a `SHA256SUMS` file, SPDX SBOMs and signed build provenance.
 
-BigSister was called ShaphansAudit until 19 November 2026. The only release so far, v0.1.0, came out under that name: its archives are named `shaphansaudit-0.1.0-*` and its executable is `shaphan`, which the commands below install; with it, run `shaphan` wherever this README says `bigsister`. From the next release the executable is `bigsister`; until then, [install from source](#from-source) to get it. [RELEASE_NOTES.md](RELEASE_NOTES.md) lists what changes for a v0.1.0 install.
+BigSister was called ShaphansAudit at v0.1.0 (executable `shaphan`, repository `yungSNAT/ShaphansAudit`); [RELEASE_NOTES.md](RELEASE_NOTES.md) lists what changed in v0.2.0 for an existing v0.1.0 install.
 
-With the [GitHub CLI](https://cli.github.com/) installed, the installer from [release-policy](https://github.com/ryanduguid/release-policy), which builds the releases, checks who built a release as well as its checksum: it installs nothing unless `gh` verifies `SHA256SUMS` and the archive against the release's signed provenance and the archive matches its `SHA256SUMS` line. It takes the repository under the name the provenance carries, `yungSNAT/ShaphansAudit` for v0.1.0, and installs into `${XDG_DATA_HOME:-$HOME/.local/share}/shaphansaudit` on Linux or `%LOCALAPPDATA%\Programs\shaphansaudit` on Windows; `--modify-path` (`-ModifyPath` on Windows) also adds that folder to your `PATH`. On Linux:
+With the [GitHub CLI](https://cli.github.com/) installed, the installer from [release-policy](https://github.com/ryanduguid/release-policy), which builds the releases, checks who built a release as well as its checksum: it installs nothing unless `gh` verifies `SHA256SUMS` and the archive against the release's signed provenance and the archive matches its `SHA256SUMS` line. It installs into `${XDG_DATA_HOME:-$HOME/.local/share}/bigsister` on Linux and macOS or `%LOCALAPPDATA%\Programs\bigsister` on Windows; `--modify-path` (`-ModifyPath` on Windows) also adds that folder to your `PATH`. On Linux and macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ryanduguid/release-policy/9f68505df98558566564ffe45af1b7213de243b3/scripts/install.sh |
-  sh -s -- --modify-path yungSNAT/ShaphansAudit v0.1.0
+curl -fsSL https://raw.githubusercontent.com/ryanduguid/release-policy/ffbeffd5ff595b9b2fcaa885395ffb21108aaa2b/scripts/install.sh |
+  sh -s -- --modify-path yungSNAT/BigSister v0.2.0
 ```
 
 On Windows, in PowerShell:
 
 ```powershell
-$url = 'https://raw.githubusercontent.com/ryanduguid/release-policy/9f68505df98558566564ffe45af1b7213de243b3/scripts/install.ps1'
-& ([scriptblock]::Create((Invoke-RestMethod $url))) yungSNAT/ShaphansAudit v0.1.0 -ModifyPath
+$url = 'https://raw.githubusercontent.com/ryanduguid/release-policy/ffbeffd5ff595b9b2fcaa885395ffb21108aaa2b/scripts/install.ps1'
+& ([scriptblock]::Create((Invoke-RestMethod $url))) yungSNAT/BigSister v0.2.0 -ModifyPath
 ```
 
-Without the GitHub CLI, check the checksum yourself. On Linux, this downloads v0.1.0, stops if the file does not match `SHA256SUMS`, and installs to `~/.local/bin`, which must be on your `PATH`:
+Without the GitHub CLI, check the checksum yourself. On Linux and macOS, this downloads v0.2.0 (swap `x86_64-unknown-linux-musl` for `aarch64-unknown-linux-musl`, `x86_64-apple-darwin` or `aarch64-apple-darwin` as needed, and use `shasum -a 256 --check` on macOS), stops if the file does not match `SHA256SUMS`, and installs to `~/.local/bin`, which must be on your `PATH`:
 
 ```bash
-base=https://github.com/yungSNAT/BigSister/releases/download/v0.1.0
-asset=shaphansaudit-0.1.0-x86_64-unknown-linux-musl.tar.gz
+base=https://github.com/yungSNAT/BigSister/releases/download/v0.2.0
+asset=bigsister-0.2.0-x86_64-unknown-linux-musl.tar.gz
 curl -fsSLO "$base/$asset" && curl -fsSLO "$base/SHA256SUMS" &&
   awk -v f="$asset" '$2 == f' SHA256SUMS | sha256sum --check &&
-  mkdir -p ~/.local/bin && tar -xzf "$asset" -C ~/.local/bin shaphan &&
-  ~/.local/bin/shaphan --version
+  mkdir -p ~/.local/bin && tar -xzf "$asset" -C ~/.local/bin bigsister &&
+  ~/.local/bin/bigsister --version
 ```
 
-On Windows, in PowerShell:
+On Windows, in PowerShell (swap `x86_64-pc-windows-msvc` for `aarch64-pc-windows-msvc` on arm64):
 
 ```powershell
-$base = 'https://github.com/yungSNAT/BigSister/releases/download/v0.1.0'
-$asset = 'shaphansaudit-0.1.0-x86_64-pc-windows-msvc.zip'
+$base = 'https://github.com/yungSNAT/BigSister/releases/download/v0.2.0'
+$asset = 'bigsister-0.2.0-x86_64-pc-windows-msvc.zip'
 Invoke-WebRequest "$base/$asset" -OutFile $asset
 Invoke-WebRequest "$base/SHA256SUMS" -OutFile SHA256SUMS
 $sum = (Select-String -Path SHA256SUMS -SimpleMatch $asset).Line.Split(' ')[0]
 if ((Get-FileHash $asset -Algorithm SHA256).Hash -ne $sum) { throw 'checksum mismatch' }
-Expand-Archive $asset "$env:LOCALAPPDATA\Programs\shaphan" -Force
-& "$env:LOCALAPPDATA\Programs\shaphan\shaphan.exe" --version
+Expand-Archive $asset "$env:LOCALAPPDATA\Programs\bigsister" -Force
+& "$env:LOCALAPPDATA\Programs\bigsister\bigsister.exe" --version
 ```
 
-A matching checksum shows the download is intact, not who built it. To check that too, run `gh attestation verify <file> --repo yungSNAT/ShaphansAudit --signer-workflow ryanduguid/release-policy/.github/workflows/release-binary.yml --source-ref refs/tags/v0.1.0` with the [GitHub CLI](https://cli.github.com/) (v0.1.0's provenance names the repository as it was then called, so `--repo yungSNAT/BigSister` fails for it); [Verify a release](https://github.com/ryanduguid/release-policy/blob/main/docs/verify-a-release.md) explains what it proves.
+A matching checksum shows the download is intact, not who built it. To check that too, run `gh attestation verify <file> --repo yungSNAT/BigSister --signer-workflow ryanduguid/release-policy/.github/workflows/release-binary.yml --source-ref refs/tags/v0.2.0` with the [GitHub CLI](https://cli.github.com/) (for v0.1.0, use `--repo yungSNAT/ShaphansAudit --source-ref refs/tags/v0.1.0`); [Verify a release](https://github.com/ryanduguid/release-policy/blob/main/docs/verify-a-release.md) explains what it proves.
 
 ### From source
 
@@ -88,7 +88,7 @@ cargo install --locked --path .
 bigsister all
 ```
 
-This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.pi/agent/sessions`, `~/.local/share/opencode`, `~/.gemini/tmp` and `~/.qwen/projects` and prints one section per detector. If none of them exists, it exits 1, names each missing folder but `~/.codex/archived_sessions`, which need not exist, and suggests the sample below. Run one detector by name, for example `bigsister hooks --since 24h`. With the v0.1.0 release, run `shaphan` instead; it predates the `context`, `tools`, `cache` and `models` sections, `--sample` and the pi, OpenCode, Gemini CLI and Qwen Code readers.
+This reads the last 7 days of `~/.claude/projects`, `~/.codex/sessions`, `~/.codex/archived_sessions`, `~/.pi/agent/sessions`, `~/.local/share/opencode`, `~/.gemini/tmp` and `~/.qwen/projects` and prints one section per detector. If none of them exists, it exits 1, names each missing folder but `~/.codex/archived_sessions`, which need not exist, and suggests the sample below. Run one detector by name, for example `bigsister hooks --since 24h`. The v0.2.0 release predates `diff`, sub-TTL cache-bust attribution, compaction health and truncation re-runs; install from source for `main`. With the v0.1.0 release, run `shaphan` instead; it predates `context`, `tools`, `cache`, `models`, `ranked`, `diff`, `--sample` and the pi, OpenCode, Gemini CLI and Qwen Code readers.
 
 To see a full report before you have transcripts of your own, run it on the sample transcripts built into `bigsister`:
 
@@ -208,9 +208,7 @@ The tests run on synthetic fixtures. They plant sentinel strings in message text
 
 Claude Code's, Codex's, Gemini CLI's and Qwen Code's transcript formats are undocumented and change between releases; Gemini CLI's and Qwen Code's are read as versions 0.69.0 and 0.28.0 wrote them on 19 November 2026, and Gemini CLI's older `.json` sessions are not read. `bigsister` skips a line it cannot parse and reports how many it skipped, and reports the Codex commands whose results it could not pair (`codex_commands_not_paired`). [docs/DESIGN.md](docs/DESIGN.md) defines how each format is read and each measure taken.
 
-For usage and cost totals, use [ccusage](https://github.com/ccusage/ccusage). [CodeBurn](https://github.com/getagentseal/codeburn) 0.9.28 `optimize`, [caveman](https://github.com/JuliusBrussee/caveman) 4.1.0 `learn` and [Claude Code](https://github.com/anthropics/claude-code) 2.1.323 `/usage` report priced setup waste. According to their documentation as read on 13 November 2026 ([optimize](https://github.com/getagentseal/codeburn/blob/main/docs/optimize.md), [learn](https://github.com/JuliusBrussee/caveman/blob/main/docs/technical/learn.md), [costs](https://code.claude.com/docs/en/costs)), none reports test failures hidden by a pipe or polls split from reruns after an edit. Claude Code's `/usage` and Codex's `/status` are built in, where `bigsister` needs an install; it reads the past transcripts of both agents in one report. [claudeglass](https://github.com/PaulMorrisDev/claudeglass) 0.17.0, whose README was read on 16 November 2026, reads Claude Code only and checks each hook's failures and blocked calls, not its durations or cancellations. CodeBurn exports its usage records as CSV or JSON; `bigsister` prints its findings as JSON or CSV.
-
-As read on 17 November 2026, [antiburn](https://github.com/antiburn/antiburn) 0.11.0, a desktop app for 12 agents, checks cache rehydration, subagents on premium models, old models and unused built-in tools, MCP servers and skills, overlapping `bigsister`'s `cache`, `models` and `schemas` sections, and from 0.11.0 runs Burn Checks you write in YAML (format `v1-alpha`); its README names no check for piped test failures, polls, re-reads after a compaction or hooks. [Token Meter](https://github.com/splunk/token-meter), a local dashboard in beta on Windows, shows spend share by model, cache hit ratio, subagent cost per run and unused tool definitions, skills and MCP servers, and, if you opt in, cheaper models or lower reasoning effort that would likely have done the job; its README says nothing of hooks, pipes or polls. Claude Code's [`/doctor`](https://code.claude.com/docs/en/skills) checkup, which Claude runs in a session, covers unused skills, MCP servers and plugins against their context cost, and slow hooks, and [`/skill-doctor`](https://code.claude.com/docs/en/commands) shows each skill's context cost and use; `bigsister` gives, without a model, per tool, MCP server and skill, the sessions that loaded and called it and the characters loaded in sessions that never did. Claude Code's [OpenTelemetry](https://code.claude.com/docs/en/monitoring-usage) event `claude_code.hook_execution_complete` and span `claude_code.hook` (the span only under detailed beta tracing) give each hook event's cancelled hooks and the duration of all its matching hooks together, for sessions run with telemetry on; `bigsister`'s `hooks` section adds timeouts and each hook's median, 90th percentile and maximum, from transcripts already saved.
+For full usage and cost totals, use a dedicated usage counter. Comparable third-party tools and [Claude Code](https://github.com/anthropics/claude-code) 2.1.323 `/usage` report priced setup waste, cache rehydration, unused tool schemas and skills, lower-cost model suggestions or hook failures and blocks, and comparable tools export records as JSON or CSV. None documented reporting test failures hidden by a pipe, polls split from reruns after an edit, re-reads after a compaction or per-hook duration percentiles from saved transcripts without telemetry. Claude Code's `/usage`, [`/doctor`](https://code.claude.com/docs/en/skills), [`/skill-doctor`](https://code.claude.com/docs/en/commands) and Codex's `/status` are built in, where `bigsister` needs an install; `bigsister` reads past transcripts across all 6 supported agents in one report without a model. Claude Code's [OpenTelemetry](https://code.claude.com/docs/en/monitoring-usage) event `claude_code.hook_execution_complete` and span `claude_code.hook` (the span only under detailed beta tracing) give each hook event's cancelled hooks and the duration of all its matching hooks together, for sessions run with telemetry on; `bigsister`'s `hooks` section adds timeouts and each hook's median, 90th percentile and maximum, from transcripts already saved.
 
 ## Development
 
@@ -222,7 +220,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-The fuzz target in `fuzz/` feeds any bytes to the transcript reader and every detector as Claude, Codex and pi transcripts, plain and compressed. CI runs it for 5 minutes every Monday. It needs a nightly toolchain and `cargo install cargo-fuzz`; run it with `cargo +nightly fuzz run transcript`. A crash leaves its input in `fuzz/artifacts/`; turn it into a test before fixing it.
+The fuzz target in `fuzz/` feeds any bytes to the transcript reader and every detector as Claude, Codex, pi, Gemini, Qwen and OpenCode transcripts (plain and compressed), `diff`, and the text, JSON and CSV report renderers. CI runs it for 5 minutes every Monday. It needs a nightly toolchain and `cargo install cargo-fuzz`; run it with `cargo +nightly fuzz run transcript`. A crash leaves its input in `fuzz/artifacts/`; turn it into a test before fixing it.
 
 ## Credits
 

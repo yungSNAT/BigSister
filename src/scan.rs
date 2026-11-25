@@ -1024,8 +1024,10 @@ struct Window<'a> {
     prices: &'a Prices,
 }
 
-/// The `uuid` of each Claude-shaped record parsed in an earlier file, and the message id
-/// of each Claude Code reply.
+/// The `uuid` of each Claude Code or pi record parsed in an earlier file, and the message
+/// id of each Claude Code reply. Gemini CLI, Qwen Code and OpenCode sessions do not copy
+/// records across files and use per-session short IDs such as `g-0`, so they are not
+/// stored or checked here.
 ///
 /// shortcut: every uuid and message id of the scan is held as a string, about 100 bytes
 /// each (a million uuids added 96 MB of peak memory, 14 November 2026). Holding a uuid as
@@ -1046,12 +1048,16 @@ impl Earlier {
     /// Holds the `uuids` and reply message ids `replies` of `agent`'s file `path`, once it
     /// is read.
     fn add(&mut self, agent: Agent, path: &Path, uuids: HashSet<String>, replies: HashSet<String>) {
-        self.replies.extend(replies);
-        if agent == Agent::Pi {
-            let name = path.file_name().unwrap_or_default().to_string_lossy();
-            self.pi.insert(name.into_owned(), uuids);
-        } else {
-            self.claude.extend(uuids);
+        match agent {
+            Agent::Claude => {
+                self.claude.extend(uuids);
+                self.replies.extend(replies);
+            }
+            Agent::Pi => {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                self.pi.insert(name.into_owned(), uuids);
+            }
+            Agent::Codex | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {}
         }
     }
 }
@@ -1292,17 +1298,17 @@ impl<'a, 'b> Feed<'a, 'b> {
     }
 
     /// Whether a parsed record copies an earlier file's record, or `None` when it
-    /// repeats one of this file's. Claude Code can write a record again later in its
-    /// file, with the same uuid; such a record counts nowhere. A resumed session's file
-    /// starts with copies of the earlier file's records; such a copy still builds the
-    /// session's state but counts nowhere, as does a pi path given again at a branch, and
-    /// a Claude Code reply's block whose message id an earlier file holds, under any uuid.
-    /// A pi session holds copies only of the file its header names.
+    /// repeats one of this file's. Only Claude Code and pi carry cross-file copies:
+    /// Claude Code can write a record again later in its file with the same uuid (skipped),
+    /// start a resumed session's file with copies of an earlier file's records, or write a
+    /// reply's block in another file under a new uuid; pi forks copy the file named in
+    /// their header, or replay a branch path within a file. Gemini CLI, Qwen Code and
+    /// OpenCode never copy across files, so their per-session short IDs never collide.
     fn copied(&mut self, value: &Value) -> Option<bool> {
         if self.replaying {
             return Some(true);
         }
-        if !self.session.agent.claude_shaped() {
+        if !matches!(self.session.agent, Agent::Claude | Agent::Pi) {
             return Some(false);
         }
         let Some(uuid) = value.get("uuid").and_then(Value::as_str) else {
@@ -1316,7 +1322,7 @@ impl<'a, 'b> Feed<'a, 'b> {
                 .as_deref()
                 .and_then(|name| self.earlier.pi.get(name))
                 .is_some_and(|uuids| uuids.contains(uuid))
-        } else if self.session.agent == Agent::Claude {
+        } else {
             let reply = value
                 .pointer("/message/id")
                 .and_then(Value::as_str)
@@ -1324,8 +1330,6 @@ impl<'a, 'b> Feed<'a, 'b> {
             self.replies.extend(reply.map(str::to_owned));
             self.earlier.claude.contains(uuid)
                 || reply.is_some_and(|id| self.earlier.replies.contains(id))
-        } else {
-            self.earlier.claude.contains(uuid)
         })
     }
 
@@ -2178,5 +2182,81 @@ mod tests {
             ]
         );
         fs::remove_dir_all(&dir).expect("clean up");
+    }
+
+    struct InWindowCount(BTreeMap<Agent, u64>);
+    impl Detector for InWindowCount {
+        fn agents(&self) -> &'static [Agent] {
+            &[Agent::Claude, Agent::Gemini, Agent::Qwen]
+        }
+        fn scans_whole_file(&self) -> bool {
+            true
+        }
+        fn wants(&self, _s: &Session, _line: &str) -> bool {
+            true
+        }
+        fn record(&mut self, s: &Session, r: &Record<'_>) {
+            if r.in_window && r.kind() == "assistant" {
+                *self.0.entry(s.agent).or_default() += 1;
+            }
+        }
+        fn section(&self, _opts: &Opts) -> Section {
+            Section {
+                summary: self
+                    .0
+                    .iter()
+                    .map(|(a, n)| (a.name().to_owned(), (*n).into()))
+                    .collect(),
+                ..Section::default()
+            }
+        }
+    }
+
+    #[test]
+    fn non_claude_agents_do_not_collide_on_short_per_session_ids() {
+        let dir = test_dir("short-ids");
+        let _ = fs::remove_dir_all(&dir);
+        for sub in ["claude", "gemini", "qwen"] {
+            fs::create_dir_all(dir.join(sub)).expect("mkdir");
+        }
+        let claude_rec = r#"{"type":"assistant","uuid":"g-0","timestamp":"2026-11-08T01:00:00Z","message":{"id":"m1","model":"claude-opus-5-5"}}"#;
+        fs::write(dir.join("claude/c1.jsonl"), claude_rec).expect("c1");
+        fs::write(dir.join("claude/c2.jsonl"), claude_rec).expect("c2");
+        let gemini_rec = r#"{"id":"g-0","type":"gemini","timestamp":"2026-11-08T02:00:00Z","model":"gemini-2.5-pro","toolCalls":[]}"#;
+        fs::write(dir.join("gemini/s1.jsonl"), gemini_rec).expect("g1");
+        fs::write(dir.join("gemini/s2.jsonl"), gemini_rec).expect("g2");
+        let qwen_rec = r#"{"uuid":"g-0","type":"assistant","timestamp":"2026-11-08T03:00:00Z","model":"qwen3-coder-plus","message":{"parts":[]}}"#;
+        fs::write(dir.join("qwen/s1.jsonl"), qwen_rec).expect("q1");
+        fs::write(dir.join("qwen/s2.jsonl"), qwen_rec).expect("q2");
+
+        let prices = Prices::bundled();
+        let mut dets: Vec<Box<dyn Detector>> = vec![Box::new(InWindowCount(BTreeMap::new()))];
+        let _ = scan(
+            &[
+                (Agent::Claude, dir.join("claude")),
+                (Agent::Gemini, dir.join("gemini")),
+                (Agent::Qwen, dir.join("qwen")),
+            ],
+            Some(Timestamp::MIN),
+            &prices,
+            &mut dets,
+        );
+        let opts = Opts {
+            limit: 0,
+            paths: false,
+            by_branch: false,
+            home: None,
+            usd_per_mtok: None,
+            prices_file: None,
+        };
+        assert_eq!(
+            dets[0].section(&opts).summary,
+            vec![
+                ("claude".to_owned(), 1u64.into()),
+                ("gemini".to_owned(), 2u64.into()),
+                ("qwen".to_owned(), 2u64.into()),
+            ]
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

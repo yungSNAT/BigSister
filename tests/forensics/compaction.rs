@@ -374,3 +374,71 @@ fn codex_same_id_duplicate_before_idless_mirror_coalesces_at_compaction_boundary
         );
     }
 }
+
+#[test]
+fn pi_edit_and_write_paths_feed_compaction_health() {
+    let pi_root = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/pi");
+    let fixture_doc = super::run_json("rereads", &["--agent", "pi", "--pi-root", pi_root]);
+    let rows = super::table_rows(&fixture_doc, "rereads", "Compaction health");
+    let row = super::find_row(rows, &[("agent", json!("pi")), ("scope", json!("main"))]);
+    assert_eq!(row["churn_rereads"], 1);
+
+    let dir = super::temp_dir("ct", "pi-write-edit");
+    let lines = vec![
+        json!({"type": "session", "version": 3, "id": "pi-churn", "timestamp": "2026-11-09T06:00:00.000Z", "cwd": "/work/proj"}).to_string(),
+        json!({"type": "message", "id": "m1", "parentId": null, "timestamp": "2026-11-09T06:01:00.000Z", "message": {"role": "assistant", "model": "claude-fable-5-1", "content": [{"type": "toolCall", "id": "c1", "name": "write", "arguments": {"path": "/work/proj/w.rs", "content": "fn main() {}"}}]}}).to_string(),
+        json!({"type": "compaction", "id": "m2", "parentId": "m1", "timestamp": "2026-11-09T06:02:00.000Z", "summary": "s", "firstKeptEntryId": "m1", "tokensBefore": 5000}).to_string(),
+        json!({"type": "message", "id": "m3", "parentId": "m2", "timestamp": "2026-11-09T06:03:00.000Z", "message": {"role": "assistant", "model": "claude-fable-5-1", "content": [{"type": "toolCall", "id": "c2", "name": "read", "arguments": {"path": "/work/proj/w.rs"}}]}}).to_string(),
+        json!({"type": "message", "id": "m4", "parentId": "m3", "timestamp": "2026-11-09T06:04:00.000Z", "message": {"role": "assistant", "model": "claude-fable-5-1", "content": [{"type": "toolCall", "id": "c3", "name": "edit", "arguments": {"path": "/work/proj/w.rs", "edits": []}}]}}).to_string(),
+    ];
+    super::write_jsonl(&dir, "--work-proj--/s.jsonl", &lines);
+    let doc = super::run_json(
+        "rereads",
+        &["--agent", "pi", "--pi-root", dir.to_str().unwrap()],
+    );
+    let s = &doc["detectors"]["rereads"]["summary"];
+    assert_eq!(s["post_compaction_churn_rereads"], 1);
+    assert_eq!(s["post_compaction_churn_reedits"], 1);
+    assert_eq!(s["post_compaction_revert_cycles"], 1);
+}
+
+#[test]
+fn codex_exec_cell_edits_track_churn_and_reverts() {
+    let dir = super::temp_dir("ct", "codex-exec-edits");
+    let exec_call = |ts: &str, id: &str, input: &str| {
+        json!({"type": "response_item", "timestamp": ts, "payload": {"type": "custom_tool_call", "name": "exec", "call_id": id, "input": input}})
+            .to_string()
+    };
+    let lines = vec![
+        exec_call(
+            "2026-11-08T01:00:00Z",
+            "e1",
+            "await tools.apply_patch(`*** Begin Patch\n*** Update File: /work/p.rs\n+writeFile('/work/ignored.rs', 'x');\n*** End Patch`);",
+        ),
+        exec_call(
+            "2026-11-08T01:00:05Z",
+            "e2",
+            "writeFile('/work/w.rs', 'a'); writeFileSync('/work/ws.rs', 'b');",
+        ),
+        json!({"type": "compacted", "timestamp": "2026-11-08T01:01:00Z"}).to_string(),
+        exec_call(
+            "2026-11-08T01:01:05Z",
+            "r1",
+            "readFile('/work/p.rs'); readFile('/work/w.rs'); readFileSync('/work/ws.rs'); readFile('/work/ignored.rs');",
+        ),
+        exec_call(
+            "2026-11-08T01:01:10Z",
+            "e3",
+            "await tools.apply_patch(\"*** Begin Patch\\n*** Update File: /work/p.rs\\n*** End Patch\"); writeFile('/work/w.rs', 'a2'); writeFileSync('/work/ws.rs', 'b2');",
+        ),
+    ];
+    super::write_jsonl(&dir, "2026/rollout.jsonl", &lines);
+    let doc = super::run_json(
+        "rereads",
+        &["--agent", "codex", "--codex-root", dir.to_str().unwrap()],
+    );
+    let s = &doc["detectors"]["rereads"]["summary"];
+    assert_eq!(s["post_compaction_churn_rereads"], 3);
+    assert_eq!(s["post_compaction_churn_reedits"], 3);
+    assert_eq!(s["post_compaction_revert_cycles"], 3);
+}

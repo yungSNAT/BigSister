@@ -275,30 +275,39 @@ pub(super) fn claude_edit_paths(b: &Value) -> Vec<String> {
         .collect()
 }
 
-/// File paths patched by a Codex `apply_patch` call.
+/// File paths patched or written by a Codex `apply_patch` function call or `exec` cell.
 pub(super) fn codex_patch_paths(r: &Record<'_>) -> Vec<String> {
-    let Some(raw) = r
-        .value
-        .get("payload")
-        .filter(|p| {
-            p.get("type").and_then(Value::as_str) == Some("function_call")
-                && name_of(p) == "apply_patch"
-        })
-        .and_then(|p| p.get("arguments"))
-        .and_then(Value::as_str)
-    else {
+    let Some(p) = r.value.get("payload") else {
         return Vec::new();
     };
-    let text = serde_json::from_str::<Value>(raw)
-        .ok()
-        .and_then(|v| {
-            v.get("input")
-                .or_else(|| v.get("patch"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .unwrap_or_else(|| raw.to_owned());
-    patch_headers(&text)
+    match p.get("type").and_then(Value::as_str) {
+        Some("function_call") if name_of(p) == "apply_patch" => {
+            let Some(raw) = p.get("arguments").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            let text = serde_json::from_str::<Value>(raw)
+                .ok()
+                .and_then(|v| {
+                    v.get("input")
+                        .or_else(|| v.get("patch"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| raw.to_owned());
+            patch_headers(&text)
+        }
+        Some("custom_tool_call") if name_of(p) == "exec" => {
+            let Some(input) = p.get("input").and_then(Value::as_str) else {
+                return Vec::new();
+            };
+            let (patches, mut paths) = crate::shell::codex_edit_targets(input);
+            for text in patches {
+                paths.extend(patch_headers(&text));
+            }
+            paths
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn patch_headers(text: &str) -> Vec<String> {
@@ -336,3 +345,55 @@ fn min_ratio(values: &[f64]) -> Value {
 
 /// Note explaining compaction health metrics.
 pub(super) const HEALTH_NOTE: &str = "Compaction health measures post/pre retention ratio (postTokens when recorded on the boundary, else the next non-synthetic reply's input tokens, divided by preTokens), flagging extreme loss (> 95% dropped, post/pre < 0.05) and compaction thrashing (< 10% saved across 2 or more consecutive passes). Churn rereads, churn reedits and revert cycles count files edited before a compaction that are re-read, re-edited or re-read then re-edited within 5 turns after the compaction.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(value: Value) -> Record<'static> {
+        let leaked: &'static Value = Box::leak(Box::new(value));
+        Record {
+            value: leaked,
+            in_window: true,
+        }
+    }
+
+    #[test]
+    fn codex_patch_paths_extracts_function_and_exec_cell_edits() {
+        assert!(codex_patch_paths(&rec(json!({}))).is_empty());
+        assert!(
+            codex_patch_paths(&rec(
+                json!({"payload": {"type": "function_call", "name": "apply_patch"}})
+            ))
+            .is_empty()
+        );
+        assert!(
+            codex_patch_paths(&rec(
+                json!({"payload": {"type": "custom_tool_call", "name": "exec"}})
+            ))
+            .is_empty()
+        );
+        assert!(
+            codex_patch_paths(&rec(
+                json!({"payload": {"type": "function_call", "name": "shell", "arguments": "{}"}})
+            ))
+            .is_empty()
+        );
+
+        let exec_cell = rec(json!({
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "exec",
+                "input": concat!(
+                    "await tools.apply_patch(\"*** Begin Patch\\n*** Update File: /w/p.rs\\n",
+                    "+writeFile('/w/ignored.rs', 'x');\\n*** End Patch\");\n",
+                    "writeFile('/w/w1.rs', 'a'); writeFileSync('/w/w2.rs', 'b');"
+                )
+            }
+        }));
+        assert_eq!(
+            codex_patch_paths(&exec_cell),
+            vec!["/w/w1.rs", "/w/w2.rs", "/w/p.rs"]
+        );
+    }
+}

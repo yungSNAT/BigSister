@@ -28,8 +28,12 @@ mod forensics {
     }
 
     pub(super) fn run(args: &[&str]) -> (i32, String, String) {
+        let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join("home-empty-forensics");
+        fs::create_dir_all(&home).expect("home folder");
         let out = Command::new(env!("CARGO_BIN_EXE_bigsister"))
             .args(args)
+            .env("HOME", &home)
+            .env("USERPROFILE", &home)
             .output()
             .expect("run bigsister");
         (

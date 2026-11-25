@@ -164,7 +164,9 @@ impl Tracker {
     /// Inspects non-reply metadata records that explain why a subsequent prefix changed.
     pub(super) fn observe_meta(&mut self, r: &Record<'_>) {
         match r.kind() {
-            "api-request-shape" => self.note_shape(r.value.get("id").and_then(Value::as_str)),
+            "api-request-shape" => {
+                self.note_shape(r.value.get("shapeHash").and_then(Value::as_str))
+            }
             "api-request" => self.note_api_request(r.value),
             "attachment" => {
                 let kind = r
@@ -312,7 +314,7 @@ impl Tracker {
     }
 
     fn note_api_request(&mut self, v: &Value) {
-        if let Some(shape) = v.get("shape").and_then(Value::as_str) {
+        if let Some(shape) = v.get("shapeHash").and_then(Value::as_str) {
             self.note_shape(Some(shape));
         }
         if let Some(keep) = v
