@@ -840,12 +840,13 @@ fn call_first_string_arg(input: &str, after_ident: usize) -> Option<(usize, Opti
     if !matches!(bytes.get(k), Some(b'"' | b'\'' | b'`')) {
         return None;
     }
-    let Some(end) = scan_js_string(bytes, k) else {
-        return Some((bytes.len(), None));
-    };
-    if bytes[k] == b'`' && substitutes(&input[k..end]) {
+    let end = scan_js_string(bytes, k);
+    if bytes[k] == b'`' && substitutes(&input[k..end.unwrap_or(bytes.len())]) {
         return None;
     }
+    let Some(end) = end else {
+        return Some((bytes.len(), None));
+    };
     let val = is_whole_lit(input, k, end).then(|| js_unescape(&input[k..end]));
     Some((end, val))
 }
@@ -882,6 +883,9 @@ fn scan_edit_ident(
 /// Patch texts from `apply_patch(...)` and literal paths from `writeFile(...)` /
 /// `writeFileSync(...)` in a Codex `exec` cell, skipping JS comments and non-interpolated
 /// string/template text whilst scanning executable `${...}` template expressions.
+///
+/// shortcut: JavaScript regex literals (such as `/}/` inside `${...}`) are not lexed,
+/// matching the rest of this non-AST Codex cell scanner.
 #[must_use]
 pub fn codex_edit_targets(input: &str) -> (Vec<String>, Vec<String>) {
     let bytes = input.as_bytes();
@@ -1399,6 +1403,7 @@ const s = readFile('C:\\hub\\b.md'); await tools.apply_patch(p);"#;
             "await tools.apply_patch(\"*** Begin Patch\\n*** Update File: outer.rs\\n+writeFile('ghost_in_patch.rs', 'x')\\n+apply_patch('*** Begin Patch\\\\n*** Add File: inner.rs\\\\n*** End Patch')\\n*** End Patch\");\n",
             "fs.writeFileSync('escaped\\'quote.rs', 'ok');\n",
             "my_writeFile('ignored_ident.rs', 'x');\n",
+            "const f = writeFile; writeFile(dynamicPath, 'x');\n",
             "writeFile('dyn/' + part, 'x'); writeFileSync(`${dir}/v.rs`, 'x');\n",
             "writeFile('unterminated",
         );
@@ -1429,6 +1434,10 @@ const s = readFile('C:\\hub\\b.md'); await tools.apply_patch(p);"#;
         let (tpl_patches, tpl_writes) = codex_edit_targets(tpl_exec);
         assert!(tpl_patches.is_empty());
         assert_eq!(tpl_writes, vec!["interp.rs", "nested_interp.rs"]);
+        assert_eq!(
+            codex_edit_targets("writeFile(`${writeFile('unterm_inner.rs', 'x')}"),
+            (Vec::new(), vec!["unterm_inner.rs".to_owned()])
+        );
     }
 
     #[test]
