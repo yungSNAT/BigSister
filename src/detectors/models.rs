@@ -288,14 +288,7 @@ impl Detector for Models {
             .entry(key)
             .or_default()
             .add(&reply, weighted, price);
-        self.branches
-            .entry(reply.branch.map_or_else(|| NONE.to_owned(), printed_branch))
-            .or_default()
-            .add(&reply, weighted, price);
-        self.days
-            .entry(local_day(r.value))
-            .or_default()
-            .add(&reply, weighted, price);
+        self.add_by_branch_and_day(r.value, &reply, weighted, price);
         if price.is_none() {
             let tokens = reply.input.saturating_add(u.write).saturating_add(u.read);
             self.unpriced_tokens = self.unpriced_tokens.saturating_add(tokens);
@@ -347,14 +340,7 @@ impl Detector for Models {
                 .into_iter()
                 .map(|(k, v)| (k.to_owned(), v))
                 .collect(),
-            tables: [
-                Some(self.table(opts)),
-                opts.by_branch.then(|| self.branch_table(opts)),
-                opts.by_day.then(|| self.day_table(opts)),
-            ]
-            .into_iter()
-            .flatten()
-            .collect(),
+            tables: self.tables(opts),
             notes: notes(opts),
         }
     }
@@ -403,6 +389,36 @@ pub(crate) struct DiffTotals {
 }
 
 impl Models {
+    /// Counts `reply`, of record `v`, under its Git branch and its local day.
+    fn add_by_branch_and_day(
+        &mut self,
+        v: &Value,
+        reply: &Reply<'_>,
+        weighted: f64,
+        price: Option<f64>,
+    ) {
+        self.branches
+            .entry(reply.branch.map_or_else(|| NONE.to_owned(), printed_branch))
+            .or_default()
+            .add(reply, weighted, price);
+        self.days
+            .entry(local_day(v))
+            .or_default()
+            .add(reply, weighted, price);
+    }
+
+    /// The first table, then the tables by branch and by day when asked for.
+    fn tables(&self, opts: &Opts) -> Vec<Table> {
+        [
+            Some(self.table(opts)),
+            opts.by_branch.then(|| self.branch_table(opts)),
+            opts.by_day.then(|| self.day_table(opts)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
     /// Unrounded input-side USD total and unpriced/skipped reply counts across all groups.
     pub(crate) fn diff_totals(&self, rate: Option<f64>) -> DiffTotals {
         let input_usd: f64 = self.groups.values().map(|g| g.cost.usd(rate)).sum();
