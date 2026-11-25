@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 /// Find where your coding agent's tokens go, from its own transcripts.
 ///
-/// Reads Claude Code, Codex, pi, OpenCode, Gemini CLI and Qwen Code transcripts on this
+/// Reads Claude Code, Codex, pi, OpenCode, Gemini CLI, Qwen Code and Antigravity transcripts on this
 /// machine and prints names, counts and sizes. Never prints message text, tool inputs or tool outputs.
 #[derive(Parser, Debug)]
 #[command(name = "bigsister", version)]
@@ -26,6 +26,7 @@ pub struct Cli {
             "opencode_root",
             "gemini_root",
             "qwen_root",
+            "antigravity_root",
         ]
     )]
     pub sample: bool,
@@ -61,6 +62,10 @@ pub struct Cli {
     /// Qwen Code session folder [default: ~/.qwen/projects]
     #[arg(long, global = true, value_name = "DIR")]
     pub qwen_root: Option<PathBuf>,
+
+    /// Antigravity conversation folder [default: ~/.gemini/antigravity/brain]
+    #[arg(long, global = true, value_name = "DIR")]
+    pub antigravity_root: Option<PathBuf>,
 
     /// Print one JSON object instead of tables
     #[arg(long, global = true)]
@@ -115,13 +120,13 @@ pub enum Command {
     Context,
     /// Tool schemas loaded against tools called, and skills listed against skills used (Claude)
     Schemas,
-    /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex, pi, OpenCode, Gemini, Qwen)
+    /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex, pi, OpenCode, Gemini, Qwen, Antigravity)
     Pipes,
-    /// Commands repeated with no edit in between (Claude, Codex, pi, OpenCode, Gemini, Qwen)
+    /// Commands repeated with no edit in between (Claude, Codex, pi, OpenCode, Gemini, Qwen, Antigravity)
     Polls,
     /// Files read again after a context compaction (Claude, Codex, pi, OpenCode, Qwen)
     Rereads,
-    /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi, OpenCode, Gemini, Qwen)
+    /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi, OpenCode, Gemini, Qwen, Antigravity)
     Tools,
     /// Cache writes by cause: new context, or rebuilds after an idle gap, a model switch or otherwise (Claude)
     Cache,
@@ -152,5 +157,6 @@ pub enum AgentChoice {
     Opencode,
     Gemini,
     Qwen,
+    Antigravity,
     All,
 }

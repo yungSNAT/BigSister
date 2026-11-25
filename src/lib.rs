@@ -1,5 +1,6 @@
 //! BigSister: where a coding agent's tokens and checks go, from its own transcripts.
 
+pub mod antigravity;
 pub mod cli;
 pub mod detectors;
 pub mod diff;
@@ -223,6 +224,7 @@ pub(crate) fn chosen(cli: &Cli) -> Option<Agent> {
         AgentChoice::Opencode => Some(Agent::OpenCode),
         AgentChoice::Gemini => Some(Agent::Gemini),
         AgentChoice::Qwen => Some(Agent::Qwen),
+        AgentChoice::Antigravity => Some(Agent::Antigravity),
     }
 }
 
@@ -246,6 +248,11 @@ pub(crate) fn resolve_roots(
         ),
         (Agent::Gemini, cli.gemini_root.clone(), ".gemini/tmp"),
         (Agent::Qwen, cli.qwen_root.clone(), ".qwen/projects"),
+        (
+            Agent::Antigravity,
+            cli.antigravity_root.clone(),
+            ".gemini/antigravity/brain",
+        ),
     ];
     let mut roots = Vec::new();
     let mut skipped = Vec::new();

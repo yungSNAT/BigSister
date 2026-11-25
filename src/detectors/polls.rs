@@ -130,12 +130,18 @@ impl Detector for Polls {
             Agent::OpenCode,
             Agent::Gemini,
             Agent::Qwen,
+            Agent::Antigravity,
         ]
     }
 
     fn wants(&self, s: &Session, line: &str) -> bool {
         match s.agent {
-            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {
+            Agent::Claude
+            | Agent::Pi
+            | Agent::OpenCode
+            | Agent::Gemini
+            | Agent::Qwen
+            | Agent::Antigravity => {
                 line.contains("\"tool_use\"")
                     || self.claude.wants(line)
                     || (self.truncation.has_pending() && line.contains("\"type\":\"assistant\""))
@@ -183,7 +189,12 @@ impl Detector for Polls {
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
         match s.agent {
-            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {
+            Agent::Claude
+            | Agent::Pi
+            | Agent::OpenCode
+            | Agent::Gemini
+            | Agent::Qwen
+            | Agent::Antigravity => {
                 self.truncation.note_claude_turn(r);
                 for b in tool_uses(r) {
                     let id = b.get("id").and_then(Value::as_str);

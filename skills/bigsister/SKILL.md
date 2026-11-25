@@ -20,10 +20,10 @@ This reads the last 7 days of the agents' default transcript folders and prints 
 
 - `bigsister <section> --json` runs one section: `startup`, `context`, `schemas`, `pipes`, `polls`, `rereads`, `tools`, `cache`, `models` or `hooks`.
 - `bigsister diff <before> <after> --json` compares 2 session folders or `START..END` time windows side by side (tokens, cache hit %, cost, turns, compactions and waste).
-- `--since 24h` (or `30d`, a date, or an RFC 3339 time) sets the window; `--agent claude` (or `codex`, `pi`, `opencode`, `gemini`, `qwen`) limits it to one agent; `--limit N` sets the rows per table.
+- `--since 24h` (or `30d`, a date, or an RFC 3339 time) sets the window; `--agent claude` (or `codex`, `pi`, `opencode`, `gemini`, `qwen`, `antigravity`) limits it to one agent; `--limit N` sets the rows per table.
 - `--sample` runs on synthetic transcripts built into `bigsister`, to show the user a report before reading theirs.
 
-If none of the folders exists, it exits 1 and names what is missing; pass the right folder with `--claude-root`, `--codex-root`, `--pi-root`, `--opencode-root`, `--gemini-root` or `--qwen-root`.
+If none of the folders exists, it exits 1 and names what is missing; pass the right folder with `--claude-root`, `--codex-root`, `--pi-root`, `--opencode-root`, `--gemini-root`, `--qwen-root` or `--antigravity-root`.
 
 ## Which section answers which question
 

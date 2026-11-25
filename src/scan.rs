@@ -13,6 +13,7 @@ use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
 use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
 use serde_json::Value;
 
+use crate::antigravity::Antigravity;
 use crate::gemini::{Gemini, Rewrite};
 use crate::prices::Prices;
 use crate::report::{Opts, Section};
@@ -27,6 +28,7 @@ pub enum Agent {
     OpenCode,
     Gemini,
     Qwen,
+    Antigravity,
 }
 
 impl Agent {
@@ -39,6 +41,7 @@ impl Agent {
             Agent::OpenCode => "opencode",
             Agent::Gemini => "gemini",
             Agent::Qwen => "qwen",
+            Agent::Antigravity => "antigravity",
         }
     }
 
@@ -49,7 +52,12 @@ impl Agent {
     pub fn claude_shaped(self) -> bool {
         matches!(
             self,
-            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen
+            Agent::Claude
+                | Agent::Pi
+                | Agent::OpenCode
+                | Agent::Gemini
+                | Agent::Qwen
+                | Agent::Antigravity
         )
     }
 }
@@ -234,7 +242,11 @@ pub(crate) fn scan_range_dyn(
             out.push(st);
             continue;
         }
-        let mut files = list_files(root, cutoff, &mut st);
+        let mut files = if *agent == Agent::Antigravity {
+            antigravity_logs(root, cutoff, &mut st)
+        } else {
+            list_files(root, cutoff, &mut st)
+        };
         if agent.claude_shaped() {
             // A copied record keeps its time, so reading by each file's first time reads
             // an original before a copy of part of it, whose first record is later. A pi
@@ -370,8 +382,11 @@ fn open_for_agent(
         Err(Open::Io(reason)) => return Err(OpenError::Unreadable(reason)),
     };
     match agent {
-        Agent::Gemini => indexed(reader, path)
+        Agent::Gemini => indexed(reader, path, Gemini::index)
             .map(|(r, index)| (r, Some(Rewrite::Gemini(index))))
+            .map_err(OpenError::Unreadable),
+        Agent::Antigravity => indexed(reader, path, Antigravity::index)
+            .map(|(r, index)| (r, Some(Rewrite::Antigravity(index))))
             .map_err(OpenError::Unreadable),
         Agent::Qwen => Ok((reader, Some(Rewrite::Qwen))),
         _ => Ok((reader, None)),
@@ -768,13 +783,18 @@ fn scan_files_with_budget(
     }
 }
 
-/// Indexes Gemini CLI file `path` from `reader` ([`Gemini::index`]), then opens it again
-/// for the second pass, or says why either cannot be read.
-fn indexed(reader: Box<dyn BufRead>, path: &Path) -> Result<(Box<dyn BufRead>, Gemini), String> {
+/// Indexes Gemini CLI or Antigravity file `path` from `reader` with `note`
+/// ([`Gemini::index`], [`Antigravity::index`]), then opens it again for the second pass,
+/// or says why either cannot be read.
+fn indexed<T: Default>(
+    reader: Box<dyn BufRead>,
+    path: &Path,
+    note: fn(&mut T, &str),
+) -> Result<(Box<dyn BufRead>, T), String> {
     let mut lines = Lines::new(reader);
-    let mut index = Gemini::default();
+    let mut index = T::default();
     while let Some(line) = lines.next_line().map_err(|e| read_error(&e))? {
-        index.index(&line);
+        note(&mut index, &line);
     }
     let reader = open(path).map_err(|e| match e {
         Open::Io(reason) => reason,
@@ -855,6 +875,39 @@ fn list_files(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBu
                     Err(e) => st.count_unreadable(format!("a file's time cannot be read: {e}")),
                 }
             }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Antigravity's log of each conversation folder in `root` modified at or after
+/// `cutoff`: `<id>/.system_generated/logs/transcript_full.jsonl`, or `transcript.jsonl`
+/// beside it when there is no full log, whose long fields are cut short. Only those
+/// paths are looked at, as a conversation folder can hold whole repositories.
+fn antigravity_logs(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBuf> {
+    let Some(entries) = st.readable(fs::read_dir(root), "a folder cannot be listed") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let Some(entry) = st.readable(entry, "a folder entry cannot be read") else {
+            continue;
+        };
+        let logs = entry.path().join(".system_generated").join("logs");
+        let full = logs.join("transcript_full.jsonl");
+        let path = if full.is_file() {
+            full
+        } else {
+            logs.join("transcript.jsonl")
+        };
+        if !path.is_file() {
+            continue;
+        }
+        match fs::metadata(&path).and_then(|m| m.modified()) {
+            Ok(m) if m >= cutoff => out.push(path),
+            Ok(_) => {}
+            Err(e) => st.count_unreadable(format!("a file's time cannot be read: {e}")),
         }
     }
     out.sort();
@@ -1057,7 +1110,7 @@ impl Earlier {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
                 self.pi.insert(name.into_owned(), uuids);
             }
-            Agent::Codex | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {}
+            Agent::Codex | Agent::OpenCode | Agent::Gemini | Agent::Qwen | Agent::Antigravity => {}
         }
     }
 }
@@ -1133,7 +1186,7 @@ fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
                 .and_then(Value::as_str)
                 .is_some_and(|p| !p.is_empty())
         }),
-        Agent::Pi | Agent::Gemini | Agent::Qwen => false,
+        Agent::Pi | Agent::Gemini | Agent::Qwen | Agent::Antigravity => false,
         Agent::OpenCode => serde_json::from_str::<Value>(first)
             .is_ok_and(|v| v.get("subagent") == Some(&Value::Bool(true))),
     }
