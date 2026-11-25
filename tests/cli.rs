@@ -1262,8 +1262,8 @@ fn all_reports_each_root_and_counts_the_partial_last_line_once() {
     assert_eq!(roots[1]["files"], 2);
     assert_eq!(doc["schema_version"], 2);
     assert_eq!(doc["tool"], "bigsister");
-    // 10 detectors and the ranked figures.
-    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(11));
+    // 11 detectors and the ranked figures.
+    assert_eq!(doc["detectors"].as_object().map(|o| o.len()), Some(12));
 }
 
 /// `bigsister all` over the Claude transcripts in a fixture folder, which must hold 2.
@@ -3929,14 +3929,15 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// One folder holding the main Claude fixtures and the request-log fixture, as the sample
-/// does.
+/// One folder holding the main Claude fixtures, the request-log fixture and the
+/// permission-decision fixture, as the sample does.
 fn sample_claude_root() -> PathBuf {
     let claude = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sample-claude");
     let _ = std::fs::remove_dir_all(&claude);
     std::fs::create_dir_all(&claude).expect("folder");
     copy_tree(Path::new(CLAUDE), &claude);
     copy_tree(Path::new(CONTEXT), &claude);
+    copy_tree(Path::new(PERMISSIONS), &claude);
     claude
 }
 
@@ -3978,7 +3979,7 @@ fn sample_reports_the_bundled_fixtures_with_no_transcripts_on_the_machine() {
     assert_eq!(
         roots,
         [
-            json!(["claude", "(bundled sample)", 5]),
+            json!(["claude", "(bundled sample)", 6]),
             json!(["codex", "(bundled sample)", 2]),
             json!(["pi", "(bundled sample)", 2])
         ]
@@ -4105,6 +4106,91 @@ fn antigravity_reads_one_log_per_conversation_preferring_the_full_one() {
     );
     assert_eq!(bash["calls"], json!(1));
     let _ = std::fs::remove_dir_all(&root);
+}
+
+const PERMISSIONS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/permissions/claude"
+);
+
+/// `permissions` over the permission fixture, as JSON.
+fn permissions_report() -> Value {
+    let args = [
+        "permissions",
+        "--claude-root",
+        PERMISSIONS,
+        "--since",
+        SINCE,
+        "--json",
+    ];
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    serde_json::from_str(&stdout).expect("valid JSON")
+}
+
+/// `permissions` counts each recorded decision once, by its cause, and prints no rule
+/// text, reason code, tool input or output.
+#[test]
+fn permissions_count_decisions_by_cause() {
+    let doc = permissions_report();
+    let p = &doc["detectors"]["permissions"];
+    for (k, v) in [
+        ("decisions", 8),
+        ("allowed", 3),
+        ("blocked", 5),
+        ("answered_by_you", 3),
+        ("blocked_by_you", 1),
+        ("blocked_by_hook", 1),
+        ("blocked_by_safety_check", 1),
+        ("blocked_by_auto_mode", 1),
+        ("blocked_by_rule", 1),
+        ("blocked_by_mode", 0),
+        ("blocked_by_other", 0),
+        ("tool_results_without_decision", 1),
+    ] {
+        assert_eq!(p["summary"][k], json!(v), "{k}");
+    }
+    let (code, text, stderr) = run(&[
+        "permissions",
+        "--claude-root",
+        PERMISSIONS,
+        "--since",
+        SINCE,
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!text.to_lowercase().contains("sentinel"), "{text}");
+    assert!(text.contains("blocked by auto mode: 1"), "{text}");
+}
+
+/// `permissions` gives each tool's decisions, most blocked first, and auto mode's blocks
+/// by category.
+#[test]
+fn permissions_count_decisions_by_tool_and_category() {
+    let doc = permissions_report();
+    let tools: Vec<Value> = rows(&doc, "permissions", 2)
+        .iter()
+        .map(|r| {
+            cells(
+                r,
+                &["tool", "decisions", "allowed", "blocked", "answered_by_you"],
+            )
+        })
+        .collect();
+    assert_eq!(
+        tools,
+        [
+            json!(["Bash", 5, 1, 4, 0]),
+            json!(["Write", 1, 0, 1, 1]),
+            json!(["Edit", 1, 1, 0, 1]),
+            json!(["Read", 1, 1, 0, 1])
+        ]
+    );
+    let categories: Vec<Value> = rows(&doc, "permissions", 3)
+        .iter()
+        .map(|r| cells(r, &["classifier_category", "blocks"]))
+        .collect();
+    assert_eq!(categories, [json!(["external_system_writes", 1])]);
 }
 
 /// A scan that finds no record in the window says so, in text and JSON, rather than
