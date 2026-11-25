@@ -136,6 +136,9 @@ pub struct RootStats {
     /// `*.jsonl.zst` transcripts in the window that do not start with the zstd magic
     /// number, so nothing in them was read.
     pub compressed: u64,
+    /// Files holding at least one record whose time falls in the window. With none in
+    /// any root, nothing was scanned, whatever `files` says.
+    pub files_with_records: u64,
     /// Why files or folders were unreadable, each reason with how many, summing to
     /// `unreadable`. A reason holds no file or table content.
     pub unreadable_reasons: BTreeMap<String, u64>,
@@ -150,6 +153,7 @@ impl RootStats {
             unreadable: 0,
             bad_lines: 0,
             compressed: 0,
+            files_with_records: 0,
             unreadable_reasons: BTreeMap::new(),
         }
     }
@@ -1145,6 +1149,8 @@ struct Feed<'a, 'b> {
     until: Option<Timestamp>,
     prices: &'a Prices,
     last_time: Option<Timestamp>,
+    /// Whether a record's time in the file fell in the window.
+    saw_record: bool,
     /// The model the latest Codex `turn_context` names, if any.
     codex_model: Option<String>,
     /// The `uuid` of each Claude record parsed so far in the file.
@@ -1177,6 +1183,7 @@ impl<'a, 'b> Feed<'a, 'b> {
             until: window.until,
             prices: window.prices,
             last_time: None,
+            saw_record: false,
             codex_model: None,
             uuids: HashSet::new(),
             replies: HashSet::new(),
@@ -1188,6 +1195,12 @@ impl<'a, 'b> Feed<'a, 'b> {
             wanting_buf: Vec::with_capacity(active.len()),
             st,
         }
+    }
+
+    /// Notes the time of the latest record read.
+    fn at(&mut self, t: Timestamp) {
+        self.last_time = Some(t);
+        self.saw_record |= self.in_window();
     }
 
     fn in_window(&self) -> bool {
@@ -1209,7 +1222,7 @@ impl<'a, 'b> Feed<'a, 'b> {
                 }
                 self.replaying = false;
             }
-            PreparedEvent::Timestamp(t) => self.last_time = Some(*t),
+            PreparedEvent::Timestamp(t) => self.at(*t),
             PreparedEvent::Candidate(c) => {
                 let raw = &raw_buf[c.raw.clone()];
                 self.fill_wanting(raw, c.blob, c.exact_mask, c.check_mask);
@@ -1223,7 +1236,7 @@ impl<'a, 'b> Feed<'a, 'b> {
                 }
                 if self.wanting_buf.is_empty() && c.reply.is_none() {
                     if let Some(t) = raw_timestamp(raw) {
-                        self.last_time = Some(t);
+                        self.at(t);
                     }
                     return;
                 }
@@ -1245,7 +1258,7 @@ impl<'a, 'b> Feed<'a, 'b> {
             .and_then(Value::as_str)
             .and_then(parse_ts)
         {
-            self.last_time = Some(t);
+            self.at(t);
         }
         let in_window = !copied && self.in_window();
         // A reply reads the results before it; a copy of one reads nothing.
@@ -1266,6 +1279,7 @@ impl<'a, 'b> Feed<'a, 'b> {
         read_err: Option<&str>,
     ) -> (HashSet<String>, HashSet<String>) {
         self.st.bad_lines += extra_bad;
+        self.st.files_with_records += u64::from(self.saw_record);
         // A Codex turn's model reads its results; a Claude result no reply read stays
         // unpriced.
         if self.session.agent == Agent::Codex {

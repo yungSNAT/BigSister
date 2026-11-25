@@ -86,6 +86,7 @@ pub fn run(cli: &Cli, before: &str, after: &str) -> Result<String, String> {
         roots: &a.stats,
         skipped_roots: &a.skipped,
         home: home.as_deref(),
+        records_scanned: a.stats.iter().any(|r| r.files_with_records > 0),
     };
     Ok(render_report(cli, &meta, &[section]))
 }

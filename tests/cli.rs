@@ -4058,3 +4058,57 @@ fn completions_print_a_script_for_each_supported_shell() {
         assert!(stdout.contains("bigsister"), "{shell}: {stdout}");
     }
 }
+
+/// A scan that finds no record in the window says so, in text and JSON, rather than
+/// printing zeroed sections that read as a clean result: an empty folder, and a folder
+/// whose transcript holds only records before the window, a line that is not JSON and a
+/// record with no time.
+#[test]
+fn an_empty_scan_says_nothing_was_scanned() {
+    let empty = Path::new(env!("CARGO_TARGET_TMPDIR")).join("empty-scan");
+    let old = Path::new(env!("CARGO_TARGET_TMPDIR")).join("old-scan");
+    for dir in [&empty, &old] {
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).expect("folder");
+    }
+    std::fs::create_dir_all(old.join("proj")).expect("folder");
+    std::fs::write(
+        old.join("proj/s.jsonl"),
+        concat!(
+            "{\"type\":\"assistant\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"a\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\"}}]}}\n",
+            "not JSON\n",
+            "{\"type\":\"summary\"}\n",
+        ),
+    )
+    .expect("transcript");
+    for (dir, files) in [(&empty, 0), (&old, 1)] {
+        let dir = dir.to_str().expect("UTF-8 path");
+        let args = [
+            "all",
+            "--claude-root",
+            dir,
+            "--agent",
+            "claude",
+            "--since",
+            SINCE,
+        ];
+        let (code, text, stderr) = run(&args);
+        assert_eq!(code, 0, "stderr: {stderr}");
+        assert!(
+            text.contains("Nothing scanned: no transcript record falls in the window"),
+            "{text}"
+        );
+        let (code, stdout, stderr) = run(&[&args[..], &["--json"]].concat());
+        assert_eq!(code, 0, "stderr: {stderr}");
+        let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+        assert_eq!(doc["records_scanned"], json!(false));
+        assert_eq!(
+            cells(&doc["roots"][0], &["files", "files_with_records"]),
+            json!([files, 0])
+        );
+    }
+    let doc = report("all", &[]);
+    assert_eq!(doc["records_scanned"], json!(true));
+    let (_, text, _) = run(&fixture_args("pipes", &[]));
+    assert!(!text.contains("Nothing scanned"), "{text}");
+}
