@@ -48,6 +48,8 @@ Fixtures in this repository are synthetic. Tests check, ignoring case, that no s
 
 `--sample` reads the synthetic transcripts in `src/sample.rs`, compiled in from the test fixtures (the main Claude, Codex and pi ones and the request-log one), each agent's as one root shown as `(bundled sample)`, in the order a folder's files are read. `--json`'s `schema_version` 2 added the dollar and unpriced columns.
 
+A root's `files_with_records` counts its files holding a record whose time (the `timestamp` read from the raw line, or from the parsed record) falls in the window; a file the detectors stop reading early, such as `startup` at a session begun before the window, is read on for record times alone until one falls in it. When no file of any root does, `records_scanned` is `false` and the text report prints `Nothing scanned` above the sections; the exit code stays 0, as the scan itself succeeded. `diff` counts both sides together for that line, and adds a note naming a side with no record in the window. CSV output has no run header, so it carries neither.
+
 ## Codex results
 
 Codex writes a `CommandExecution` item in an `event_msg` `item_completed` record as each command ends, with its arguments, exit code, output and start time, but no call id. A command ties to an item when all of these hold:
