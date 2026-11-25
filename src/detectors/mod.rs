@@ -6,6 +6,7 @@ mod compaction;
 pub mod context;
 pub mod hooks;
 pub mod models;
+pub mod permissions;
 pub mod pipes;
 pub mod polls;
 pub mod rereads;
@@ -65,6 +66,9 @@ pub fn build(cmd: Command, programs: &Rc<Programs>, prices: &Rc<Prices>) -> Vec<
     }
     if all || cmd == Command::Hooks {
         v.push(Box::new(hooks::Hooks::new(Rc::clone(programs))));
+    }
+    if all || cmd == Command::Permissions {
+        v.push(Box::<permissions::Permissions>::default());
     }
     v
 }
