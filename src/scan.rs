@@ -247,7 +247,9 @@ pub(crate) fn scan_range_dyn(
         } else {
             list_files(root, cutoff, &mut st)
         };
-        if agent.claude_shaped() {
+        // Antigravity's steps record `created_at`, not `timestamp`, and no conversation
+        // copies another's, so its files are not sorted.
+        if agent.claude_shaped() && *agent != Agent::Antigravity {
             // A copied record keeps its time, so reading by each file's first time reads
             // an original before a copy of part of it, whose first record is later. A pi
             // fork's header is written when it is made, after the entries it copies.
@@ -329,7 +331,7 @@ pub(crate) fn scan_memory_range_dyn(
         // In the order `scan` reads a folder's files.
         let mut mine: Vec<&Memory> = files.iter().filter(|f| f.agent == agent).collect();
         mine.sort_by_key(|f| Path::new(f.path));
-        if agent.claude_shaped() {
+        if agent.claude_shaped() && agent != Agent::Antigravity {
             mine.sort_by_cached_key(|f| first_time_in(Box::new(f.text.as_bytes())));
         }
         for f in mine {

@@ -48,6 +48,10 @@ impl Antigravity {
     pub fn index(&mut self, line: &str) {
         let n = self.indexed;
         self.indexed += 1;
+        // A blank line is skipped in both passes, so it leaves a reply's run open.
+        if line.trim().is_empty() {
+            return;
+        }
         let Some(v) = object(line) else {
             self.open = None;
             return;
