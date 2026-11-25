@@ -66,6 +66,10 @@ pub fn run(cli: &Cli, before: &str, after: &str) -> Result<String, String> {
     };
     let mut a = measure(cli, &left, home.as_deref(), &prices, &programs, &opts)?;
     let b = measure(cli, &right, home.as_deref(), &prices, &programs, &opts)?;
+    note_empty(
+        &mut a.skipped,
+        [(left.label(), &a.stats), (right.label(), &b.stats)],
+    );
     a.stats.extend(b.stats);
     let extra: Vec<String> = b
         .skipped
@@ -86,8 +90,19 @@ pub fn run(cli: &Cli, before: &str, after: &str) -> Result<String, String> {
         roots: &a.stats,
         skipped_roots: &a.skipped,
         home: home.as_deref(),
+        records_scanned: a.stats.iter().any(|r| r.files_with_records > 0),
     };
     Ok(render_report(cli, &meta, &[section]))
+}
+
+/// Adds a note for each side, `(label, stats)`, with no record in the window, as the
+/// report's own line weighs both sides together.
+fn note_empty(notes: &mut Vec<String>, sides: [(&str, &[RootStats]); 2]) {
+    for (side, stats) in sides {
+        if !stats.iter().any(|r| r.files_with_records > 0) {
+            notes.push(format!("{side}: {}", crate::report::NOTHING_SCANNED));
+        }
+    }
 }
 
 impl Target {
