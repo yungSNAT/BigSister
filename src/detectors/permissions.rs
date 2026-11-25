@@ -411,6 +411,15 @@ mod tests {
                 json!({"decision": "reject", "source": "config", "reasonType": "other", "circuitBreaker": "x"}),
                 "safety_check",
             ),
+        ];
+        for (d, want) in cases {
+            assert_eq!(cause(&d), want, "{d}");
+        }
+    }
+
+    #[test]
+    fn rules_modes_and_the_rest_take_the_causes_after_safety_checks() {
+        let cases = [
             (
                 json!({"decision": "reject", "source": "config", "reasonType": "classifier"}),
                 "auto_mode",
