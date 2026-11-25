@@ -354,7 +354,7 @@ fn local_day(record: &Value) -> String {
         .and_then(parse_ts)
         .map_or_else(
             || NONE.to_owned(),
-            |t| t.to_zoned(TimeZone::system()).date().to_string(),
+            |t| t.to_zoned_datetime(TimeZone::system()).date().to_string(),
         )
 }
 
@@ -375,7 +375,7 @@ fn notes(opts: &Opts) -> Vec<String> {
         notes.push(format!("By Git branch (--by-branch) groups the same replies by the gitBranch Claude Code records on each reply, the branch checked out in its working folder when it was written, not the branch its work was later merged to; {NONE} marks a reply that records none, an empty one or one that is not text, and (other) a branch whose name holds characters other than letters, digits and _, -, ., : or / between non-empty parts, or is over 128 characters long. Its dollars are the same estimate as above, rounded to cents in each row, so its total can differ from the first table's by a few cents."));
     }
     if opts.by_day {
-        notes.push(format!("By local day (--by-day) groups the same replies by the day of each reply's recorded time in this machine's time zone, latest first, so --limit keeps the latest days; {NONE} marks a reply whose time does not read. Its dollars are the same estimate as above, rounded to cents in each row."));
+        notes.push(format!("By local day (--by-day) groups the same replies by the day of each reply's recorded time in this machine's time zone (UTC when it cannot be found), latest first, so --limit keeps the latest days; {NONE} marks a reply whose time does not read. Its dollars are the same estimate as above, rounded to cents in each row."));
     }
     notes
 }
@@ -446,6 +446,7 @@ impl Models {
             skipped_here: false,
             groups: BTreeMap::new(),
             branches: BTreeMap::new(),
+            days: BTreeMap::new(),
             parents: HashMap::new(),
             unsure: HashSet::new(),
             subs: Vec::new(),
