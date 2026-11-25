@@ -18,7 +18,7 @@ bigsister all --json
 
 This reads the last 7 days of the agents' default transcript folders and prints one JSON object (`schema_version` 2). Narrow it when the question is narrow:
 
-- `bigsister <section> --json` runs one section: `startup`, `context`, `schemas`, `pipes`, `polls`, `rereads`, `tools`, `cache`, `models` or `hooks`.
+- `bigsister <section> --json` runs one section: `startup`, `context`, `schemas`, `pipes`, `polls`, `rereads`, `tools`, `cache`, `models`, `hooks` or `permissions`.
 - `bigsister diff <before> <after> --json` compares 2 session folders or `START..END` time windows side by side (tokens, cache hit %, cost, turns, compactions and waste).
 - `--since 24h` (or `30d`, a date, or an RFC 3339 time) sets the window; `--agent claude` (or `codex`, `pi`, `opencode`, `gemini`, `qwen`) limits it to one agent; `--limit N` sets the rows per table.
 - `--sample` runs on synthetic transcripts built into `bigsister`, to show the user a report before reading theirs.
@@ -41,6 +41,7 @@ The JSON holds `roots` (what was scanned, with lines skipped), `since` and `dete
 | Is the agent polling or re-reading files? | `polls`, `rereads` | Repeated commands after failures or truncated outputs; compaction health (`post_pre_ratio`, thrashing, churn) and post-compaction re-reads |
 | Are tests failing behind a pipe? | `pipes` | Test runs piped into `tail` or `head` without `pipefail` |
 | Are hooks slow? | `hooks` | Runs, cancellations, timeouts and median, p90 and max milliseconds by hook |
+| What did hooks, auto mode or rules block? | `permissions` | `summary.blocked` and the `blocked_by_*` counts; the 'By tool' table; `tool_results_without_decision` counts results from versions that recorded none |
 | How did 2 windows or folders compare? | `diff <before> <after>` | Side-by-side deltas for tokens, cache hit %, cost, turns, compactions and waste |
 
 Most sections cover Claude Code only; `bigsister --help` lists the agents each one reads.

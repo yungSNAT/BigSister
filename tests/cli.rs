@@ -3924,14 +3924,15 @@ fn copy_tree(from: &Path, to: &Path) {
     }
 }
 
-/// One folder holding the main Claude fixtures and the request-log fixture, as the sample
-/// does.
+/// One folder holding the main Claude fixtures, the request-log fixture and the
+/// permission-decision fixture, as the sample does.
 fn sample_claude_root() -> PathBuf {
     let claude = Path::new(env!("CARGO_TARGET_TMPDIR")).join("sample-claude");
     let _ = std::fs::remove_dir_all(&claude);
     std::fs::create_dir_all(&claude).expect("folder");
     copy_tree(Path::new(CLAUDE), &claude);
     copy_tree(Path::new(CONTEXT), &claude);
+    copy_tree(Path::new(PERMISSIONS), &claude);
     claude
 }
 
@@ -3973,7 +3974,7 @@ fn sample_reports_the_bundled_fixtures_with_no_transcripts_on_the_machine() {
     assert_eq!(
         roots,
         [
-            json!(["claude", "(bundled sample)", 5]),
+            json!(["claude", "(bundled sample)", 6]),
             json!(["codex", "(bundled sample)", 2]),
             json!(["pi", "(bundled sample)", 2])
         ]
@@ -4057,4 +4058,76 @@ fn completions_print_a_script_for_each_supported_shell() {
         assert_eq!(code, 0, "{shell}: {stderr}");
         assert!(stdout.contains("bigsister"), "{shell}: {stdout}");
     }
+}
+
+const PERMISSIONS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/permissions/claude"
+);
+
+/// `permissions` counts each recorded decision once, by its cause and the tool it
+/// answers, and prints no rule text, reason code, tool input or output.
+#[test]
+fn permissions_count_decisions_by_cause_and_tool() {
+    let (code, stdout, stderr) = run(&[
+        "permissions",
+        "--claude-root",
+        PERMISSIONS,
+        "--since",
+        SINCE,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stdout.to_lowercase().contains("sentinel"), "{stdout}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let p = &doc["detectors"]["permissions"];
+    for (k, v) in [
+        ("decisions", 7),
+        ("allowed", 3),
+        ("blocked", 4),
+        ("answered_by_you", 2),
+        ("blocked_by_you", 1),
+        ("blocked_by_hook", 1),
+        ("blocked_by_safety_check", 1),
+        ("blocked_by_auto_mode", 1),
+        ("blocked_by_rule", 0),
+        ("blocked_by_mode", 0),
+        ("blocked_other", 0),
+        ("tool_results_without_decision", 1),
+    ] {
+        assert_eq!(p["summary"][k], json!(v), "{k}");
+    }
+    let tools: Vec<Value> = rows(&doc, "permissions", 2)
+        .iter()
+        .map(|r| {
+            cells(
+                r,
+                &["tool", "decisions", "allowed", "blocked", "answered_by_you"],
+            )
+        })
+        .collect();
+    assert_eq!(
+        tools,
+        [
+            json!(["Bash", 4, 1, 3, 0]),
+            json!(["Write", 1, 0, 1, 1]),
+            json!(["Edit", 1, 1, 0, 1]),
+            json!(["Read", 1, 1, 0, 0])
+        ]
+    );
+    let categories: Vec<Value> = rows(&doc, "permissions", 3)
+        .iter()
+        .map(|r| cells(r, &["classifier_category", "blocks"]))
+        .collect();
+    assert_eq!(categories, [json!(["external_system_writes", 1])]);
+    let (code, text, stderr) = run(&[
+        "permissions",
+        "--claude-root",
+        PERMISSIONS,
+        "--since",
+        SINCE,
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!text.to_lowercase().contains("sentinel"), "{text}");
+    assert!(text.contains("blocked by auto mode: 1"), "{text}");
 }
