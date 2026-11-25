@@ -40,6 +40,16 @@ static READ_CALL: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid regex")
 });
+static WRITE_CALL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?s)\bwriteFile(?:Sync)?\(\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)"#,
+    )
+    .expect("valid regex")
+});
+static APPLY_PATCH_CALL: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?s)\bapply_patch\(\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)"#)
+        .expect("valid regex")
+});
 /// The text an `apply_patch` call writes, from the string literal that opens it. A
 /// `readFile(` line it adds is not a read.
 static PATCH_BODY: LazyLock<Regex> = LazyLock::new(|| {
@@ -762,17 +772,32 @@ pub fn codex_steps(input: &str) -> Vec<Step> {
     steps.into_iter().map(|(_, s)| s).collect()
 }
 
+fn js_call_literals<'a>(input: &'a str, re: &'a Regex) -> impl Iterator<Item = String> + 'a {
+    re.captures_iter(input)
+        .filter_map(|c| c.get(1))
+        .filter(|m| whole_literal(input, m))
+        .map(|m| js_unescape(m.as_str()))
+}
+
 /// Paths a Codex `exec` cell reads with `readFile` or `readFileSync`.
 #[must_use]
 pub fn codex_read_calls(input: &str) -> Vec<String> {
     let input = without_patch_bodies(input);
-    READ_CALL
-        .captures_iter(&input)
-        .filter_map(|c| c.get(1))
-        .filter(|m| whole_literal(&input, m))
-        .map(|m| js_unescape(m.as_str()))
+    js_call_literals(&input, &READ_CALL)
         .filter(|p| is_literal_path(p))
         .collect()
+}
+
+/// Patch texts from `apply_patch(...)` and literal paths from `writeFile(...)` /
+/// `writeFileSync(...)` in a Codex `exec` cell.
+#[must_use]
+pub fn codex_edit_targets(input: &str) -> (Vec<String>, Vec<String>) {
+    let patches = js_call_literals(input, &APPLY_PATCH_CALL).collect();
+    let clean = without_patch_bodies(input);
+    let writes = js_call_literals(&clean, &WRITE_CALL)
+        .filter(|p| is_literal_path(p))
+        .collect();
+    (patches, writes)
 }
 
 /// Whether the string literal `lit` in `input` is a whole value rather than part of
@@ -1193,12 +1218,25 @@ const s = readFile('C:\\hub\\b.md'); await tools.apply_patch(p);"#;
         let input = "await tools.apply_patch(`*** Begin Patch\n*** Add File: a.js\n\
             +const c = readFileSync('cfg.json'); writeFile('b', c);\n\
             +await tools.exec_command({cmd: 'git status'});\n*** End Patch`);\n\
-            await tools.exec_command({cmd: 'cargo test'}); readFile('real.md');";
+            await tools.exec_command({cmd: 'cargo test'}); readFile('real.md');\n\
+            writeFile('real_w.rs', 'x'); writeFileSync('real_ws.rs', 'y');\n\
+            writeFile('dyn/' + name, 'z'); writeFileSync(`${dir}/dyn.rs`, 'z');";
         assert_eq!(
             codex_steps(input),
-            vec![Step::Edit, Step::Command("cargo test".to_owned())]
+            vec![
+                Step::Edit,
+                Step::Command("cargo test".to_owned()),
+                Step::Edit,
+                Step::Edit,
+                Step::Edit,
+                Step::Edit,
+            ]
         );
         assert_eq!(codex_read_calls(input), vec!["real.md".to_owned()]);
+        let (patches, writes) = codex_edit_targets(input);
+        assert_eq!(patches.len(), 1);
+        assert!(patches[0].contains("*** Add File: a.js"));
+        assert_eq!(writes, vec!["real_w.rs", "real_ws.rs"]);
         // Markers outside a string open no patch body.
         let commented =
             "// *** Begin Patch\nawait tools.exec_command({cmd: 'git status'});\n// *** End Patch";

@@ -16,10 +16,6 @@ BigSister is ShaphansAudit renamed, with 4 new report sections, 4 more agents, p
 - `--csv` prints the report's sections as one CSV table, a value a record.
 - `--by-branch` adds a `models` table of input-side cost by the Git branch Claude Code records on each reply.
 - Each section with a dollar column names its price basis in its summary (`usd_basis`: `bundled`, `usd_per_mtok` or `prices_file`).
-- `cache` adds a sub-TTL (< 5 minute) cache-bust table classifying unexpected prefix rebuilds (model swap, tool load / schema change, mid-history edit / rewind, or proxy or prefix change) with avoidable USD penalty and token-share vs dollar-share divergence.
-- `rereads` adds compaction health metrics: post/pre retention ratio (flagging > 95% drops), compaction thrashing (< 10% saved across 2+ consecutive passes) and post-compaction file-churn/revert detection.
-- `polls` adds a truncation-triggered command re-run table flagging identical shell commands re-run within 2 turns of a truncated or stashed tool output.
-- `diff <before> <after>` compares turns, tokens, cache hit %, cost, sub-TTL cache busts, compactions and waste across 2 session folders or `START..END` time windows.
 - `all` starts with `ranked`: polls' output, re-reads after compactions, unused tool schemas and unused skills, each as estimated tokens and dollars over the whole window, most dollars first.
 - `--sample` runs any section on sample transcripts built into `bigsister`, so a first run gives a full report before there are transcripts to read; with no transcript folder, the error suggests it.
 - `schemas` also counts skills listed against skills used, and `polls` the characters every non-blank command's results returned, by verb class.
@@ -48,3 +44,11 @@ BigSister keeps no configuration, cache or state file and reads no environment v
 ## Licence
 
 From this release BigSister is under Apache-2.0. v0.1.0 stays under FSL-1.1-ALv2, and becomes available under Apache-2.0 2 years after its release.
+
+## Unreleased (since v0.2.0)
+
+- `cache`: sub-TTL (< 5 minute) cache-bust table classifying unexpected prefix rebuilds (model swap, tool load / schema change via `shapeHash`, mid-history edit / rewind, or proxy or prefix change) with avoidable USD penalty and token-share vs dollar-share divergence.
+- `rereads`: compaction health metrics covering post/pre retention ratio (flagging > 95% drops), compaction thrashing (< 10% saved across 2+ consecutive passes) and post-compaction file-churn/revert detection (including pi `edit`/`write` `path` mapping and Codex `exec`-cell `apply_patch`, `writeFile` and `writeFileSync` edits).
+- `polls`: truncation-triggered command re-run table flagging identical shell commands re-run within 2 turns of a truncated or stashed tool output.
+- `diff <before> <after>`: side-by-side comparison of turns, tokens, cache hit %, cost, sub-TTL cache busts, compactions and waste across 2 session folders or `START..END` time windows.
+- `scan`: scope cross-file UUID deduplication to Claude Code and pi so Gemini CLI, Qwen Code and OpenCode per-session short IDs never collide across files or agents.

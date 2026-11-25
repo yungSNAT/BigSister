@@ -20,14 +20,14 @@ fn fixture_part_a() -> Vec<String> {
     let txt = json!([{"type": "text", "text": "SENTINEL-BUST-TEXT"}]);
     let exit_plan = json!([{"type": "tool_use", "id": "tu1", "name": "ExitPlanMode", "input": {}}]);
     vec![
-        json!({"type": "api-request-shape", "timestamp": "2026-11-08T01:00:00Z", "id": "sh1"}).to_string(),
-        json!({"type": "api-request", "timestamp": "2026-11-08T01:00:00Z", "shape": "sh1"}).to_string(),
-        json!({"type": "api-request", "timestamp": "2026-11-08T01:00:00Z", "shape": "sh1", "keep": 0, "tail": ["a", "b"]}).to_string(),
+        json!({"type": "api-request-shape", "timestamp": "2026-11-08T01:00:00Z", "shapeHash": "sh1"}).to_string(),
+        json!({"type": "api-request", "timestamp": "2026-11-08T01:00:00Z", "shapeHash": "sh1"}).to_string(),
+        json!({"type": "api-request", "timestamp": "2026-11-08T01:00:00Z", "shapeHash": "sh1", "keep": 0, "tail": ["a", "b"]}).to_string(),
         reply("2026-11-08T01:00:05Z", "m1", "claude-opus-5-5", 100_000, 0, &txt),
         reply("2026-11-08T01:00:06Z", "m1", "claude-opus-5-5", 100_000, 0, &exit_plan).replacen("u-m1", "u-m1b", 1),
         json!({"type": "assistant", "uuid": "u-m1c", "timestamp": "2026-11-08T01:00:06Z", "message": {"id": "m1", "model": "claude-opus-5-5"}}).to_string(),
         reply("2026-11-08T01:00:07Z", "m2", "claude-opus-5-5", 85_000, 20_000, &txt),
-        json!({"type": "api-request-shape", "timestamp": "2026-11-08T01:00:30Z", "id": "sh2"}).to_string(),
+        json!({"type": "api-request-shape", "timestamp": "2026-11-08T01:00:30Z", "shapeHash": "sh2"}).to_string(),
         json!({"type": "attachment", "timestamp": "2026-11-08T01:00:31Z", "attachment": {"type": "deferred_tools_delta"}}).to_string(),
         reply("2026-11-08T01:00:35Z", "m3", "claude-opus-5-5", 60_000, 45_000, &txt),
     ]
@@ -46,7 +46,7 @@ fn fixture_part_b() -> Vec<String> {
     .replacen('{', r#"{"parentUuid":"u-m1b","#, 1);
     let mut v = vec![
         reply("2026-11-08T01:01:00Z", "m4", "claude-sonnet-5-5", 100_000, 5_000, &txt),
-        json!({"type": "api-request", "timestamp": "2026-11-08T01:01:20Z", "shape": "sh2", "keep": 1, "tail": ["c"]}).to_string(),
+        json!({"type": "api-request", "timestamp": "2026-11-08T01:01:20Z", "shapeHash": "sh2", "keep": 1, "tail": ["c"]}).to_string(),
         json!({"type": "system", "subtype": "microcompact_boundary", "timestamp": "2026-11-08T01:01:21Z"}).to_string(),
         reply("2026-11-08T01:01:30Z", "m5", "claude-sonnet-5-5", 50_000, 55_000, &txt),
         rewind,
@@ -299,5 +299,50 @@ fn assert_overflow_extreme_price(dir: &std::path::Path, price_file: &str) {
             Value::Null,
             "{name}"
         );
+    }
+}
+
+#[test]
+fn s_ctx_fixture_uses_shapehash_for_sub_ttl_bust_attribution() {
+    let base: Vec<String> = include_str!("../fixtures/context/claude/proj-x/s-ctx.jsonl")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let dir = super::temp_dir("cb", "s-ctx");
+    let bust_reply = reply(
+        "2026-11-08T01:05:15.000Z",
+        "msg_3",
+        "claude-opus-5-5",
+        1000,
+        210,
+        &json!([{"type": "text", "text": "ok"}]),
+    );
+
+    // 1. Real s-ctx.jsonl (shapeHash = shape-1) followed by api-request-shape shape-2.
+    let mut shape_case = base.clone();
+    shape_case.push(
+        json!({"type": "api-request-shape", "timestamp": "2026-11-08T01:05:10.000Z", "shapeHash": "shape-2", "shape": {"system": [], "tools": []}})
+            .to_string(),
+    );
+    shape_case.push(bust_reply.clone());
+    super::write_jsonl(&dir, "shape/proj-x/s.jsonl", &shape_case);
+
+    // 2. s-ctx.jsonl with api-request-shape omitted (so api-request lines set shape-1) + api-request shape-2.
+    let mut req_case: Vec<String> = base
+        .into_iter()
+        .filter(|l| !l.contains("\"api-request-shape\""))
+        .collect();
+    req_case.push(
+        json!({"type": "api-request", "timestamp": "2026-11-08T01:05:10.000Z", "id": "req-5", "keep": 5, "tail": ["a"], "shapeHash": "shape-2"})
+            .to_string(),
+    );
+    req_case.push(bust_reply);
+    super::write_jsonl(&dir, "req/proj-x/s.jsonl", &req_case);
+
+    for sub in ["shape", "req"] {
+        let doc = super::run_json("cache", &["--claude-root", dir.join(sub).to_str().unwrap()]);
+        let row = find_bust(bust_rows(&doc), "main", "tool load / schema change");
+        assert_eq!(row["busts"], 1, "{sub}: {doc}");
+        assert_eq!(row["rebuilt_tokens"], 1000, "{sub}: {doc}");
     }
 }

@@ -11,7 +11,7 @@ use crate::report::{Opts, Section, Table};
 use crate::scan::{Agent, Detector, Record, Session};
 
 /// Consecutive erroring results that make a cascade, and erroring results of one call
-/// that make retry churn: Token Optimizer's threshold.
+/// that make retry churn: a comparable tool's threshold.
 const AT_LEAST: u64 = 3;
 
 #[derive(Default, Clone, Copy)]
