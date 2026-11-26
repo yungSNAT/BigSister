@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use super::{chars, name_of};
+use super::{chars, name_of, truncation};
 use crate::scan::Record;
 use crate::shell::{self, Step};
 

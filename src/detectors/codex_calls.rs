@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use super::codex::function_command;
-use super::{CodexCall, CodexOutput, CommandResult, chars, json_escaped};
+use super::{CodexCall, CodexOutput, CommandResult, chars, json_escaped, truncation};
 use crate::scan::Record;
 
 /// A command's result as a detector reads it.
