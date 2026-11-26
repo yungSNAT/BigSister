@@ -48,6 +48,129 @@ pub struct Otlp {
     seen: HashSet<(String, String)>,
 }
 
+/// Explicit export keys for a mixed-source report. Different spans reusing a key
+/// make it ambiguous. Repeating the same trace/span pair leaves it unique.
+#[derive(Default)]
+pub struct ExportKeys {
+    models: Keys,
+    tools: Keys,
+}
+type Key = (String, String, String);
+#[derive(Default)]
+struct Keys {
+    by_native: std::collections::HashMap<Key, Option<String>>,
+    by_span: std::collections::HashMap<String, Option<Key>>,
+}
+
+fn agree<T: PartialEq + Clone>(
+    entry: std::collections::hash_map::Entry<'_, impl Eq + std::hash::Hash, Option<T>>,
+    value: T,
+) {
+    let observed = entry.or_insert_with(|| Some(value.clone()));
+    if observed.as_ref() != Some(&value) {
+        *observed = None;
+    }
+}
+
+impl Keys {
+    fn observe(&mut self, session: &str, name: &str, id: &str, span: &str) {
+        let key = (session.to_owned(), name.to_owned(), id.to_owned());
+        if span.starts_with('/') {
+            self.by_native.insert(key, None);
+        } else {
+            agree(self.by_span.entry(span.to_owned()), key.clone());
+            agree(self.by_native.entry(key), span.to_owned());
+        }
+    }
+}
+
+impl crate::scan::Detector for ExportKeys {
+    fn agents(&self) -> &'static [crate::scan::Agent] {
+        &[crate::scan::Agent::Otlp]
+    }
+    fn wants(&self, _: &crate::scan::Session, line: &str) -> bool {
+        line.contains("otelNativeId")
+    }
+    fn record(&mut self, _: &crate::scan::Session, r: &crate::scan::Record<'_>) {
+        if !r.in_window {
+            return;
+        }
+        let (Some(native), Some(session)) = (
+            r.value["otelNativeId"].as_str(),
+            r.value["sessionId"].as_str(),
+        ) else {
+            return;
+        };
+        if let Some((model, id)) = crate::detectors::models::countable_identity(r.value) {
+            self.models.observe(session, model, native, id);
+        }
+        for call in crate::detectors::tool_uses(r) {
+            if let (Some(name), Some(id)) = (call["name"].as_str(), call["id"].as_str()) {
+                self.tools.observe(session, name, native, id);
+            }
+        }
+    }
+    fn section(&self, _: &crate::report::Opts) -> crate::report::Section {
+        crate::report::Section::default()
+    }
+}
+
+/// Keeps counted spans and unique, complete native counterparts for one section.
+#[derive(Default)]
+pub(crate) struct Overlap {
+    spans: HashSet<String>,
+    native: std::collections::HashMap<Key, bool>,
+    exports: Option<std::rc::Rc<ExportKeys>>,
+}
+
+impl Overlap {
+    pub(crate) fn enable(&mut self, exports: std::rc::Rc<ExportKeys>) {
+        self.exports = Some(exports);
+    }
+
+    pub(crate) fn note_native(&mut self, session: &str, name: &str, id: &str, tool: bool) {
+        let Some(exports) = &self.exports else { return };
+        let keys = if tool {
+            &exports.tools
+        } else {
+            &exports.models
+        };
+        let key = (session.into(), name.into(), id.into());
+        if keys.by_native.get(&key).is_some_and(Option::is_some) {
+            self.native
+                .entry(key)
+                .and_modify(|unique| *unique = false)
+                .or_insert(true);
+        }
+    }
+
+    pub(crate) fn enabled(&self) -> bool {
+        self.exports.is_some()
+    }
+
+    pub(crate) fn skip_export(&mut self, span: &str, tool: bool) -> bool {
+        if span.starts_with('/') {
+            return false;
+        }
+        if !self.spans.insert(span.to_owned()) {
+            return true;
+        }
+        let Some(exports) = &self.exports else {
+            return false;
+        };
+        let keys = if tool {
+            &exports.tools
+        } else {
+            &exports.models
+        };
+        let Some(Some(key)) = keys.by_span.get(span) else {
+            return false;
+        };
+        self.native.get(key) == Some(&true)
+            && keys.by_native.get(key).and_then(Option::as_deref) == Some(span)
+    }
+}
+
 impl Otlp {
     /// Appends the Claude Code records for one OTLP/JSON trace export to `out`. Returns 1
     /// for a line that is not one, plus the GenAI spans left out for lacking an id or a time.
@@ -141,6 +264,18 @@ fn span_records(span: &Value) -> Result<Option<(i128, Vec<String>)>, ()> {
 struct Attrs<'a>(Option<&'a Vec<Value>>);
 
 impl<'a> Attrs<'a> {
+    fn native_id(&self, key: &str) -> Value {
+        if self.str("gen_ai.provider.name") == Some("anthropic")
+            && self
+                .str("gen_ai.conversation.id")
+                .is_some_and(|s| !s.is_empty())
+        {
+            Value::from(self.str(key).filter(|s| !s.is_empty()))
+        } else {
+            Value::Null
+        }
+    }
+
     fn get(&self, key: &str) -> Option<&'a Value> {
         self.0?
             .iter()
@@ -205,8 +340,9 @@ fn reply(a: &Attrs<'_>, model: &str, id: &str, session: &str, ts: &Value) -> Str
         usage.insert("output_tokens".to_owned(), output.into());
     }
     format!(
-        "{{\"type\":\"assistant\",\"sessionId\":{},\"message\":{{\"model\":{},\"id\":{},\"role\":\"assistant\",\"content\":[],\"usage\":{}}},\"timestamp\":{ts}}}",
+        "{{\"type\":\"assistant\",\"sessionId\":{},\"otelNativeId\":{},\"message\":{{\"model\":{},\"id\":{},\"role\":\"assistant\",\"content\":[],\"usage\":{}}},\"timestamp\":{ts}}}",
         Value::from(session),
+        a.native_id("gen_ai.response.id"),
         Value::from(model),
         Value::from(id),
         Value::Object(usage),
@@ -223,6 +359,7 @@ fn tool_records(span: &Value, a: &Attrs<'_>, id: &str, session: &str, ts: &Value
         json!({"type": "tool_result", "tool_use_id": id, "content": "", "is_error": error});
     vec![
         json!({"type": "assistant", "sessionId": session, "uuid": format!("{id}-call"),
+               "otelNativeId": a.native_id("gen_ai.tool.call.id"),
                "message": {"model": "<synthetic>", "role": "assistant", "content": [call_block]}, "timestamp": ts})
         .to_string(),
         json!({"type": "user", "sessionId": session, "uuid": format!("{id}-result"),

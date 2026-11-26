@@ -1,7 +1,15 @@
 //! Runs `bigsister` over synthetic OTLP/JSON trace files of GenAI spans.
 
+use bigsister::{
+    detectors::models::Models,
+    otlp::ExportKeys,
+    prices::Prices,
+    report::Opts,
+    scan::{Agent, Detector, Memory, scan_memory},
+};
 use std::path::Path;
 use std::process::Command;
+use std::rc::Rc;
 
 use serde_json::{Value, json};
 
@@ -116,4 +124,188 @@ fn otlp_files_are_read_only_from_a_given_folder() {
     let (code, _, stderr) = run(&["models", "--sample", "--otlp-root", OTLP]);
     assert_ne!(code, 0);
     assert!(stderr.contains("--otlp-root"), "{stderr}");
+}
+
+#[test]
+fn repeated_exports_and_identified_transcript_copies_count_once() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/overlap");
+    let native = root.join("claude");
+    let export = root.join("otlp");
+    for (choice, replies, native_calls, exported_calls) in
+        [("all", 3, 1, 1), ("claude", 1, 1, 0), ("otlp", 3, 0, 2)]
+    {
+        let (code, out, err) = run(&[
+            "all",
+            "--since",
+            SINCE,
+            "--json",
+            "--usd-per-mtok",
+            "100",
+            "--agent",
+            choice,
+            "--claude-root",
+            native.to_str().unwrap(),
+            "--otlp-root",
+            export.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "{err}");
+        let doc: Value = serde_json::from_str(&out).unwrap();
+        let models = rows(&doc, "models");
+        assert_eq!(models[0]["replies"], replies, "{choice}: {models:?}");
+        assert_eq!(models[0]["input_tokens"], replies * 100);
+        assert_eq!(models[0]["output_tokens"], replies * 5);
+        assert!(
+            (models[0]["input_usd_est"].as_f64().unwrap() - f64::from(replies) * 0.01).abs() < 1e-9
+        );
+        let tools = rows(&doc, "tools");
+        for (source, calls) in [("claude", native_calls), ("otlp", exported_calls)] {
+            let result = tools.iter().find(|row| row["agent"] == source);
+            if calls == 0 {
+                assert!(result.is_none(), "{choice}: {tools:?}");
+            } else {
+                let result = result.expect("counted source");
+                assert_eq!(result["calls"], calls);
+                assert_eq!(result["errors"], calls);
+                assert_eq!(
+                    result["result_chars"],
+                    if source == "claude" { 7 } else { 0 }
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn distinct_spans_claiming_one_native_identity_remain_countable() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/overlap");
+    let (code, out, err) = run(&[
+        "all",
+        "--since",
+        SINCE,
+        "--json",
+        "--claude-root",
+        root.join("claude").to_str().unwrap(),
+        "--otlp-root",
+        root.join("ambiguous").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let doc: Value = serde_json::from_str(&out).unwrap();
+    let model = &rows(&doc, "models")[0];
+    assert_eq!(
+        cells(model, &["replies", "input_tokens", "output_tokens"]),
+        json!([3, 300, 15])
+    );
+    let tools = rows(&doc, "tools");
+    assert_eq!(
+        cells(row(tools, "agent", "otlp"), &["calls", "errors"]),
+        json!([2, 2])
+    );
+    assert_eq!(
+        cells(row(tools, "agent", "claude"), &["calls", "result_chars"]),
+        json!([1, 7])
+    );
+}
+
+#[test]
+fn native_pairs_survive_sparse_copies_in_either_order_and_incomplete_claimants() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/overlap");
+    let root = std::env::temp_dir().join(format!("bigsister-enrichment-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    for (first, second) in [
+        ("otlp/one.json", "enrichment/sparse.json"),
+        ("enrichment/sparse.json", "otlp/one.json"),
+    ] {
+        for (source, name) in [
+            (first, "a.json"),
+            (second, "b.json"),
+            ("enrichment/incomplete.json", "c.json"),
+        ] {
+            std::fs::copy(fixture.join(source), root.join(name)).unwrap();
+        }
+        let (code, out, err) = run(&[
+            "all",
+            "--since",
+            SINCE,
+            "--json",
+            "--claude-root",
+            fixture.join("claude").to_str().unwrap(),
+            "--otlp-root",
+            root.to_str().unwrap(),
+        ]);
+        assert_eq!(code, 0, "{err}");
+        let doc: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(
+            cells(&rows(&doc, "models")[0], &["replies", "input_tokens"]),
+            json!([1, 100])
+        );
+        let tools = rows(&doc, "tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(
+            cells(&tools[0], &["agent", "calls", "result_chars"]),
+            json!(["claude", 1, 7])
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn mixed_in_memory_exports_use_both_formats_and_require_a_trace_for_native_precedence() {
+    let native = Memory {
+        agent: Agent::Claude,
+        path: "transcript.jsonl",
+        text: include_str!("fixtures/overlap/claude/transcript.jsonl"),
+    };
+    let complete = include_str!("fixtures/overlap/otlp/one.json");
+    let anonymous = include_str!("fixtures/overlap/no-trace/export.json");
+    let export = |path, text| Memory {
+        agent: Agent::Otlp,
+        path,
+        text,
+    };
+    let repeated = vec![
+        export("first.json", complete),
+        native,
+        export("again.jsonl", complete),
+    ];
+    let missing_trace = vec![native, export("anonymous.json", anonymous)];
+    assert_mixed_memory_replies(&repeated, SINCE, 1);
+    assert_mixed_memory_replies(&repeated, "2030-01-01T00:00:00Z", 0);
+    assert_mixed_memory_replies(&missing_trace, SINCE, 2);
+}
+
+fn assert_mixed_memory_replies(files: &[Memory], since: &str, expected: u64) {
+    let prices = Rc::new(Prices::bundled());
+    let opts = Opts {
+        limit: 10,
+        paths: false,
+        by_branch: false,
+        by_day: false,
+        home: None,
+        usd_per_mtok: None,
+        prices_file: None,
+    };
+    let mut detectors: Vec<Box<dyn Detector>> = vec![
+        Box::new(Models::new(Rc::clone(&prices))),
+        Box::new(ExportKeys::default()),
+    ];
+    let roots = scan_memory(
+        files,
+        "fixture",
+        Some(since.parse().unwrap()),
+        &prices,
+        &mut detectors,
+    );
+    assert_eq!(roots.len(), 2);
+    let section = detectors[0].section(&opts);
+    assert_eq!(
+        section
+            .summary
+            .iter()
+            .find(|(k, _)| k == "replies")
+            .unwrap()
+            .1,
+        json!(expected)
+    );
+    let identities = detectors[1].section(&opts);
+    assert!(identities.tables.is_empty() && identities.summary.is_empty());
 }

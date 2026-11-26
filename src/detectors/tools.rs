@@ -30,12 +30,14 @@ struct Counts {
 struct Call {
     tool: String,
     input: String,
+    source: Option<(String, String)>,
 }
 
 /// Tool calls and their results, by agent and tool.
 #[derive(Default)]
 pub struct Tools {
     claude: ClaudeCalls<Call>,
+    overlap: crate::otlp::Overlap,
     /// Erroring results in a row so far in the session.
     run: u64,
     /// By tool and input, the erroring results of that call since it last succeeded.
@@ -135,6 +137,10 @@ pub(super) fn printed(name: &str) -> String {
 }
 
 impl Detector for Tools {
+    fn export_keys(&mut self, keys: std::rc::Rc<crate::otlp::ExportKeys>) {
+        self.overlap.enable(keys);
+    }
+
     fn agents(&self) -> &'static [Agent] {
         &[
             Agent::Claude,
@@ -187,17 +193,42 @@ impl Detector for Tools {
                 continue;
             }
             let tool = printed(name_of(b));
-            self.tools.entry((s.agent, tool.clone())).or_default().calls += 1;
-            if fresh && let Some(id) = id {
-                let input = b.get("input").map_or_else(String::new, Value::to_string);
-                self.claude.wait(id, Call { tool, input });
+            if s.agent == Agent::Otlp && id.is_some_and(|span| self.overlap.skip_export(span, true))
+            {
+                continue;
             }
+            self.tools.entry((s.agent, tool.clone())).or_default().calls += 1;
+            let Some(id) = id.filter(|_| fresh) else {
+                continue;
+            };
+            let input = b.get("input").map_or_else(String::new, Value::to_string);
+            let source = if s.agent == Agent::Claude && self.overlap.enabled() {
+                r.value["sessionId"]
+                    .as_str()
+                    .map(|session| (session.to_owned(), name_of(b).to_owned()))
+            } else {
+                None
+            };
+            self.claude.wait(
+                id,
+                Call {
+                    tool,
+                    input,
+                    source,
+                },
+            );
         }
         for b in tool_results(r) {
             let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
             if let Some(call) = self.claude.take(id)
                 && r.in_window
             {
+                if s.agent == Agent::Claude
+                    && let Some((session, raw_name)) = &call.source
+                    && r.value["sessionId"].as_str() == Some(session)
+                {
+                    self.overlap.note_native(session, raw_name, id, true);
+                }
                 self.result(s.agent, call, b);
             }
         }
@@ -251,6 +282,34 @@ impl Detector for Tools {
 #[cfg(test)]
 mod tests {
     use super::printed;
+
+    #[test]
+    fn idless_calls_count_without_waiting_for_a_result() {
+        use super::{Agent, Detector, Record, Session, Tools};
+        let session = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let value = serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}});
+        let mut tools = Tools::default();
+        tools.record(
+            &session,
+            &Record {
+                value: &value,
+                in_window: true,
+            },
+        );
+        assert_eq!(tools.tools[&(Agent::Claude, "Read".into())].calls, 1);
+        let value = serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","content":"unpaired"}]}});
+        tools.record(
+            &session,
+            &Record {
+                value: &value,
+                in_window: true,
+            },
+        );
+        assert_eq!(tools.tools[&(Agent::Claude, "Read".into())].result_chars, 0);
+    }
 
     #[test]
     fn only_tool_like_names_are_printed() {
