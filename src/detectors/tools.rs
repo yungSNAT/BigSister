@@ -30,12 +30,14 @@ struct Counts {
 struct Call {
     tool: String,
     input: String,
+    source: Option<(String, String)>,
 }
 
 /// Tool calls and their results, by agent and tool.
 #[derive(Default)]
 pub struct Tools {
     claude: ClaudeCalls<Call>,
+    overlap: crate::otlp::Overlap,
     /// Erroring results in a row so far in the session.
     run: u64,
     /// By tool and input, the erroring results of that call since it last succeeded.
@@ -135,6 +137,10 @@ pub(super) fn printed(name: &str) -> String {
 }
 
 impl Detector for Tools {
+    fn export_keys(&mut self, keys: std::rc::Rc<crate::otlp::ExportKeys>) {
+        self.overlap.enable(keys);
+    }
+
     fn agents(&self) -> &'static [Agent] {
         &[
             Agent::Claude,
@@ -187,10 +193,28 @@ impl Detector for Tools {
                 continue;
             }
             let tool = printed(name_of(b));
+            if s.agent == Agent::Otlp && id.is_some_and(|span| self.overlap.skip_export(span, true))
+            {
+                continue;
+            }
             self.tools.entry((s.agent, tool.clone())).or_default().calls += 1;
             if fresh && let Some(id) = id {
                 let input = b.get("input").map_or_else(String::new, Value::to_string);
-                self.claude.wait(id, Call { tool, input });
+                let source = if s.agent == Agent::Claude && self.overlap.enabled() {
+                    r.value["sessionId"]
+                        .as_str()
+                        .map(|session| (session.to_owned(), name_of(b).to_owned()))
+                } else {
+                    None
+                };
+                self.claude.wait(
+                    id,
+                    Call {
+                        tool,
+                        input,
+                        source,
+                    },
+                );
             }
         }
         for b in tool_results(r) {
@@ -198,6 +222,12 @@ impl Detector for Tools {
             if let Some(call) = self.claude.take(id)
                 && r.in_window
             {
+                if s.agent == Agent::Claude
+                    && let Some((session, raw_name)) = &call.source
+                    && r.value["sessionId"].as_str() == Some(session)
+                {
+                    self.overlap.note_native(session, raw_name, id, true);
+                }
                 self.result(s.agent, call, b);
             }
         }

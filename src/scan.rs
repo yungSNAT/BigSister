@@ -97,6 +97,8 @@ impl Record<'_> {
 /// A waste detector. It sees only lines it wants, parsed once per line.
 pub trait Detector {
     fn agents(&self) -> &'static [Agent];
+    /// Supplies export identities only when both Claude and OTLP are being scanned.
+    fn export_keys(&mut self, _keys: std::rc::Rc<crate::otlp::ExportKeys>) {}
     /// A cheap test on the raw line; only lines that pass are parsed.
     ///
     /// shortcut: the tests look for compact JSON such as `"type":"attachment"`, as
@@ -225,6 +227,45 @@ pub(crate) fn scan_range_dyn(
     prices: &Prices,
     dets: &mut [&mut (dyn Detector + 'static)],
 ) -> Vec<RootStats> {
+    prepare_overlap(roots.iter().map(|r| r.0), dets, |keys| {
+        let exports: Vec<_> = roots
+            .iter()
+            .filter(|r| r.0 == Agent::Otlp)
+            .cloned()
+            .collect();
+        scan_roots(&exports, since, until, prices, &mut [keys]);
+    });
+    scan_roots(roots, since, until, prices, dets)
+}
+
+fn prepare_overlap(
+    agents: impl Iterator<Item = Agent>,
+    dets: &mut [&mut (dyn Detector + 'static)],
+    scan_exports: impl FnOnce(&mut crate::otlp::ExportKeys),
+) {
+    let mut native = false;
+    let mut otlp = false;
+    for agent in agents {
+        native |= agent == Agent::Claude;
+        otlp |= agent == Agent::Otlp;
+    }
+    if native && otlp && dets.iter().any(|det| det.agents().contains(&Agent::Otlp)) {
+        let mut keys = crate::otlp::ExportKeys::default();
+        scan_exports(&mut keys);
+        let shared = std::rc::Rc::new(keys);
+        for det in dets {
+            det.export_keys(shared.clone());
+        }
+    }
+}
+
+fn scan_roots(
+    roots: &[(Agent, PathBuf)],
+    since: Option<Timestamp>,
+    until: Option<Timestamp>,
+    prices: &Prices,
+    dets: &mut [&mut (dyn Detector + 'static)],
+) -> Vec<RootStats> {
     let window = Window {
         since,
         until,
@@ -237,7 +278,11 @@ pub(crate) fn scan_range_dyn(
         .unwrap_or(SystemTime::UNIX_EPOCH);
     let mut out = Vec::new();
     let mut earlier = Earlier::default();
-    for (agent, root) in roots {
+    for (agent, root) in roots
+        .iter()
+        .filter(|(agent, _)| *agent != Agent::Otlp)
+        .chain(roots.iter().filter(|(agent, _)| *agent == Agent::Otlp))
+    {
         let active: Vec<usize> = (0..dets.len())
             .filter(|&i| dets[i].agents().contains(agent))
             .collect();
@@ -315,6 +360,25 @@ pub(crate) fn scan_memory_range_dyn(
     prices: &Prices,
     dets: &mut [&mut (dyn Detector + 'static)],
 ) -> Vec<RootStats> {
+    prepare_overlap(files.iter().map(|f| f.agent), dets, |keys| {
+        let exports: Vec<_> = files
+            .iter()
+            .filter(|f| f.agent == Agent::Otlp)
+            .copied()
+            .collect();
+        scan_memory_files(&exports, root, since, until, prices, &mut [keys]);
+    });
+    scan_memory_files(files, root, since, until, prices, dets)
+}
+
+fn scan_memory_files(
+    files: &[Memory],
+    root: &str,
+    since: Option<Timestamp>,
+    until: Option<Timestamp>,
+    prices: &Prices,
+    dets: &mut [&mut (dyn Detector + 'static)],
+) -> Vec<RootStats> {
     let window = Window {
         since,
         until,
@@ -326,6 +390,7 @@ pub(crate) fn scan_memory_range_dyn(
             agents.push(f.agent);
         }
     }
+    agents.sort_by_key(|agent| *agent == Agent::Otlp);
     let mut out = Vec::new();
     let mut earlier = Earlier::default();
     for agent in agents {
@@ -345,9 +410,10 @@ pub(crate) fn scan_memory_range_dyn(
         for f in mine {
             st.files += 1;
             // An in-memory transcript cannot fail to read.
+            let (reader, rewrite) = memory_reader(f);
             let _ = scan_file(
-                Box::new(f.text.as_bytes()),
-                None,
+                reader,
+                rewrite,
                 Path::new(f.path),
                 &window,
                 dets,
@@ -359,6 +425,20 @@ pub(crate) fn scan_memory_range_dyn(
         out.push(st);
     }
     out
+}
+
+fn memory_reader(file: &Memory) -> (Box<dyn BufRead>, Option<Rewrite>) {
+    let reader: Box<dyn BufRead> = Box::new(file.text.as_bytes());
+    if file.agent == Agent::Otlp {
+        let reader = if file.path.ends_with(".json") {
+            one_line(reader)
+        } else {
+            reader
+        };
+        (reader, Some(Rewrite::Otlp(crate::otlp::Otlp::default())))
+    } else {
+        (reader, None)
+    }
 }
 
 /// Stateless line filter a detector can offer for parallel pre-parsing.
