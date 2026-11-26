@@ -1,14 +1,15 @@
 //! OpenCode databases that are unreadable, empty, malformed or oddly placed.
 
 use std::path::Path;
+#[cfg(unix)]
 use std::process::Command;
 
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 
-use crate::{
-    Messages, SINCE, T0, add_session, database, empty, finish, report, row, run, start, tool,
-};
+use crate::{Messages, T0, add_session, database, empty, finish, report, row, start, tool};
+#[cfg(unix)]
+use crate::{SINCE, run};
 
 /// The files in `dir`, by name, with their bytes and modification times.
 fn files(dir: &Path) -> Vec<(String, Vec<u8>, std::time::SystemTime)> {
