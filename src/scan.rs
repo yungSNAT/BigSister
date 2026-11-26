@@ -382,10 +382,11 @@ fn open_for_agent(
             .map(|(r, index)| (r, Some(Rewrite::Gemini(index))))
             .map_err(OpenError::Unreadable),
         Agent::Qwen => Ok((reader, Some(Rewrite::Qwen))),
-        Agent::Otlp if path.extension().is_some_and(|x| x == "json") => {
-            Ok((one_line(reader), Some(Rewrite::Otlp)))
-        }
-        Agent::Otlp => Ok((reader, Some(Rewrite::Otlp))),
+        Agent::Otlp if path.extension().is_some_and(|x| x == "json") => Ok((
+            one_line(reader),
+            Some(Rewrite::Otlp(crate::otlp::Otlp::default())),
+        )),
+        Agent::Otlp => Ok((reader, Some(Rewrite::Otlp(crate::otlp::Otlp::default())))),
         _ => Ok((reader, None)),
     }
 }
@@ -837,13 +838,15 @@ fn scan_opencode(
 
 /// A `*.json` OTLP file, which holds one object, compact or not, as one compact line, so
 /// that it reads as a `*.jsonl` file of one line does. A file that is not one JSON value,
-/// or is longer than `MAX_LINE`, is read as it is, so its lines count as skipped.
+/// or is longer than `MAX_LINE`, is read as it is, so its lines count as skipped. A byte
+/// order mark before it is dropped.
 fn one_line(mut reader: Box<dyn BufRead>) -> Box<dyn BufRead> {
     let mut text = Vec::new();
     let read = reader.by_ref().take(MAX_LINE + 1).read_to_end(&mut text);
     if read.is_ok()
         && text.len() as u64 <= MAX_LINE
-        && let Ok(v) = serde_json::from_slice::<Value>(&text)
+        && let Ok(v) =
+            serde_json::from_slice::<Value>(text.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&text))
     {
         text = v.to_string().into_bytes();
     }
@@ -1678,6 +1681,15 @@ mod tests {
             ]
         );
         assert_eq!(st.unreadable, 0);
+    }
+
+    #[test]
+    fn a_json_file_after_a_byte_order_mark_reads_as_one_compact_line() {
+        let text = b"\xEF\xBB\xBF{\n  \"resourceSpans\": [\n    {}\n  ]\n}\n";
+        let mut lines = Lines::new(one_line(Box::new(&text[..])));
+        let first = lines.next_line().expect("read").map(Cow::into_owned);
+        assert_eq!(first.as_deref(), Some(r#"{"resourceSpans":[{}]}"#));
+        assert!(lines.next_line().expect("read").is_none());
     }
 
     #[test]

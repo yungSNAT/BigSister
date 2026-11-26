@@ -63,7 +63,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     pub qwen_root: Option<PathBuf>,
 
-    /// Folder of OTLP/JSON trace files holding GenAI spans (*.json, *.jsonl, *.jsonl.zst); read only when given
+    /// Folder of OTLP/JSON trace files holding GenAI spans (*.json, *.jsonl, *.jsonl.zst); read only when given. A session also read from transcripts counts twice
     #[arg(long, global = true, value_name = "DIR")]
     pub otlp_root: Option<PathBuf>,
 

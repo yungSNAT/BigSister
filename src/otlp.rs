@@ -13,7 +13,8 @@
 //!
 //! - An inference span has a model (`gen_ai.response.model`, else
 //!   `gen_ai.request.model`) and `gen_ai.usage.input_tokens` or
-//!   `gen_ai.usage.output_tokens`. It becomes a Claude `assistant` record whose id is the
+//!   `gen_ai.usage.output_tokens`, or their deprecated names `gen_ai.usage.prompt_tokens`
+//!   and `gen_ai.usage.completion_tokens`. It becomes a Claude `assistant` record whose id is the
 //!   span's, in the session named by `gen_ai.conversation.id`, else the trace. Cache reads
 //!   are `gen_ai.usage.cache_read.input_tokens` and cache writes
 //!   `gen_ai.usage.cache_write.input_tokens`, or the older
@@ -24,20 +25,38 @@
 //!   guessed, so `models` counts the reply as skipped.
 //! - A tool span has `gen_ai.operation.name` `execute_tool` and a `gen_ai.tool.name`. It
 //!   becomes a synthetic `assistant` record, which `models` passes over, holding one
-//!   `tool_use` block with an empty input, and a
-//!   `user` record holding its `tool_result`, with no content, which is an error when the
+//!   `tool_use` block with an empty input under the span's id (a tool call id need not be
+//!   unique across traces), and a `user` record holding its `tool_result`, with no
+//!   content, which is an error when the
 //!   span's status code is 2 (error) or it has an `error.type`. Tool inputs and results
 //!   are never read.
 //!
 //! Each record is written at its span's end time, the spans of a line in end-time order.
-//! Other spans are ignored. A line that is not a JSON object with a `resourceSpans` list
-//! counts as a skipped line, as does a GenAI span without a span id or an end time.
+//! Other spans are ignored, as is a span whose trace and span ids an earlier line of the
+//! file held, as when an exporter writes a batch again. A line that is not a JSON object
+//! with a `resourceSpans` list counts as a skipped line, as does a GenAI span without a
+//! span id or an end time.
+
+use std::collections::HashSet;
 
 use serde_json::{Map, Value, json};
 
-/// Appends the Claude Code records for one OTLP/JSON trace export to `out`. Returns 1 for
-/// a line that is not one, plus the GenAI spans left out for lacking an id or a time.
-pub fn read(line: &str, out: &mut Vec<String>) -> u64 {
+/// An OTLP/JSON trace file, read a line at a time.
+#[derive(Default)]
+pub struct Otlp {
+    /// The trace and span ids of the spans read so far.
+    seen: HashSet<(String, String)>,
+}
+
+impl Otlp {
+    /// Appends the Claude Code records for one OTLP/JSON trace export to `out`. Returns 1
+    /// for a line that is not one, plus the GenAI spans left out for lacking an id or a time.
+    pub fn read(&mut self, line: &str, out: &mut Vec<String>) -> u64 {
+        read(line, out, &mut self.seen)
+    }
+}
+
+fn read(line: &str, out: &mut Vec<String>, seen: &mut HashSet<(String, String)>) -> u64 {
     let line = line.trim_start_matches('\u{feff}');
     if line.trim().is_empty() {
         return 0;
@@ -59,6 +78,12 @@ pub fn read(line: &str, out: &mut Vec<String>) -> u64 {
         .filter_map(|s| s.get("spans").and_then(Value::as_array))
         .flatten();
     for span in all {
+        let ids = ["traceId", "spanId"].map(|k| span.get(k).and_then(Value::as_str));
+        if let [Some(trace), Some(id)] = ids
+            && !seen.insert((trace.to_owned(), id.to_owned()))
+        {
+            continue;
+        }
         match span_records(span) {
             Ok(Some(found)) => spans.push(found),
             Ok(None) => {}
@@ -80,8 +105,7 @@ fn span_records(span: &Value) -> Result<Option<(i128, Vec<String>)>, ()> {
         .str("gen_ai.response.model")
         .or_else(|| a.str("gen_ai.request.model"))
         .filter(|m| !m.is_empty());
-    let usage = a.int("gen_ai.usage.input_tokens").is_some()
-        || a.int("gen_ai.usage.output_tokens").is_some();
+    let usage = a.input().is_some() || a.output().is_some();
     if !tool && !(model.is_some() && usage) {
         return Ok(None);
     }
@@ -122,6 +146,18 @@ impl<'a> Attrs<'a> {
         self.get(key)?.get("stringValue")?.as_str()
     }
 
+    /// `gen_ai.usage.input_tokens`, or its deprecated name.
+    fn input(&self) -> Option<u64> {
+        self.int("gen_ai.usage.input_tokens")
+            .or_else(|| self.int("gen_ai.usage.prompt_tokens"))
+    }
+
+    /// `gen_ai.usage.output_tokens`, or its deprecated name.
+    fn output(&self) -> Option<u64> {
+        self.int("gen_ai.usage.output_tokens")
+            .or_else(|| self.int("gen_ai.usage.completion_tokens"))
+    }
+
     /// An `intValue`, which OTLP/JSON writes as a string or a number.
     fn int(&self, key: &str) -> Option<u64> {
         match self.get(key)?.get("intValue")? {
@@ -150,14 +186,14 @@ fn reply(a: &Attrs<'_>, model: &str, id: &str, session: &str, ts: &Value) -> Str
         .unwrap_or(0);
     let mut usage = Map::new();
     let cached = read.saturating_add(write);
-    if let Some(input) = a.int("gen_ai.usage.input_tokens")
+    if let Some(input) = a.input()
         && cached <= input
     {
         usage.insert("input_tokens".to_owned(), (input - cached).into());
     }
     usage.insert("cache_read_input_tokens".to_owned(), read.into());
     usage.insert("cache_creation_input_tokens".to_owned(), write.into());
-    let output = a.int("gen_ai.usage.output_tokens").unwrap_or(0);
+    let output = a.output().unwrap_or(0);
     usage.insert("output_tokens".to_owned(), output.into());
     format!(
         "{{\"type\":\"assistant\",\"sessionId\":{},\"message\":{{\"model\":{},\"id\":{},\"role\":\"assistant\",\"content\":[],\"usage\":{}}},\"timestamp\":{ts}}}",
@@ -170,16 +206,12 @@ fn reply(a: &Attrs<'_>, model: &str, id: &str, session: &str, ts: &Value) -> Str
 
 /// A tool span as a call and its result.
 fn tool_records(span: &Value, a: &Attrs<'_>, id: &str, session: &str, ts: &Value) -> Vec<String> {
-    let call = a
-        .str("gen_ai.tool.call.id")
-        .filter(|c| !c.is_empty())
-        .unwrap_or(id);
     let name = a.str("gen_ai.tool.name").unwrap_or("");
     let error = span.pointer("/status/code").and_then(Value::as_u64) == Some(2)
         || a.get("error.type").is_some();
-    let call_block = json!({"type": "tool_use", "id": call, "name": name, "input": {}});
+    let call_block = json!({"type": "tool_use", "id": id, "name": name, "input": {}});
     let result =
-        json!({"type": "tool_result", "tool_use_id": call, "content": "", "is_error": error});
+        json!({"type": "tool_result", "tool_use_id": id, "content": "", "is_error": error});
     vec![
         json!({"type": "assistant", "sessionId": session, "uuid": format!("{id}-call"),
                "message": {"model": "<synthetic>", "role": "assistant", "content": [call_block]}, "timestamp": ts})
@@ -196,7 +228,7 @@ mod tests {
 
     fn records(line: &str) -> (Vec<Value>, u64) {
         let mut out = Vec::new();
-        let bad = read(line, &mut out);
+        let bad = Otlp::default().read(line, &mut out);
         let parsed = out
             .iter()
             .map(|l| serde_json::from_str(l).expect("JSON"))
@@ -341,7 +373,10 @@ mod tests {
             attr("error.type", json!({"stringValue": "timeout"})),
         ]});
         let mut out = Vec::new();
-        assert_eq!(read(&export(&[ok, failed, typed]), &mut out), 0);
+        assert_eq!(
+            Otlp::default().read(&export(&[ok, failed, typed]), &mut out),
+            0
+        );
         assert!(!out.concat().contains("SENTINEL"));
         let out: Vec<Value> = out
             .iter()
@@ -357,7 +392,8 @@ mod tests {
         let result = &out[1]["message"]["content"][0];
         assert_eq!(result["tool_use_id"], "x2");
         assert_eq!(result["is_error"], true);
-        assert_eq!(out[2]["message"]["content"][0]["id"], "call-9");
+        // The span id, as a call id need not be unique across traces.
+        assert_eq!(out[2]["message"]["content"][0]["id"], "x1");
         assert_eq!(out[3]["message"]["content"][0]["is_error"], false);
         assert_eq!(out[5]["message"]["content"][0]["is_error"], true);
     }
@@ -384,5 +420,54 @@ mod tests {
         assert_eq!(records("not JSON").1, 1);
         assert_eq!(records("{\"resourceLogs\":[]}").1, 1);
         assert_eq!(records("  ").1, 0);
+    }
+
+    #[test]
+    fn deprecated_token_names_are_read_when_the_current_ones_are_absent() {
+        let span = inference(
+            "d",
+            "1",
+            vec![
+                attr("gen_ai.request.model", json!({"stringValue": "m"})),
+                attr("gen_ai.usage.prompt_tokens", json!({"intValue": "70"})),
+                attr("gen_ai.usage.completion_tokens", json!({"intValue": "7"})),
+            ],
+        );
+        let (out, bad) = records(&export(&[span]));
+        assert_eq!(bad, 0);
+        assert_eq!(
+            out[0]["message"]["usage"],
+            json!({"input_tokens": 70, "cache_read_input_tokens": 0,
+                   "cache_creation_input_tokens": 0, "output_tokens": 7})
+        );
+    }
+
+    #[test]
+    fn a_span_written_again_counts_once_and_calls_sharing_an_id_stay_apart() {
+        let call = |id: &str| {
+            json!({"traceId": format!("t-{id}"), "spanId": id, "endTimeUnixNano": "5",
+            "attributes": [
+                attr("gen_ai.operation.name", json!({"stringValue": "execute_tool"})),
+                attr("gen_ai.tool.name", json!({"stringValue": "fetch"})),
+                attr("gen_ai.tool.call.id", json!({"stringValue": "call_0"})),
+            ]})
+        };
+        let line = export(&[call("p"), call("q")]);
+        let mut file = Otlp::default();
+        let mut out = Vec::new();
+        assert_eq!(file.read(&line, &mut out), 0);
+        assert_eq!(file.read(&line, &mut out), 0);
+        let ids: Vec<Value> = out
+            .iter()
+            .map(|l| serde_json::from_str::<Value>(l).expect("JSON"))
+            .map(|v| v["message"]["content"][0].clone())
+            .map(|b| {
+                b.get("id")
+                    .or_else(|| b.get("tool_use_id"))
+                    .cloned()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(ids, ["p", "p", "q", "q"]);
     }
 }

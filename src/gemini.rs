@@ -40,7 +40,7 @@ pub enum Rewrite {
     Gemini(Gemini),
     Qwen,
     /// An OTLP/JSON trace file ([`crate::otlp`]).
-    Otlp,
+    Otlp(crate::otlp::Otlp),
 }
 
 impl Rewrite {
@@ -51,7 +51,7 @@ impl Rewrite {
         match self {
             Self::Gemini(g) => g.read(line, out),
             Self::Qwen => qwen(line, out),
-            Self::Otlp => crate::otlp::read(line, out),
+            Self::Otlp(o) => o.read(line, out),
         }
     }
 }
