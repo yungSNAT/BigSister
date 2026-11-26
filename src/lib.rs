@@ -1,5 +1,6 @@
 //! BigSister: where a coding agent's tokens and checks go, from its own transcripts.
 
+pub mod antigravity;
 pub mod cli;
 pub mod detectors;
 pub mod diff;
@@ -224,8 +225,14 @@ pub(crate) fn chosen(cli: &Cli) -> Option<Agent> {
         AgentChoice::Opencode => Some(Agent::OpenCode),
         AgentChoice::Gemini => Some(Agent::Gemini),
         AgentChoice::Qwen => Some(Agent::Qwen),
+        AgentChoice::Antigravity => Some(Agent::Antigravity),
     }
 }
+
+/// Default folders under home whose names are too long to share a line in
+/// [`resolve_roots`].
+const OPENCODE_DIR: &str = ".local/share/opencode";
+const AGY_DIR: &str = ".gemini/antigravity/brain";
 
 /// The transcript folders to scan for agents that `--agent` allows and the chosen
 /// detectors read, and notes on default folders that are missing.
@@ -240,13 +247,10 @@ pub(crate) fn resolve_roots(
         (Agent::Claude, cli.claude_root.clone(), ".claude/projects"),
         (Agent::Codex, cli.codex_root.clone(), ".codex/sessions"),
         (Agent::Pi, cli.pi_root.clone(), ".pi/agent/sessions"),
-        (
-            Agent::OpenCode,
-            cli.opencode_root.clone(),
-            ".local/share/opencode",
-        ),
+        (Agent::OpenCode, cli.opencode_root.clone(), OPENCODE_DIR),
         (Agent::Gemini, cli.gemini_root.clone(), ".gemini/tmp"),
         (Agent::Qwen, cli.qwen_root.clone(), ".qwen/projects"),
+        (Agent::Antigravity, cli.antigravity_root.clone(), AGY_DIR),
     ];
     let mut roots = Vec::new();
     let mut skipped = Vec::new();

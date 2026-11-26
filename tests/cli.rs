@@ -1873,6 +1873,7 @@ fn default_folders_that_cannot_be_listed_are_skipped_with_a_note() {
             "opencode transcript folder not found: ~/.local/share/opencode",
             "gemini transcript folder unreadable: ~/.gemini/tmp",
             "qwen transcript folder not found: ~/.qwen/projects",
+            "antigravity transcript folder not found: ~/.gemini/antigravity/brain",
             "codex transcript folder unreadable: ~/.codex/archived_sessions"
         ])
     );
@@ -2094,7 +2095,7 @@ fn help_says_pipes_reads_codex_commands_too() {
     assert_eq!(code, 0);
     let help = stdout.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        help.contains("a pipe into tail or head hides (Claude, Codex, pi, OpenCode, Gemini, Qwen)"),
+        help.contains("a pipe into tail or head hides (Claude, Codex, pi, OpenCode, Gemini, Qwen, Antigravity)"),
         "{stdout}"
     );
 }
@@ -3197,12 +3198,15 @@ fn pi_output_never_contains_transcript_content() {
 
 const GEMINI: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/gemini");
 const QWEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/qwen");
+const ANTIGRAVITY: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/antigravity");
 
-/// Each of the 2 agents, its folder option and its fixture: one session whose 5 tool
-/// calls are a test run piped into `tail`, `git status` twice, a read and a failed edit.
-const GEMINI_AND_QWEN: [(&str, &str, &str); 2] = [
+/// Gemini CLI, Qwen Code and Antigravity, each with its folder option and its fixture: one
+/// session whose 5 tool calls are a test run piped into `tail`, `git status` twice, a read
+/// and a failed edit.
+const GEMINI_AND_QWEN: [(&str, &str, &str); 3] = [
     ("gemini", "--gemini-root", GEMINI),
     ("qwen", "--qwen-root", QWEN),
+    ("antigravity", "--antigravity-root", ANTIGRAVITY),
 ];
 
 /// `bigsister all --agent <agent> --json` over that agent's fixture.
@@ -3431,7 +3435,8 @@ fn a_missing_pi_folder_is_an_error_when_asked_for_and_noted_otherwise() {
             "pi transcript folder not found: ~/.pi/agent/sessions",
             "opencode transcript folder not found: ~/.local/share/opencode",
             "gemini transcript folder not found: ~/.gemini/tmp",
-            "qwen transcript folder not found: ~/.qwen/projects"
+            "qwen transcript folder not found: ~/.qwen/projects",
+            "antigravity transcript folder not found: ~/.gemini/antigravity/brain"
         ])
     );
     assert_eq!(doc["roots"].as_array().expect("roots").len(), 2, "{doc}");
@@ -4058,6 +4063,49 @@ fn completions_print_a_script_for_each_supported_shell() {
         assert_eq!(code, 0, "{shell}: {stderr}");
         assert!(stdout.contains("bigsister"), "{shell}: {stdout}");
     }
+}
+
+/// Antigravity's full log is read when a conversation has one, and its cut-short log only
+/// when it has none; other files in a conversation folder are not read.
+#[test]
+fn antigravity_reads_one_log_per_conversation_preferring_the_full_one() {
+    let doc = agent_report("antigravity", "--antigravity-root", ANTIGRAVITY);
+    assert_eq!(doc["roots"][0]["files"], json!(1));
+    let bash = find(
+        rows(&doc, "tools", 0),
+        &[("agent", json!("antigravity")), ("tool", json!("Bash"))],
+    );
+    assert_eq!(bash["calls"], json!(3));
+
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join("antigravity-short");
+    let _ = std::fs::remove_dir_all(&root);
+    copy_tree(Path::new(ANTIGRAVITY), &root);
+    let conv = std::fs::read_dir(&root)
+        .expect("conversations")
+        .next()
+        .expect("a conversation")
+        .expect("entry")
+        .path();
+    std::fs::remove_file(conv.join(".system_generated/logs/transcript_full.jsonl"))
+        .expect("remove the full log");
+    std::fs::create_dir_all(conv.join("scratch")).expect("scratch");
+    std::fs::copy(
+        conv.join(".system_generated/logs/transcript.jsonl"),
+        conv.join("scratch/transcript.jsonl"),
+    )
+    .expect("a stray log");
+    let doc = agent_report(
+        "antigravity",
+        "--antigravity-root",
+        root.to_str().expect("UTF-8 path"),
+    );
+    assert_eq!(doc["roots"][0]["files"], json!(1));
+    let bash = find(
+        rows(&doc, "tools", 0),
+        &[("agent", json!("antigravity")), ("tool", json!("Bash"))],
+    );
+    assert_eq!(bash["calls"], json!(1));
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 const PERMISSIONS: &str = concat!(
