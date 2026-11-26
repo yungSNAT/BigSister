@@ -76,7 +76,7 @@ pub(super) fn list_files(
 
 /// Adds `path` to `out` when it was `modified` at or after `cutoff`, or counts why its
 /// time cannot be read.
-pub(super) fn keep_recent(
+fn keep_recent(
     path: PathBuf,
     modified: io::Result<SystemTime>,
     cutoff: SystemTime,
@@ -168,7 +168,7 @@ pub(super) enum Open {
 
 /// Why a zstd frame header could not be read. The decoder's message is not given, as
 /// it can quote the file's bytes.
-pub(super) const ZSTD_HEADER: &str = "its zstd frame header cannot be read";
+const ZSTD_HEADER: &str = "its zstd frame header cannot be read";
 
 /// Why a transcript failed part way. An error the system gives names no file content;
 /// any other comes from decoding a `*.jsonl.zst` one, whose message can quote the data,
@@ -195,7 +195,7 @@ pub(super) fn open(path: &Path) -> Result<Box<dyn BufRead>, Open> {
 
 /// Why a zstd frame header could not be read: a file that ends before the magic
 /// number is not zstd, but one whose read fails is unreadable.
-pub(super) fn header_error(e: FrameDecoderError) -> Open {
+fn header_error(e: FrameDecoderError) -> Open {
     use ReadFrameHeaderError::{BadMagicNumber, MagicNumberReadError};
     let FrameDecoderError::ReadFrameHeaderError(e) = e else {
         return Open::Io(ZSTD_HEADER.to_owned());
@@ -213,7 +213,7 @@ pub(super) fn header_error(e: FrameDecoderError) -> Open {
 /// shortcut: reads one zstd frame, as Codex writes one per rollout (all 203 on one
 /// machine had one, 13 November 2026); a file with more frames counts as unreadable
 /// after its first. Decoding each frame in turn would be the upgrade.
-pub(super) struct OneFrame(StreamingDecoder<BufReader<File>, FrameDecoder>);
+struct OneFrame(StreamingDecoder<BufReader<File>, FrameDecoder>);
 
 impl Read for OneFrame {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {

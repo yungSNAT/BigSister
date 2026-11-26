@@ -135,7 +135,7 @@ pub(super) fn scan_file(
 /// that began before the window, only for a record time in the window, so that the file
 /// still counts as holding records in the window, when `seek` allows. Returns the lines
 /// skipped for length before it, which are the file's.
-pub(super) fn seek_window(lines: &mut Lines, feed: &mut Feed<'_, '_>, seek: bool) -> u64 {
+fn seek_window(lines: &mut Lines, feed: &mut Feed<'_, '_>, seek: bool) -> u64 {
     let over_long = lines.over_long;
     while seek && !feed.saw_record {
         let Ok(Some(line)) = lines.next_line() else {

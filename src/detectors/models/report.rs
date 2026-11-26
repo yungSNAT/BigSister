@@ -264,7 +264,7 @@ impl Models {
 
 /// A table of `groups`, each with its key cells, under `keys` and the counts' columns,
 /// most input dollars first.
-pub(super) fn group_table<'a>(
+fn group_table<'a>(
     title: &str,
     keys: &[&'static str],
     groups: impl Iterator<Item = (Vec<Value>, &'a Group)>,

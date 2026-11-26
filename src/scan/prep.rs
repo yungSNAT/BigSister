@@ -18,9 +18,9 @@ use crate::gemini::{Gemini, Rewrite};
 use crate::prices::Prices;
 
 /// Files prepared in parallel per batch, bounding peak memory on large corpora.
-pub(super) const PARALLEL_BATCH: usize = 16;
+const PARALLEL_BATCH: usize = 16;
 /// Maximum prepared events or raw-buffer bytes per file before falling back to streaming.
-pub(super) const MAX_PREP_EVENTS: usize = 65_536;
+const MAX_PREP_EVENTS: usize = 65_536;
 pub(super) const MAX_PREP_RAW_BYTES: usize = 32 << 20;
 
 /// Why opening or indexing a transcript failed before lines were read.
@@ -29,7 +29,7 @@ pub(super) enum OpenError {
     Unreadable(String),
 }
 
-pub(super) fn open_for_agent(
+fn open_for_agent(
     path: &Path,
     agent: Agent,
 ) -> Result<(Box<dyn BufRead>, Option<Rewrite>), OpenError> {
@@ -55,7 +55,7 @@ pub(super) fn open_for_agent(
     }
 }
 
-pub(super) fn record_open_error(st: &mut RootStats, err: &OpenError) {
+fn record_open_error(st: &mut RootStats, err: &OpenError) {
     match err {
         OpenError::NotZstd => st.compressed += 1,
         OpenError::Unreadable(reason) => {
@@ -275,7 +275,7 @@ impl<'a> Prep<'a> {
     }
 }
 
-pub(super) fn push_timestamp(out: &mut Vec<PreparedEvent>, line: &str) -> bool {
+fn push_timestamp(out: &mut Vec<PreparedEvent>, line: &str) -> bool {
     let Some(t) = raw_timestamp(line) else {
         return false;
     };
@@ -328,7 +328,7 @@ pub(super) fn prepare_file(path: &Path, opts: &PrepareOpts<'_>) -> PreparedFile 
     })
 }
 
-pub(super) fn scan_path(
+fn scan_path(
     path: &Path,
     window: &Window<'_>,
     dets: &mut [&mut (dyn Detector + 'static)],
@@ -347,7 +347,7 @@ pub(super) fn scan_path(
     }
 }
 
-pub(super) fn apply_prepared(
+fn apply_prepared(
     path: &Path,
     file: &PreparedFile,
     window: &Window<'_>,
