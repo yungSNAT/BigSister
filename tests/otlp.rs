@@ -98,6 +98,30 @@ fn inference_spans_give_input_side_cost_by_model() {
 }
 
 #[test]
+fn only_inference_operations_count_as_replies() {
+    let root = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/otlp-operations"
+    );
+    let args = ["models", "--otlp-root", root, "--agent", "otlp"];
+    let (code, stdout, stderr) = run(&[&args[..], &["--since", SINCE, "--json"]].concat());
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let doc: Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let models = rows(&doc, "models");
+    // The chat span and the span naming no operation count; the embeddings span and the
+    // invoke_agent span, whose usage totals its inference spans', do not.
+    assert_eq!(models.len(), 1, "{models:?}");
+    let sonnet = row(models, "model", "claude-sonnet-4-5-20250929");
+    assert_eq!(
+        cells(sonnet, &["replies", "input_tokens", "output_tokens"]),
+        json!([2, 140, 14])
+    );
+    let summary = &doc["detectors"]["models"]["summary"];
+    assert_eq!(summary["replies_skipped"], json!(0), "{summary}");
+    assert_eq!(summary["replies_unpriced"], json!(0), "{summary}");
+}
+
+#[test]
 fn tool_spans_count_calls_and_errors_but_no_cascade_or_churn() {
     let doc = report(&[]);
     let tools = rows(&doc, "tools");

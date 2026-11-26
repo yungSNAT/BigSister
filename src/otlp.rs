@@ -22,7 +22,10 @@
 //!   record one only when it is available and not 0. The conventions count both inside
 //!   `gen_ai.usage.input_tokens`, so they are taken out of it; a span whose cache tokens
 //!   exceed its input tokens breaks that rule, and its input is left out rather than
-//!   guessed, so `models` counts the reply as skipped.
+//!   guessed, so `models` counts the reply as skipped. A span naming a
+//!   `gen_ai.operation.name` other than `chat`, `generate_content`, `text_completion` or
+//!   `realtime_inference` (such as `embeddings` or `invoke_agent`) is not a reply, as the
+//!   conventions sum usage only over those operations.
 //! - A tool span has `gen_ai.operation.name` `execute_tool` and a `gen_ai.tool.name`. It
 //!   becomes a synthetic `assistant` record, which `models` passes over, holding one
 //!   `tool_use` block with an empty input under the span's id (a tool call id need not be
@@ -34,8 +37,8 @@
 //! Each record is written at its span's end time, the spans of a line in end-time order.
 //! Other spans are ignored, as is a span whose trace and span ids already produced records
 //! in this file, as when an exporter writes a batch again. A line that is not a JSON object
-//! with a `resourceSpans` list counts as a skipped line, as does a GenAI span without a
-//! span id or an end time.
+//! with a `resourceSpans` list counts as a skipped line, as does a reply or tool span
+//! without a span id or an end time.
 
 use std::collections::HashSet;
 
@@ -224,8 +227,17 @@ fn read(line: &str, out: &mut Vec<String>, seen: &mut HashSet<(String, String)>)
     bad
 }
 
+/// The operations whose usage the conventions sum as inference; agent and embeddings
+/// spans also carry usage, an agent's the total of its inference spans'.
+const INFERENCE: [&str; 4] = [
+    "chat",
+    "generate_content",
+    "text_completion",
+    "realtime_inference",
+];
+
 /// A GenAI span's end time and its records; `None` for another span, and an error for a
-/// GenAI span without a span id or an end time.
+/// reply or tool span without a span id or an end time.
 fn span_records(span: &Value) -> Result<Option<(i128, Vec<String>)>, ()> {
     let a = Attrs(span.get("attributes").and_then(Value::as_array));
     let tool = a.str("gen_ai.operation.name") == Some("execute_tool")
@@ -235,7 +247,10 @@ fn span_records(span: &Value) -> Result<Option<(i128, Vec<String>)>, ()> {
         .or_else(|| a.str("gen_ai.request.model"))
         .filter(|m| !m.is_empty());
     let usage = a.input().is_some() || a.output().is_some();
-    if !tool && !(model.is_some() && usage) {
+    let inference = a
+        .str("gen_ai.operation.name")
+        .is_none_or(|op| INFERENCE.contains(&op));
+    if !tool && !(inference && model.is_some() && usage) {
         return Ok(None);
     }
     let trace = span.get("traceId").and_then(Value::as_str);
