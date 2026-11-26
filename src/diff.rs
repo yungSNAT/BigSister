@@ -60,6 +60,7 @@ pub fn run(cli: &Cli, before: &str, after: &str) -> Result<String, String> {
         limit: usize::MAX,
         paths: false,
         by_branch: false,
+        by_day: false,
         home: home.clone(),
         usd_per_mtok: cli.usd_per_mtok,
         prices_file: prices.file().map(str::to_owned),

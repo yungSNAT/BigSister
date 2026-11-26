@@ -19,6 +19,7 @@ fn run(lines: &[(bool, String)]) -> Section {
         limit: 100,
         paths: false,
         by_branch: false,
+        by_day: false,
         home: None,
         usd_per_mtok: None,
         prices_file: None,

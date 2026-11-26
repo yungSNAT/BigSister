@@ -178,6 +178,7 @@ bigsister context --sample
 | `--limit N` | 20 | Rows per table |
 | `--paths` | off | List the most re-read file paths |
 | `--by-branch` | off | Add a `models` table of input-side cost by the Git branch each reply records; off by default, as branch names can be private |
+| `--by-day` | off | Add a `models` table of input-side cost by the local day of each reply, latest first, so `--limit` keeps the latest days |
 | `--usd-per-mtok USD` | off | Price every token estimate, and `cache`'s write tokens at its write multipliers, at this one rate in US dollars per million tokens, instead of each model's price (above 0, up to 1000) |
 | `--prices FILE` | the bundled prices | Price token estimates from this price file instead; not with `--usd-per-mtok` |
 

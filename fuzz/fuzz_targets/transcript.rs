@@ -50,6 +50,7 @@ fn diff_cli(before: String, after: String, json: bool, csv: bool) -> Cli {
         limit: 20,
         paths: false,
         by_branch: false,
+        by_day: false,
         usd_per_mtok: None,
         prices: None,
     }
@@ -94,6 +95,7 @@ fuzz_target!(|data: &[u8]| {
         limit: 20,
         paths: true,
         by_branch: true,
+        by_day: true,
         home: None,
         usd_per_mtok: None,
         prices_file: None,

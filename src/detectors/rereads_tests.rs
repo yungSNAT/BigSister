@@ -34,6 +34,7 @@ fn table_cells(d: &Rereads, title: &str, keys: &[&str]) -> Value {
         limit: 100,
         paths: false,
         by_branch: false,
+        by_day: false,
         home: None,
         usd_per_mtok: None,
         prices_file: None,

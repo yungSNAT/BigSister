@@ -88,6 +88,7 @@ const OPTS: Opts = Opts {
     limit: 100,
     paths: false,
     by_branch: false,
+    by_day: false,
     home: None,
     usd_per_mtok: None,
     prices_file: None,

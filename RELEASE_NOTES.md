@@ -54,4 +54,5 @@ From this release BigSister is under Apache-2.0. v0.1.0 stays under FSL-1.1-ALv2
 - Antigravity's conversation logs (`~/.gemini/antigravity/brain`, `--antigravity-root`) for `pipes`, `polls` and `tools`; `--agent antigravity` reads them alone.
 - `permissions`: the permission decisions Claude Code records on tool results (from about 2.1.299), allowed and blocked, by cause (your answer to a prompt, a hook, the safety check, auto mode, a rule or the permission mode), by tool and, for auto mode's blocks, by category; tool results with no decision recorded are counted, so older transcripts never read as nothing blocked. Rule text and reason codes are never printed.
 - A scan that finds no record in the window prints `Nothing scanned` above the sections instead of zeros that read as a clean result; `--json` adds `records_scanned` and each root's `files_with_records`.
+- `--by-day` adds a `models` table of input-side cost by the local day of each reply, latest first.
 - `scan`: scope cross-file UUID deduplication to Claude Code and pi so Gemini CLI, Qwen Code and OpenCode per-session short IDs never collide across files or agents.
