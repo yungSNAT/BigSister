@@ -43,7 +43,8 @@ impl Agent {
             Agent::OpenCode => "opencode",
             Agent::Gemini => "gemini",
             Agent::Qwen => "qwen",
-            Agent::Antigravity | Agent::Otlp => "antigravity",
+            Agent::Antigravity => "antigravity",
+            Agent::Otlp => "otlp",
         }
     }
 
