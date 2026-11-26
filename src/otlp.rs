@@ -32,8 +32,8 @@
 //!   are never read.
 //!
 //! Each record is written at its span's end time, the spans of a line in end-time order.
-//! Other spans are ignored, as is a span whose trace and span ids an earlier line of the
-//! file held, as when an exporter writes a batch again. A line that is not a JSON object
+//! Other spans are ignored, as is a span whose trace and span ids already produced records
+//! in this file, as when an exporter writes a batch again. A line that is not a JSON object
 //! with a `resourceSpans` list counts as a skipped line, as does a GenAI span without a
 //! span id or an end time.
 
@@ -46,6 +46,129 @@ use serde_json::{Map, Value, json};
 pub struct Otlp {
     /// The trace and span ids of the spans read so far.
     seen: HashSet<(String, String)>,
+}
+
+/// Explicit export keys for a mixed-source report. Different spans reusing a key
+/// make it ambiguous. Repeating the same trace/span pair leaves it unique.
+#[derive(Default)]
+pub struct ExportKeys {
+    models: Keys,
+    tools: Keys,
+}
+type Key = (String, String, String);
+#[derive(Default)]
+struct Keys {
+    by_native: std::collections::HashMap<Key, Option<String>>,
+    by_span: std::collections::HashMap<String, Option<Key>>,
+}
+
+fn agree<T: PartialEq + Clone>(
+    entry: std::collections::hash_map::Entry<'_, impl Eq + std::hash::Hash, Option<T>>,
+    value: T,
+) {
+    let observed = entry.or_insert_with(|| Some(value.clone()));
+    if observed.as_ref() != Some(&value) {
+        *observed = None;
+    }
+}
+
+impl Keys {
+    fn observe(&mut self, session: &str, name: &str, id: &str, span: &str) {
+        let key = (session.to_owned(), name.to_owned(), id.to_owned());
+        if span.starts_with('/') {
+            self.by_native.insert(key, None);
+        } else {
+            agree(self.by_span.entry(span.to_owned()), key.clone());
+            agree(self.by_native.entry(key), span.to_owned());
+        }
+    }
+}
+
+impl crate::scan::Detector for ExportKeys {
+    fn agents(&self) -> &'static [crate::scan::Agent] {
+        &[crate::scan::Agent::Otlp]
+    }
+    fn wants(&self, _: &crate::scan::Session, line: &str) -> bool {
+        line.contains("otelNativeId")
+    }
+    fn record(&mut self, _: &crate::scan::Session, r: &crate::scan::Record<'_>) {
+        if !r.in_window {
+            return;
+        }
+        let (Some(native), Some(session)) = (
+            r.value["otelNativeId"].as_str(),
+            r.value["sessionId"].as_str(),
+        ) else {
+            return;
+        };
+        if let Some((model, id)) = crate::detectors::models::countable_identity(r.value) {
+            self.models.observe(session, model, native, id);
+        }
+        for call in crate::detectors::tool_uses(r) {
+            if let (Some(name), Some(id)) = (call["name"].as_str(), call["id"].as_str()) {
+                self.tools.observe(session, name, native, id);
+            }
+        }
+    }
+    fn section(&self, _: &crate::report::Opts) -> crate::report::Section {
+        crate::report::Section::default()
+    }
+}
+
+/// Keeps counted spans and unique, complete native counterparts for one section.
+#[derive(Default)]
+pub(crate) struct Overlap {
+    spans: HashSet<String>,
+    native: std::collections::HashMap<Key, bool>,
+    exports: Option<std::rc::Rc<ExportKeys>>,
+}
+
+impl Overlap {
+    pub(crate) fn enable(&mut self, exports: std::rc::Rc<ExportKeys>) {
+        self.exports = Some(exports);
+    }
+
+    pub(crate) fn note_native(&mut self, session: &str, name: &str, id: &str, tool: bool) {
+        let Some(exports) = &self.exports else { return };
+        let keys = if tool {
+            &exports.tools
+        } else {
+            &exports.models
+        };
+        let key = (session.into(), name.into(), id.into());
+        if keys.by_native.get(&key).is_some_and(Option::is_some) {
+            self.native
+                .entry(key)
+                .and_modify(|unique| *unique = false)
+                .or_insert(true);
+        }
+    }
+
+    pub(crate) fn enabled(&self) -> bool {
+        self.exports.is_some()
+    }
+
+    pub(crate) fn skip_export(&mut self, span: &str, tool: bool) -> bool {
+        if span.starts_with('/') {
+            return false;
+        }
+        if !self.spans.insert(span.to_owned()) {
+            return true;
+        }
+        let Some(exports) = &self.exports else {
+            return false;
+        };
+        let keys = if tool {
+            &exports.tools
+        } else {
+            &exports.models
+        };
+        let Some(Some(key)) = keys.by_span.get(span) else {
+            return false;
+        };
+        self.native.get(key) == Some(&true)
+            && keys.by_native.get(key).and_then(Option::as_deref) == Some(span)
+    }
 }
 
 impl Otlp {
@@ -78,14 +201,20 @@ fn read(line: &str, out: &mut Vec<String>, seen: &mut HashSet<(String, String)>)
         .filter_map(|s| s.get("spans").and_then(Value::as_array))
         .flatten();
     for span in all {
-        let ids = ["traceId", "spanId"].map(|k| span.get(k).and_then(Value::as_str));
-        if let [Some(trace), Some(id)] = ids
-            && !seen.insert((trace.to_owned(), id.to_owned()))
-        {
+        let key = span["traceId"]
+            .as_str()
+            .zip(span["spanId"].as_str())
+            .map(|(trace, id)| (trace.to_owned(), id.to_owned()));
+        if key.as_ref().is_some_and(|id| seen.contains(id)) {
             continue;
         }
         match span_records(span) {
-            Ok(Some(found)) => spans.push(found),
+            Ok(Some(found)) => {
+                if let Some(id) = key {
+                    seen.insert(id);
+                }
+                spans.push(found);
+            }
             Ok(None) => {}
             Err(()) => bad += 1,
         }
@@ -135,6 +264,18 @@ fn span_records(span: &Value) -> Result<Option<(i128, Vec<String>)>, ()> {
 struct Attrs<'a>(Option<&'a Vec<Value>>);
 
 impl<'a> Attrs<'a> {
+    fn native_id(&self, key: &str) -> Value {
+        if self.str("gen_ai.provider.name") == Some("anthropic")
+            && self
+                .str("gen_ai.conversation.id")
+                .is_some_and(|s| !s.is_empty())
+        {
+            Value::from(self.str(key).filter(|s| !s.is_empty()))
+        } else {
+            Value::Null
+        }
+    }
+
     fn get(&self, key: &str) -> Option<&'a Value> {
         self.0?
             .iter()
@@ -199,8 +340,9 @@ fn reply(a: &Attrs<'_>, model: &str, id: &str, session: &str, ts: &Value) -> Str
         usage.insert("output_tokens".to_owned(), output.into());
     }
     format!(
-        "{{\"type\":\"assistant\",\"sessionId\":{},\"message\":{{\"model\":{},\"id\":{},\"role\":\"assistant\",\"content\":[],\"usage\":{}}},\"timestamp\":{ts}}}",
+        "{{\"type\":\"assistant\",\"sessionId\":{},\"otelNativeId\":{},\"message\":{{\"model\":{},\"id\":{},\"role\":\"assistant\",\"content\":[],\"usage\":{}}},\"timestamp\":{ts}}}",
         Value::from(session),
+        a.native_id("gen_ai.response.id"),
         Value::from(model),
         Value::from(id),
         Value::Object(usage),
@@ -217,6 +359,7 @@ fn tool_records(span: &Value, a: &Attrs<'_>, id: &str, session: &str, ts: &Value
         json!({"type": "tool_result", "tool_use_id": id, "content": "", "is_error": error});
     vec![
         json!({"type": "assistant", "sessionId": session, "uuid": format!("{id}-call"),
+               "otelNativeId": a.native_id("gen_ai.tool.call.id"),
                "message": {"model": "<synthetic>", "role": "assistant", "content": [call_block]}, "timestamp": ts})
         .to_string(),
         json!({"type": "user", "sessionId": session, "uuid": format!("{id}-result"),
@@ -472,6 +615,28 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, ["t-p/p", "t-p/p", "t-q/q", "t-q/q"]);
+    }
+
+    #[test]
+    fn an_incomplete_span_does_not_hide_the_first_complete_copy() {
+        let complete = inference(
+            "s",
+            "1",
+            vec![
+                attr("gen_ai.request.model", json!({"stringValue": "m"})),
+                attr("gen_ai.usage.input_tokens", json!({"intValue": "7"})),
+            ],
+        );
+        let mut incomplete = complete.clone();
+        incomplete["endTimeUnixNano"] = Value::Null;
+        let mut file = Otlp::default();
+        let mut out = Vec::new();
+        assert_eq!(file.read(&export(&[incomplete]), &mut out), 1);
+        assert_eq!(
+            file.read(&export(&[complete.clone(), complete]), &mut out),
+            0
+        );
+        assert_eq!(out.len(), 1);
     }
 
     #[test]

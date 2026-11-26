@@ -37,6 +37,15 @@ pub(crate) struct DiffTotals {
 }
 
 impl Models {
+    pub(super) fn counted_counterpart(&mut self, s: &Session, reply: &Reply<'_>) -> bool {
+        if s.agent == Agent::Claude {
+            self.overlap
+                .note_native(reply.session, reply.model, reply.id, false);
+            return false;
+        }
+        s.agent == Agent::Otlp && self.overlap.skip_export(reply.id, false)
+    }
+
     /// Counts `reply`, of record `v`, under its Git branch and its local day.
     pub(super) fn add_by_branch_and_day(
         &mut self,
@@ -88,6 +97,7 @@ impl Models {
         Self {
             prices,
             ids: HashSet::new(),
+            overlap: crate::otlp::Overlap::default(),
             price: None,
             sub: None,
             here: HashSet::new(),

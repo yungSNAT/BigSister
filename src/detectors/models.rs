@@ -118,6 +118,7 @@ pub struct Models {
     prices: Rc<Prices>,
     /// The message ids of the file's replies so far.
     ids: HashSet<String>,
+    overlap: crate::otlp::Overlap,
     /// The price the scan gave for the reply about to be recorded.
     price: Option<f64>,
     /// The file's, when it is a subagent's with a reply in the window.
@@ -200,6 +201,10 @@ fn read_reply(v: &Value) -> Result<Reply<'_>, &'static str> {
     })
 }
 
+pub(crate) fn countable_identity(v: &Value) -> Option<(&str, &str)> {
+    read_reply(v).ok().map(|r| (r.model, r.id))
+}
+
 /// `object`'s `key` when it is a string, `None` when it is missing, else the key.
 fn label<'a>(object: &'a Value, key: &'static str) -> Result<Option<&'a str>, &'static str> {
     object.get(key).map(|v| v.as_str().ok_or(key)).transpose()
@@ -210,6 +215,10 @@ fn models_wants(_s: &Session, line: &str) -> bool {
 }
 
 impl Detector for Models {
+    fn export_keys(&mut self, keys: std::rc::Rc<crate::otlp::ExportKeys>) {
+        self.overlap.enable(keys);
+    }
+
     fn agents(&self) -> &'static [Agent] {
         &[Agent::Claude, Agent::Otlp]
     }
@@ -273,6 +282,9 @@ impl Detector for Models {
         }
         self.readable(reply.id);
         if !r.in_window {
+            return;
+        }
+        if self.counted_counterpart(s, &reply) {
             return;
         }
         let u = &reply.usage;
