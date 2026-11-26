@@ -125,6 +125,7 @@ impl Detector for Rereads {
             | Agent::OpenCode
             | Agent::Gemini
             | Agent::Qwen
+            | Agent::Antigravity
             | Agent::Otlp => {
                 line.contains("\"compact_boundary\"")
                     || line.contains("\"tool_use\"")
@@ -177,11 +178,11 @@ impl Detector for Rereads {
     }
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
-        let boundary = if s.agent == Agent::Codex {
-            r.kind() == "compacted"
-        } else {
+        let boundary = if s.agent.claude_shaped() {
             r.kind() == "system"
                 && r.value.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+        } else {
+            r.kind() == "compacted"
         };
         if boundary {
             self.boundary(s, r);
@@ -193,6 +194,7 @@ impl Detector for Rereads {
             | Agent::OpenCode
             | Agent::Gemini
             | Agent::Qwen
+            | Agent::Antigravity
             | Agent::Otlp => {
                 self.health.on_assistant(s, r);
                 for b in tool_uses(r) {

@@ -142,6 +142,7 @@ impl Detector for Tools {
             Agent::OpenCode,
             Agent::Gemini,
             Agent::Qwen,
+            Agent::Antigravity,
             Agent::Otlp,
         ]
     }

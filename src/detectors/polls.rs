@@ -130,6 +130,7 @@ impl Detector for Polls {
             Agent::OpenCode,
             Agent::Gemini,
             Agent::Qwen,
+            Agent::Antigravity,
         ]
     }
 
@@ -140,6 +141,7 @@ impl Detector for Polls {
             | Agent::OpenCode
             | Agent::Gemini
             | Agent::Qwen
+            | Agent::Antigravity
             | Agent::Otlp => {
                 line.contains("\"tool_use\"")
                     || self.claude.wants(line)
@@ -193,6 +195,7 @@ impl Detector for Polls {
             | Agent::OpenCode
             | Agent::Gemini
             | Agent::Qwen
+            | Agent::Antigravity
             | Agent::Otlp => {
                 self.truncation.note_claude_turn(r);
                 for b in tool_uses(r) {

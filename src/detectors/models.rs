@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
+use jiff::tz::TimeZone;
 use serde_json::{Value, json};
 
 use super::cache::{Entry, Usage, count, field, input_price, object, read, read_usage};
@@ -11,6 +12,7 @@ use super::tools::printed;
 use crate::prices::Prices;
 use crate::report::{Opts, Section, Table};
 use crate::scan::{Agent, Detector, Record, Session};
+use crate::time::parse_ts;
 
 /// Cache reads as a multiple of the uncached input price, by the exact model id, from
 /// <https://platform.claude.com/docs/en/about-claude/pricing> as read on 24 November 2026.
@@ -122,6 +124,8 @@ pub struct Models {
     groups: BTreeMap<(&'static str, String, String, String), Group>,
     /// By Git branch, as the reply's record gives it.
     branches: BTreeMap<String, Group>,
+    /// By the local day of the reply's time, `YYYY-MM-DD`.
+    days: BTreeMap<String, Group>,
     /// By main session id, the highest base input price of its replies' models in the
     /// window.
     parents: HashMap<String, f64>,
@@ -284,10 +288,7 @@ impl Detector for Models {
             .entry(key)
             .or_default()
             .add(&reply, weighted, price);
-        self.branches
-            .entry(reply.branch.map_or_else(|| NONE.to_owned(), printed_branch))
-            .or_default()
-            .add(&reply, weighted, price);
+        self.add_by_branch_and_day(r.value, &reply, weighted, price);
         if price.is_none() {
             let tokens = reply.input.saturating_add(u.write).saturating_add(u.read);
             self.unpriced_tokens = self.unpriced_tokens.saturating_add(tokens);
@@ -339,14 +340,22 @@ impl Detector for Models {
                 .into_iter()
                 .map(|(k, v)| (k.to_owned(), v))
                 .collect(),
-            tables: if opts.by_branch {
-                vec![self.table(opts), self.branch_table(opts)]
-            } else {
-                vec![self.table(opts)]
-            },
+            tables: self.tables(opts),
             notes: notes(opts),
         }
     }
+}
+
+/// The local day of `record`'s time, `YYYY-MM-DD`, or [`NONE`] when it has none that reads.
+fn local_day(record: &Value) -> String {
+    record
+        .get("timestamp")
+        .and_then(Value::as_str)
+        .and_then(parse_ts)
+        .map_or_else(
+            || NONE.to_owned(),
+            |t| t.to_zoned_datetime(TimeZone::system()).date().to_string(),
+        )
 }
 
 /// Dollars rounded to cents.
@@ -365,6 +374,9 @@ fn notes(opts: &Opts) -> Vec<String> {
     if opts.by_branch {
         notes.push(format!("By Git branch (--by-branch) groups the same replies by the gitBranch Claude Code records on each reply, the branch checked out in its working folder when it was written, not the branch its work was later merged to; {NONE} marks a reply that records none, an empty one or one that is not text, and (other) a branch whose name holds characters other than letters, digits and _, -, ., : or / between non-empty parts, or is over 128 characters long. Its dollars are the same estimate as above, rounded to cents in each row, so its total can differ from the first table's by a few cents."));
     }
+    if opts.by_day {
+        notes.push(format!("By local day (--by-day) groups the same replies by the day of each reply's recorded time in this machine's time zone (UTC when it cannot be found), latest first, so --limit keeps the latest days; {NONE} marks a reply whose time does not read. Its dollars are the same estimate as above, rounded to cents in each row."));
+    }
     notes
 }
 
@@ -377,6 +389,36 @@ pub(crate) struct DiffTotals {
 }
 
 impl Models {
+    /// Counts `reply`, of record `v`, under its Git branch and its local day.
+    fn add_by_branch_and_day(
+        &mut self,
+        v: &Value,
+        reply: &Reply<'_>,
+        weighted: f64,
+        price: Option<f64>,
+    ) {
+        self.branches
+            .entry(reply.branch.map_or_else(|| NONE.to_owned(), printed_branch))
+            .or_default()
+            .add(reply, weighted, price);
+        self.days
+            .entry(local_day(v))
+            .or_default()
+            .add(reply, weighted, price);
+    }
+
+    /// The first table, then the tables by branch and by day when asked for.
+    fn tables(&self, opts: &Opts) -> Vec<Table> {
+        [
+            Some(self.table(opts)),
+            opts.by_branch.then(|| self.branch_table(opts)),
+            opts.by_day.then(|| self.day_table(opts)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
     /// Unrounded input-side USD total and unpriced/skipped reply counts across all groups.
     pub(crate) fn diff_totals(&self, rate: Option<f64>) -> DiffTotals {
         let input_usd: f64 = self.groups.values().map(|g| g.cost.usd(rate)).sum();
@@ -404,6 +446,7 @@ impl Models {
             skipped_here: false,
             groups: BTreeMap::new(),
             branches: BTreeMap::new(),
+            days: BTreeMap::new(),
             parents: HashMap::new(),
             unsure: HashSet::new(),
             subs: Vec::new(),
@@ -556,6 +599,19 @@ impl Models {
             opts,
         )
     }
+
+    /// The days, latest first, so that `--limit` keeps the latest.
+    fn day_table(&self, opts: &Opts) -> Table {
+        let groups = self.days.iter().map(|(d, g)| (vec![json!(d)], g));
+        let all = Opts {
+            limit: usize::MAX,
+            ..opts.clone()
+        };
+        let mut table = group_table("By local day, latest first", &["day"], groups, &all);
+        table.rows.sort_by(|a, b| b[0].as_str().cmp(&a[0].as_str()));
+        table.truncate(opts.limit);
+        table
+    }
 }
 
 /// A table of `groups`, each with its key cells, under `keys` and the counts' columns,
@@ -608,6 +664,34 @@ fn group_table<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn days_list_latest_first_and_the_limit_keeps_the_latest() {
+        let mut m = models();
+        for d in ["2026-11-02", NONE, "2026-11-09", "2026-11-05"] {
+            m.days.insert(d.to_owned(), Group::default());
+        }
+        let opts = Opts {
+            limit: 2,
+            paths: false,
+            by_branch: false,
+            by_day: true,
+            home: None,
+            usd_per_mtok: None,
+            prices_file: None,
+        };
+        let t = m.day_table(&opts);
+        let days: Vec<&Value> = t.rows.iter().map(|r| &r[0]).collect();
+        assert_eq!(days, [&json!("2026-11-09"), &json!("2026-11-05")]);
+        assert_eq!(t.omitted, 2);
+        for record in [
+            json!({}),
+            json!({"timestamp": "yesterday"}),
+            json!({"timestamp": 7}),
+        ] {
+            assert_eq!(local_day(&record), NONE, "{record}");
+        }
+    }
 
     #[test]
     fn a_branch_prints_as_its_slash_separated_names_or_other() {

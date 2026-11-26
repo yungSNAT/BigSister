@@ -6,8 +6,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 /// Find where your coding agent's tokens go, from its own transcripts.
 ///
-/// Reads Claude Code, Codex, pi, OpenCode, Gemini CLI and Qwen Code transcripts, and
-/// OTLP/JSON trace files of GenAI spans, on this machine and prints names, counts and sizes. Never prints message text, tool inputs or tool outputs.
+/// Reads Claude Code, Codex, pi, OpenCode, Gemini CLI, Qwen Code and Antigravity transcripts,
+/// and OTLP/JSON trace files of GenAI spans, on this machine and prints names, counts and
+/// sizes. Never prints message text, tool inputs or tool outputs.
 #[derive(Parser, Debug)]
 #[command(name = "bigsister", version)]
 pub struct Cli {
@@ -26,6 +27,7 @@ pub struct Cli {
             "opencode_root",
             "gemini_root",
             "qwen_root",
+            "antigravity_root",
             "otlp_root",
         ]
     )]
@@ -63,6 +65,9 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     pub qwen_root: Option<PathBuf>,
 
+    /// Antigravity conversation folder [default: ~/.gemini/antigravity/brain]
+    #[arg(long, global = true, value_name = "DIR")]
+    pub antigravity_root: Option<PathBuf>,
     /// Folder of OTLP/JSON trace files holding GenAI spans (*.json, *.jsonl, *.jsonl.zst); read only when given. A session also read from transcripts counts twice
     #[arg(long, global = true, value_name = "DIR")]
     pub otlp_root: Option<PathBuf>,
@@ -86,6 +91,10 @@ pub struct Cli {
     /// Also give input-side cost by Git branch (models only)
     #[arg(long, global = true)]
     pub by_branch: bool,
+
+    /// Also give input-side cost by the local day of each reply (models only)
+    #[arg(long, global = true)]
+    pub by_day: bool,
 
     /// Price every token estimate, and cache writes at their write multipliers, at this one rate in US dollars per million tokens, instead of each model's price (above 0, up to 1000)
     #[arg(long, global = true, value_name = "USD", value_parser = parse_usd_per_mtok)]
@@ -120,13 +129,13 @@ pub enum Command {
     Context,
     /// Tool schemas loaded against tools called, and skills listed against skills used (Claude)
     Schemas,
-    /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex, pi, OpenCode, Gemini, Qwen)
+    /// Test runs whose exit status a pipe into tail or head hides (Claude, Codex, pi, OpenCode, Gemini, Qwen, Antigravity)
     Pipes,
-    /// Commands repeated with no edit in between (Claude, Codex, pi, OpenCode, Gemini, Qwen)
+    /// Commands repeated with no edit in between (Claude, Codex, pi, OpenCode, Gemini, Qwen, Antigravity)
     Polls,
     /// Files read again after a context compaction (Claude, Codex, pi, OpenCode, Qwen)
     Rereads,
-    /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi, OpenCode, Gemini, Qwen, OTLP)
+    /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi, OpenCode, Gemini, Qwen, Antigravity, OTLP)
     Tools,
     /// Cache writes by cause: new context, or rebuilds after an idle gap, a model switch or otherwise (Claude)
     Cache,
@@ -159,6 +168,7 @@ pub enum AgentChoice {
     Opencode,
     Gemini,
     Qwen,
+    Antigravity,
     Otlp,
     All,
 }

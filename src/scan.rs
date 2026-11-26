@@ -13,6 +13,7 @@ use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
 use ruzstd::decoding::{FrameDecoder, StreamingDecoder};
 use serde_json::Value;
 
+use crate::antigravity::Antigravity;
 use crate::gemini::{Gemini, Rewrite};
 use crate::prices::Prices;
 use crate::report::{Opts, Section};
@@ -27,6 +28,7 @@ pub enum Agent {
     OpenCode,
     Gemini,
     Qwen,
+    Antigravity,
     /// GenAI spans in OTLP/JSON trace files ([`crate::otlp`]).
     Otlp,
 }
@@ -41,7 +43,7 @@ impl Agent {
             Agent::OpenCode => "opencode",
             Agent::Gemini => "gemini",
             Agent::Qwen => "qwen",
-            Agent::Otlp => "otlp",
+            Agent::Antigravity | Agent::Otlp => "antigravity",
         }
     }
 
@@ -52,7 +54,13 @@ impl Agent {
     pub fn claude_shaped(self) -> bool {
         matches!(
             self,
-            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen | Agent::Otlp
+            Agent::Claude
+                | Agent::Pi
+                | Agent::OpenCode
+                | Agent::Gemini
+                | Agent::Qwen
+                | Agent::Antigravity
+                | Agent::Otlp
         )
     }
 }
@@ -241,9 +249,14 @@ pub(crate) fn scan_range_dyn(
             out.push(st);
             continue;
         }
-        let mut files = list_files(root, cutoff, *agent == Agent::Otlp, &mut st);
-        // An OTLP line has no top-level time, and its spans copy no others.
-        if agent.claude_shaped() && *agent != Agent::Otlp {
+        let mut files = if *agent == Agent::Antigravity {
+            antigravity_logs(root, cutoff, &mut st)
+        } else {
+            list_files(root, cutoff, *agent == Agent::Otlp, &mut st)
+        };
+        // Antigravity's steps record `created_at`, not `timestamp`, and an OTLP line has
+        // no top-level time; neither copies another file, so their files are not sorted.
+        if agent.claude_shaped() && !matches!(agent, Agent::Antigravity | Agent::Otlp) {
             // A copied record keeps its time, so reading by each file's first time reads
             // an original before a copy of part of it, whose first record is later. A pi
             // fork's header is written when it is made, after the entries it copies.
@@ -325,7 +338,7 @@ pub(crate) fn scan_memory_range_dyn(
         // In the order `scan` reads a folder's files.
         let mut mine: Vec<&Memory> = files.iter().filter(|f| f.agent == agent).collect();
         mine.sort_by_key(|f| Path::new(f.path));
-        if agent.claude_shaped() {
+        if agent.claude_shaped() && agent != Agent::Antigravity {
             mine.sort_by_cached_key(|f| first_time_in(Box::new(f.text.as_bytes())));
         }
         for f in mine {
@@ -378,8 +391,11 @@ fn open_for_agent(
         Err(Open::Io(reason)) => return Err(OpenError::Unreadable(reason)),
     };
     match agent {
-        Agent::Gemini => indexed(reader, path)
+        Agent::Gemini => indexed(reader, path, Gemini::index)
             .map(|(r, index)| (r, Some(Rewrite::Gemini(index))))
+            .map_err(OpenError::Unreadable),
+        Agent::Antigravity => indexed(reader, path, Antigravity::index)
+            .map(|(r, index)| (r, Some(Rewrite::Antigravity(index))))
             .map_err(OpenError::Unreadable),
         Agent::Qwen => Ok((reader, Some(Rewrite::Qwen))),
         Agent::Otlp if path.extension().is_some_and(|x| x == "json") => Ok((
@@ -781,13 +797,18 @@ fn scan_files_with_budget(
     }
 }
 
-/// Indexes Gemini CLI file `path` from `reader` ([`Gemini::index`]), then opens it again
-/// for the second pass, or says why either cannot be read.
-fn indexed(reader: Box<dyn BufRead>, path: &Path) -> Result<(Box<dyn BufRead>, Gemini), String> {
+/// Indexes Gemini CLI or Antigravity file `path` from `reader` with `note`
+/// ([`Gemini::index`], [`Antigravity::index`]), then opens it again for the second pass,
+/// or says why either cannot be read.
+fn indexed<T: Default>(
+    reader: Box<dyn BufRead>,
+    path: &Path,
+    note: fn(&mut T, &str),
+) -> Result<(Box<dyn BufRead>, T), String> {
     let mut lines = Lines::new(reader);
-    let mut index = Gemini::default();
+    let mut index = T::default();
     while let Some(line) = lines.next_line().map_err(|e| read_error(&e))? {
-        index.index(&line);
+        note(&mut index, &line);
     }
     let reader = open(path).map_err(|e| match e {
         Open::Io(reason) => reason,
@@ -882,12 +903,54 @@ fn list_files(root: &Path, cutoff: SystemTime, json: bool, st: &mut RootStats) -
                 if !compressed && !path.extension().is_some_and(wanted) {
                     continue;
                 }
-                match entry.metadata().and_then(|m| m.modified()) {
-                    Ok(m) if m >= cutoff => out.push(path),
-                    Ok(_) => {}
-                    Err(e) => st.count_unreadable(format!("a file's time cannot be read: {e}")),
-                }
+                let modified = entry.metadata().and_then(|m| m.modified());
+                keep_recent(path, modified, cutoff, &mut out, st);
             }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Adds `path` to `out` when it was `modified` at or after `cutoff`, or counts why its
+/// time cannot be read.
+fn keep_recent(
+    path: PathBuf,
+    modified: io::Result<SystemTime>,
+    cutoff: SystemTime,
+    out: &mut Vec<PathBuf>,
+    st: &mut RootStats,
+) {
+    match modified {
+        Ok(m) if m >= cutoff => out.push(path),
+        Ok(_) => {}
+        Err(e) => st.count_unreadable(format!("a file's time cannot be read: {e}")),
+    }
+}
+
+/// Antigravity's log of each conversation folder in `root` modified at or after
+/// `cutoff`: `<id>/.system_generated/logs/transcript_full.jsonl`, or `transcript.jsonl`
+/// beside it when there is no full log, whose long fields are cut short. Only those
+/// paths are looked at, as a conversation folder can hold whole repositories.
+fn antigravity_logs(root: &Path, cutoff: SystemTime, st: &mut RootStats) -> Vec<PathBuf> {
+    let Some(entries) = st.readable(fs::read_dir(root), "a folder cannot be listed") else {
+        return Vec::new();
+    };
+    let entries: Vec<_> = entries
+        .filter_map(|entry| st.readable(entry, "a folder entry cannot be read"))
+        .collect();
+    let mut out = Vec::new();
+    for entry in entries {
+        let logs = entry.path().join(".system_generated").join("logs");
+        let full = logs.join("transcript_full.jsonl");
+        let path = if full.is_file() {
+            full
+        } else {
+            logs.join("transcript.jsonl")
+        };
+        if path.is_file() {
+            let modified = fs::metadata(&path).and_then(|m| m.modified());
+            keep_recent(path, modified, cutoff, &mut out, st);
         }
     }
     out.sort();
@@ -1090,7 +1153,12 @@ impl Earlier {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
                 self.pi.insert(name.into_owned(), uuids);
             }
-            Agent::Codex | Agent::OpenCode | Agent::Gemini | Agent::Qwen | Agent::Otlp => {}
+            Agent::Codex
+            | Agent::OpenCode
+            | Agent::Gemini
+            | Agent::Qwen
+            | Agent::Antigravity
+            | Agent::Otlp => {}
         }
     }
 }
@@ -1182,7 +1250,7 @@ fn is_subagent(agent: Agent, path: &Path, first: &str) -> bool {
                 .and_then(Value::as_str)
                 .is_some_and(|p| !p.is_empty())
         }),
-        Agent::Pi | Agent::Gemini | Agent::Qwen | Agent::Otlp => false,
+        Agent::Pi | Agent::Gemini | Agent::Qwen | Agent::Antigravity | Agent::Otlp => false,
         Agent::OpenCode => serde_json::from_str::<Value>(first)
             .is_ok_and(|v| v.get("subagent") == Some(&Value::Bool(true))),
     }
@@ -1504,6 +1572,7 @@ mod tests {
             limit: 0,
             paths: false,
             by_branch: false,
+            by_day: false,
             home: None,
             usd_per_mtok: None,
             prices_file: None,
@@ -1530,6 +1599,24 @@ mod tests {
     }
 
     #[test]
+    fn antigravity_lists_only_conversation_logs_in_the_window() {
+        // nosemgrep: rust.lang.security.temp-dir.temp-dir -- a test fixture folder; no security decision rests on it
+        let dir = std::env::temp_dir().join(format!("bigsister-agy-{}", std::process::id()));
+        let logs = dir.join("b").join(".system_generated").join("logs");
+        fs::create_dir_all(dir.join("a")).expect("a conversation with no log");
+        fs::create_dir_all(&logs).expect("a conversation with a log");
+        fs::write(logs.join("transcript_full.jsonl"), b"{}\n").expect("write log");
+        let mut st = RootStats::new(Agent::Antigravity, dir.clone());
+        let later = SystemTime::now() + Duration::from_secs(3600);
+        assert!(antigravity_logs(&dir, later, &mut st).is_empty());
+        let found = antigravity_logs(&dir, SystemTime::UNIX_EPOCH, &mut st);
+        assert_eq!(found, [logs.join("transcript_full.jsonl")]);
+        assert!(antigravity_logs(&dir.join("missing"), later, &mut st).is_empty());
+        assert_eq!(st.unreadable, 1);
+        fs::remove_dir_all(&dir).expect("remove test directory");
+    }
+
+    #[test]
     fn a_gemini_transcript_that_changes_between_passes_is_reported() {
         // nosemgrep: rust.lang.security.temp-dir.temp-dir -- a test fixture folder; no security decision rests on it
         let dir = std::env::temp_dir().join(format!("bigsister-reopen-{}", std::process::id()));
@@ -1537,11 +1624,11 @@ mod tests {
         let path = dir.join("transcript.jsonl.zst");
         let first_pass = || Box::new(io::Cursor::new(b"{}\n")) as Box<dyn BufRead>;
         fs::write(&path, b"replacement").expect("write changed transcript");
-        let changed = indexed(first_pass(), &path)
+        let changed = indexed(first_pass(), &path, Gemini::index)
             .err()
             .expect("reject the replacement");
         fs::remove_file(&path).expect("remove transcript");
-        let removed = indexed(first_pass(), &path)
+        let removed = indexed(first_pass(), &path, Gemini::index)
             .err()
             .expect("report a missing transcript");
         fs::remove_dir(&dir).expect("remove test directory");
@@ -2074,6 +2161,7 @@ mod tests {
             limit: 0,
             paths: false,
             by_branch: false,
+            by_day: false,
             home: None,
             usd_per_mtok: None,
             prices_file: None,
@@ -2250,6 +2338,7 @@ mod tests {
             limit: 0,
             paths: false,
             by_branch: false,
+            by_day: false,
             home: None,
             usd_per_mtok: None,
             prices_file: None,
@@ -2327,6 +2416,7 @@ mod tests {
             limit: 0,
             paths: false,
             by_branch: false,
+            by_day: false,
             home: None,
             usd_per_mtok: None,
             prices_file: None,

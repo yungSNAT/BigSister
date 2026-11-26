@@ -1,5 +1,6 @@
 //! BigSister: where a coding agent's tokens and checks go, from its own transcripts.
 
+pub mod antigravity;
 pub mod cli;
 pub mod detectors;
 pub mod diff;
@@ -46,6 +47,7 @@ pub fn run(cli: &Cli) -> Result<String, String> {
         limit: cli.limit,
         paths: cli.paths,
         by_branch: cli.by_branch,
+        by_day: cli.by_day,
         home: home.clone(),
         usd_per_mtok: cli.usd_per_mtok,
         prices_file: prices.file().map(str::to_owned),
@@ -228,12 +230,13 @@ pub(crate) fn chosen(cli: &Cli) -> Option<Agent> {
         AgentChoice::Opencode => Some(Agent::OpenCode),
         AgentChoice::Gemini => Some(Agent::Gemini),
         AgentChoice::Qwen => Some(Agent::Qwen),
+        AgentChoice::Antigravity => Some(Agent::Antigravity),
         AgentChoice::Otlp => Some(Agent::Otlp),
     }
 }
 
 /// Each agent, the folder its option gives and its usual folder under the home folder.
-fn candidates(cli: &Cli) -> [(Agent, Option<PathBuf>, &'static str); 7] {
+fn candidates(cli: &Cli) -> [(Agent, Option<PathBuf>, &'static str); 8] {
     [
         (Agent::Claude, cli.claude_root.clone(), ".claude/projects"),
         (Agent::Codex, cli.codex_root.clone(), ".codex/sessions"),
@@ -245,6 +248,11 @@ fn candidates(cli: &Cli) -> [(Agent, Option<PathBuf>, &'static str); 7] {
         ),
         (Agent::Gemini, cli.gemini_root.clone(), ".gemini/tmp"),
         (Agent::Qwen, cli.qwen_root.clone(), ".qwen/projects"),
+        (
+            Agent::Antigravity,
+            cli.antigravity_root.clone(),
+            ".gemini/antigravity/brain",
+        ),
         (Agent::Otlp, cli.otlp_root.clone(), ""),
     ]
 }
