@@ -32,8 +32,8 @@
 //!   are never read.
 //!
 //! Each record is written at its span's end time, the spans of a line in end-time order.
-//! Other spans are ignored, as is a span whose trace and span ids an earlier line of the
-//! file held, as when an exporter writes a batch again. A line that is not a JSON object
+//! Other spans are ignored, as is a span whose trace and span ids already produced records
+//! in this file, as when an exporter writes a batch again. A line that is not a JSON object
 //! with a `resourceSpans` list counts as a skipped line, as does a GenAI span without a
 //! span id or an end time.
 
@@ -78,14 +78,20 @@ fn read(line: &str, out: &mut Vec<String>, seen: &mut HashSet<(String, String)>)
         .filter_map(|s| s.get("spans").and_then(Value::as_array))
         .flatten();
     for span in all {
-        let ids = ["traceId", "spanId"].map(|k| span.get(k).and_then(Value::as_str));
-        if let [Some(trace), Some(id)] = ids
-            && !seen.insert((trace.to_owned(), id.to_owned()))
-        {
+        let key = span["traceId"]
+            .as_str()
+            .zip(span["spanId"].as_str())
+            .map(|(trace, id)| (trace.to_owned(), id.to_owned()));
+        if key.as_ref().is_some_and(|id| seen.contains(id)) {
             continue;
         }
         match span_records(span) {
-            Ok(Some(found)) => spans.push(found),
+            Ok(Some(found)) => {
+                if let Some(id) = key {
+                    seen.insert(id);
+                }
+                spans.push(found);
+            }
             Ok(None) => {}
             Err(()) => bad += 1,
         }
@@ -472,6 +478,28 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, ["t-p/p", "t-p/p", "t-q/q", "t-q/q"]);
+    }
+
+    #[test]
+    fn an_incomplete_span_does_not_hide_the_first_complete_copy() {
+        let complete = inference(
+            "s",
+            "1",
+            vec![
+                attr("gen_ai.request.model", json!({"stringValue": "m"})),
+                attr("gen_ai.usage.input_tokens", json!({"intValue": "7"})),
+            ],
+        );
+        let mut incomplete = complete.clone();
+        incomplete["endTimeUnixNano"] = Value::Null;
+        let mut file = Otlp::default();
+        let mut out = Vec::new();
+        assert_eq!(file.read(&export(&[incomplete]), &mut out), 1);
+        assert_eq!(
+            file.read(&export(&[complete.clone(), complete]), &mut out),
+            0
+        );
+        assert_eq!(out.len(), 1);
     }
 
     #[test]
