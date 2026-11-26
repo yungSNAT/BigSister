@@ -42,6 +42,7 @@ fn diff_cli(before: String, after: String, json: bool, csv: bool) -> Cli {
         opencode_root: None,
         gemini_root: None,
         qwen_root: None,
+        otlp_root: None,
         json,
         csv,
         limit: 20,
@@ -67,6 +68,7 @@ fuzz_target!(|data: &[u8]| {
         (Agent::Pi, scan_dir.clone()),
         (Agent::Gemini, scan_dir.clone()),
         (Agent::Qwen, scan_dir.clone()),
+        (Agent::Otlp, scan_dir.clone()),
         (Agent::OpenCode, scan_dir),
     ];
     let since = Timestamp::UNIX_EPOCH;

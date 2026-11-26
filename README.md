@@ -222,7 +222,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-The fuzz target in `fuzz/` feeds any bytes to the transcript reader and every detector as Claude, Codex, pi, Gemini, Qwen and OpenCode transcripts (plain and compressed), `diff`, and the text, JSON and CSV report renderers. CI runs it for 5 minutes every Monday. It needs a nightly toolchain and `cargo install cargo-fuzz`; run it with `cargo +nightly fuzz run transcript`. A crash leaves its input in `fuzz/artifacts/`; turn it into a test before fixing it.
+The fuzz target in `fuzz/` feeds any bytes to the transcript reader and every detector as Claude, Codex, pi, Gemini, Qwen, OTLP and OpenCode transcripts (plain and compressed), `diff`, and the text, JSON and CSV report renderers. CI runs it for 5 minutes every Monday. It needs a nightly toolchain and `cargo install cargo-fuzz`; run it with `cargo +nightly fuzz run transcript`. A crash leaves its input in `fuzz/artifacts/`; turn it into a test before fixing it.
 
 ## Credits
 
