@@ -118,7 +118,7 @@ fn only_inference_operations_count_as_replies() {
     );
     let summary = &doc["detectors"]["models"]["summary"];
     assert_eq!(summary["replies_skipped"], json!(0), "{summary}");
-    assert_eq!(summary["unpriced_replies"], json!(0), "{summary}");
+    assert_eq!(summary["replies_unpriced"], json!(0), "{summary}");
 }
 
 #[test]
