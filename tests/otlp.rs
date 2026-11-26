@@ -1,7 +1,15 @@
 //! Runs `bigsister` over synthetic OTLP/JSON trace files of GenAI spans.
 
+use bigsister::{
+    detectors::models::Models,
+    otlp::ExportKeys,
+    prices::Prices,
+    report::Opts,
+    scan::{Agent, Detector, Memory, scan_memory},
+};
 use std::path::Path;
 use std::process::Command;
+use std::rc::Rc;
 
 use serde_json::{Value, json};
 
@@ -238,4 +246,66 @@ fn native_pairs_survive_sparse_copies_in_either_order_and_incomplete_claimants()
         );
     }
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn mixed_in_memory_exports_use_both_formats_and_require_a_trace_for_native_precedence() {
+    let native = Memory {
+        agent: Agent::Claude,
+        path: "transcript.jsonl",
+        text: include_str!("fixtures/overlap/claude/transcript.jsonl"),
+    };
+    let complete = include_str!("fixtures/overlap/otlp/one.json");
+    let anonymous = include_str!("fixtures/overlap/no-trace/export.json");
+    let export = |path, text| Memory {
+        agent: Agent::Otlp,
+        path,
+        text,
+    };
+    let repeated = vec![
+        export("first.json", complete),
+        native,
+        export("again.jsonl", complete),
+    ];
+    let missing_trace = vec![native, export("anonymous.json", anonymous)];
+    assert_mixed_memory_replies(&repeated, SINCE, 1);
+    assert_mixed_memory_replies(&repeated, "2030-01-01T00:00:00Z", 0);
+    assert_mixed_memory_replies(&missing_trace, SINCE, 2);
+}
+
+fn assert_mixed_memory_replies(files: &[Memory], since: &str, expected: u64) {
+    let prices = Rc::new(Prices::bundled());
+    let opts = Opts {
+        limit: 10,
+        paths: false,
+        by_branch: false,
+        by_day: false,
+        home: None,
+        usd_per_mtok: None,
+        prices_file: None,
+    };
+    let mut detectors: Vec<Box<dyn Detector>> = vec![
+        Box::new(Models::new(Rc::clone(&prices))),
+        Box::new(ExportKeys::default()),
+    ];
+    let roots = scan_memory(
+        files,
+        "fixture",
+        Some(since.parse().unwrap()),
+        &prices,
+        &mut detectors,
+    );
+    assert_eq!(roots.len(), 2);
+    let section = detectors[0].section(&opts);
+    assert_eq!(
+        section
+            .summary
+            .iter()
+            .find(|(k, _)| k == "replies")
+            .unwrap()
+            .1,
+        json!(expected)
+    );
+    let identities = detectors[1].section(&opts);
+    assert!(identities.tables.is_empty() && identities.summary.is_empty());
 }

@@ -73,13 +73,7 @@ fn agree<T: PartialEq + Clone>(
 }
 
 impl Keys {
-    fn observe(&mut self, record: &Value, name: &str, span: &str) {
-        let (Some(id), Some(session)) = (
-            record["otelNativeId"].as_str(),
-            record["sessionId"].as_str(),
-        ) else {
-            return;
-        };
+    fn observe(&mut self, session: &str, name: &str, id: &str, span: &str) {
         let key = (session.to_owned(), name.to_owned(), id.to_owned());
         if span.starts_with('/') {
             self.by_native.insert(key, None);
@@ -98,20 +92,26 @@ impl crate::scan::Detector for ExportKeys {
         line.contains("otelNativeId")
     }
     fn record(&mut self, _: &crate::scan::Session, r: &crate::scan::Record<'_>) {
-        if !r.in_window || !r.value["otelNativeId"].is_string() {
+        if !r.in_window {
             return;
         }
+        let (Some(native), Some(session)) = (
+            r.value["otelNativeId"].as_str(),
+            r.value["sessionId"].as_str(),
+        ) else {
+            return;
+        };
         if let Some((model, id)) = crate::detectors::models::countable_identity(r.value) {
-            self.models.observe(r.value, model, id);
+            self.models.observe(session, model, native, id);
         }
         for call in crate::detectors::tool_uses(r) {
             if let (Some(name), Some(id)) = (call["name"].as_str(), call["id"].as_str()) {
-                self.tools.observe(r.value, name, id);
+                self.tools.observe(session, name, native, id);
             }
         }
     }
     fn section(&self, _: &crate::report::Opts) -> crate::report::Section {
-        unreachable!("the export identity pass does not produce a report section")
+        crate::report::Section::default()
     }
 }
 

@@ -198,24 +198,25 @@ impl Detector for Tools {
                 continue;
             }
             self.tools.entry((s.agent, tool.clone())).or_default().calls += 1;
-            if fresh && let Some(id) = id {
-                let input = b.get("input").map_or_else(String::new, Value::to_string);
-                let source = if s.agent == Agent::Claude && self.overlap.enabled() {
-                    r.value["sessionId"]
-                        .as_str()
-                        .map(|session| (session.to_owned(), name_of(b).to_owned()))
-                } else {
-                    None
-                };
-                self.claude.wait(
-                    id,
-                    Call {
-                        tool,
-                        input,
-                        source,
-                    },
-                );
-            }
+            let Some(id) = id.filter(|_| fresh) else {
+                continue;
+            };
+            let input = b.get("input").map_or_else(String::new, Value::to_string);
+            let source = if s.agent == Agent::Claude && self.overlap.enabled() {
+                r.value["sessionId"]
+                    .as_str()
+                    .map(|session| (session.to_owned(), name_of(b).to_owned()))
+            } else {
+                None
+            };
+            self.claude.wait(
+                id,
+                Call {
+                    tool,
+                    input,
+                    source,
+                },
+            );
         }
         for b in tool_results(r) {
             let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or("");
@@ -281,6 +282,34 @@ impl Detector for Tools {
 #[cfg(test)]
 mod tests {
     use super::printed;
+
+    #[test]
+    fn idless_calls_count_without_waiting_for_a_result() {
+        use super::{Agent, Detector, Record, Session, Tools};
+        let session = Session {
+            agent: Agent::Claude,
+            subagent: false,
+        };
+        let value = serde_json::json!({"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{}}]}});
+        let mut tools = Tools::default();
+        tools.record(
+            &session,
+            &Record {
+                value: &value,
+                in_window: true,
+            },
+        );
+        assert_eq!(tools.tools[&(Agent::Claude, "Read".into())].calls, 1);
+        let value = serde_json::json!({"type":"user","message":{"content":[{"type":"tool_result","content":"unpaired"}]}});
+        tools.record(
+            &session,
+            &Record {
+                value: &value,
+                in_window: true,
+            },
+        );
+        assert_eq!(tools.tools[&(Agent::Claude, "Read".into())].result_chars, 0);
+    }
 
     #[test]
     fn only_tool_like_names_are_printed() {
