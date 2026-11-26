@@ -475,6 +475,13 @@ mod tests {
     }
 
     #[test]
+    fn an_end_time_reads_as_a_string_or_a_number() {
+        assert_eq!(nanos(&json!("20")), Some(20));
+        assert_eq!(nanos(&json!(20)), Some(20));
+        assert_eq!(nanos(&json!(-1)), None);
+    }
+
+    #[test]
     fn spans_sharing_a_span_id_across_traces_stay_apart() {
         let call = |trace: &str, code: u64| {
             json!({"traceId": trace, "spanId": "s", "endTimeUnixNano": "5",
