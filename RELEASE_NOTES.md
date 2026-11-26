@@ -1,6 +1,6 @@
 # v0.2.1
 
-BigSister v0.2.1 adds a `permissions` section, a `diff` command, Antigravity's logs and OpenTelemetry trace files as sources, and new tables in `cache`, `rereads`, `polls` and `models`. An install of v0.1.0 should also read v0.2.0's notes below.
+BigSister v0.2.1 adds a `permissions` section, a `diff` command, Antigravity's logs and OpenTelemetry trace files as sources, and new tables and measures in `cache`, `rereads`, `polls` and `models`. An install of v0.1.0 should also read v0.2.0's notes below.
 
 ## New since v0.2.0
 
@@ -12,7 +12,7 @@ BigSister v0.2.1 adds a `permissions` section, a `diff` command, Antigravity's l
 - `permissions`: the permission decisions Claude Code records on tool results (from about 2.1.299), allowed and blocked, by cause (your answer to a prompt, a hook, the safety check, auto mode, a rule or the permission mode), by tool and, for auto mode's blocks, by category; tool results with no decision recorded are counted, so older transcripts never read as nothing blocked. Rule text and reason codes are never printed.
 - A scan that finds no record in the window prints `Nothing scanned` above the sections instead of zeros that read as a clean result; `--json` adds `records_scanned` and each root's `files_with_records`.
 - `--by-day` adds a `models` table of input-side cost by the local day of each reply, latest first.
-- OpenTelemetry GenAI spans in OTLP/JSON trace files (`--otlp-root`, `--agent otlp`), from any agent that records them, for `models` (cost by model, with cache reads and writes) and `tools` (calls and errors). A span counts as a reply only when its `gen_ai.operation.name` is absent or names an inference operation (`chat`, `generate_content`, `text_completion` or `realtime_inference`), so embeddings and agent spans are not counted; a span exported again, or one the exporter matches to a counted Claude reply or tool call, counts once.
+- OpenTelemetry GenAI spans in OTLP/JSON trace files (`--otlp-root`, `--agent otlp`), from any agent that records them, for `models` (cost by model, with cache reads and writes) and `tools` (calls and errors). A span counts as a reply only when its `gen_ai.operation.name` is absent or names an inference operation (`chat`, `generate_content`, `text_completion` or `realtime_inference`), so embeddings and agent spans are not counted; a span exported again counts once, and when an Anthropic export records the conversation and the response or tool call ID, a matching in-window Claude reply or completed Claude call is counted in its place.
 
 ## Fixes
 
