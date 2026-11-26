@@ -109,24 +109,24 @@ fn span_records(span: &Value) -> Result<Option<(i128, Vec<String>)>, ()> {
     if !tool && !(model.is_some() && usage) {
         return Ok(None);
     }
+    let trace = span.get("traceId").and_then(Value::as_str);
+    // A span id is unique only within its trace, so the trace qualifies it.
     let id = span
         .get("spanId")
         .and_then(Value::as_str)
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("{}/{s}", trace.unwrap_or("")));
     let end = span.get("endTimeUnixNano").and_then(nanos);
     let ts = end.and_then(|n| jiff::Timestamp::from_nanosecond(n).ok());
     let (Some(id), Some(end), Some(ts)) = (id, end, ts) else {
         return Err(());
     };
     let ts = Value::from(ts.to_string());
-    let session = a
-        .str("gen_ai.conversation.id")
-        .or_else(|| span.get("traceId").and_then(Value::as_str))
-        .unwrap_or("");
+    let session = a.str("gen_ai.conversation.id").or(trace).unwrap_or("");
     let records = if tool {
-        tool_records(span, &a, id, session, &ts)
+        tool_records(span, &a, &id, session, &ts)
     } else {
-        vec![reply(&a, model.unwrap_or(""), id, session, &ts)]
+        vec![reply(&a, model.unwrap_or(""), &id, session, &ts)]
     };
     Ok(Some((end, records)))
 }
@@ -178,7 +178,9 @@ fn nanos(v: &Value) -> Option<i128> {
 /// An inference span as a Claude `assistant` record. Written as text: `model` must come
 /// first in the message, where the scan looks for a reply's model.
 fn reply(a: &Attrs<'_>, model: &str, id: &str, session: &str, ts: &Value) -> String {
-    // The conventions record a count when it is available and not 0.
+    // The conventions record a cache count only when it is available and not 0, so an
+    // absent one reads as 0. An output count has no such condition: a span without one
+    // gets none, and `models` counts the reply skipped rather than taking 0.
     let read = a.int("gen_ai.usage.cache_read.input_tokens").unwrap_or(0);
     let write = a
         .int("gen_ai.usage.cache_write.input_tokens")
@@ -193,8 +195,9 @@ fn reply(a: &Attrs<'_>, model: &str, id: &str, session: &str, ts: &Value) -> Str
     }
     usage.insert("cache_read_input_tokens".to_owned(), read.into());
     usage.insert("cache_creation_input_tokens".to_owned(), write.into());
-    let output = a.output().unwrap_or(0);
-    usage.insert("output_tokens".to_owned(), output.into());
+    if let Some(output) = a.output() {
+        usage.insert("output_tokens".to_owned(), output.into());
+    }
     format!(
         "{{\"type\":\"assistant\",\"sessionId\":{},\"message\":{{\"model\":{},\"id\":{},\"role\":\"assistant\",\"content\":[],\"usage\":{}}},\"timestamp\":{ts}}}",
         Value::from(session),
@@ -274,7 +277,7 @@ mod tests {
         let r = &out[0];
         assert_eq!(r["type"], "assistant");
         assert_eq!(r["sessionId"], "t1");
-        assert_eq!(r["message"]["id"], "s1");
+        assert_eq!(r["message"]["id"], "t1/s1");
         assert_eq!(r["message"]["model"], "m-resp");
         assert_eq!(r["timestamp"], "2025-11-20T00:53:20Z");
         assert_eq!(
@@ -309,7 +312,7 @@ mod tests {
         assert_eq!(
             out[0]["message"]["usage"],
             json!({"input_tokens": 60, "cache_read_input_tokens": 0,
-                   "cache_creation_input_tokens": 40, "output_tokens": 0})
+                   "cache_creation_input_tokens": 40})
         );
     }
 
@@ -385,15 +388,15 @@ mod tests {
         assert_eq!(out.len(), 6);
         // In end-time order: x2, x1, x3.
         let call = &out[0]["message"]["content"][0];
-        assert_eq!(call["id"], "x2");
+        assert_eq!(call["id"], "t/x2");
         assert_eq!(call["name"], "fetch");
         assert_eq!(call["input"], json!({}));
         assert_eq!(out[0]["message"]["model"], "<synthetic>");
         let result = &out[1]["message"]["content"][0];
-        assert_eq!(result["tool_use_id"], "x2");
+        assert_eq!(result["tool_use_id"], "t/x2");
         assert_eq!(result["is_error"], true);
-        // The span id, as a call id need not be unique across traces.
-        assert_eq!(out[2]["message"]["content"][0]["id"], "x1");
+        // The trace and span ids, as a call id need not be unique across traces.
+        assert_eq!(out[2]["message"]["content"][0]["id"], "t/x1");
         assert_eq!(out[3]["message"]["content"][0]["is_error"], false);
         assert_eq!(out[5]["message"]["content"][0]["is_error"], true);
     }
@@ -468,6 +471,27 @@ mod tests {
                     .unwrap()
             })
             .collect();
-        assert_eq!(ids, ["p", "p", "q", "q"]);
+        assert_eq!(ids, ["t-p/p", "t-p/p", "t-q/q", "t-q/q"]);
+    }
+
+    #[test]
+    fn spans_sharing_a_span_id_across_traces_stay_apart() {
+        let call = |trace: &str, code: u64| {
+            json!({"traceId": trace, "spanId": "s", "endTimeUnixNano": "5",
+            "status": {"code": code},
+            "attributes": [
+                attr("gen_ai.operation.name", json!({"stringValue": "execute_tool"})),
+                attr("gen_ai.tool.name", json!({"stringValue": "fetch"})),
+            ]})
+        };
+        let (out, bad) = records(&export(&[call("t1", 0), call("t2", 2)]));
+        assert_eq!(bad, 0);
+        let blocks: Vec<&Value> = out.iter().map(|v| &v["message"]["content"][0]).collect();
+        assert_eq!(blocks[0]["id"], "t1/s");
+        assert_eq!(blocks[1]["tool_use_id"], "t1/s");
+        assert_eq!(blocks[1]["is_error"], false);
+        assert_eq!(blocks[2]["id"], "t2/s");
+        assert_eq!(blocks[3]["tool_use_id"], "t2/s");
+        assert_eq!(blocks[3]["is_error"], true);
     }
 }
