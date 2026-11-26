@@ -6,8 +6,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 /// Find where your coding agent's tokens go, from its own transcripts.
 ///
-/// Reads Claude Code, Codex, pi, OpenCode, Gemini CLI, Qwen Code and Antigravity transcripts on this
-/// machine and prints names, counts and sizes. Never prints message text, tool inputs or tool outputs.
+/// Reads Claude Code, Codex, pi, OpenCode, Gemini CLI, Qwen Code and Antigravity transcripts,
+/// and OTLP/JSON trace files of GenAI spans, on this machine and prints names, counts and
+/// sizes. Never prints message text, tool inputs or tool outputs.
 #[derive(Parser, Debug)]
 #[command(name = "bigsister", version)]
 pub struct Cli {
@@ -27,6 +28,7 @@ pub struct Cli {
             "gemini_root",
             "qwen_root",
             "antigravity_root",
+            "otlp_root",
         ]
     )]
     pub sample: bool,
@@ -66,6 +68,9 @@ pub struct Cli {
     /// Antigravity conversation folder [default: ~/.gemini/antigravity/brain]
     #[arg(long, global = true, value_name = "DIR")]
     pub antigravity_root: Option<PathBuf>,
+    /// Folder of OTLP/JSON trace files holding GenAI spans (*.json, *.jsonl, *.jsonl.zst); read only when given. A session also read from transcripts counts twice
+    #[arg(long, global = true, value_name = "DIR")]
+    pub otlp_root: Option<PathBuf>,
 
     /// Print one JSON object instead of tables
     #[arg(long, global = true)]
@@ -130,11 +135,11 @@ pub enum Command {
     Polls,
     /// Files read again after a context compaction (Claude, Codex, pi, OpenCode, Qwen)
     Rereads,
-    /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi, OpenCode, Gemini, Qwen, Antigravity)
+    /// Tool calls by tool: result sizes, errors, error cascades and retry churn (Claude, pi, OpenCode, Gemini, Qwen, Antigravity, OTLP)
     Tools,
     /// Cache writes by cause: new context, or rebuilds after an idle gap, a model switch or otherwise (Claude)
     Cache,
-    /// Input-side cost by model, reasoning effort and subagent type, and subagents on their parent's top-priced model (Claude)
+    /// Input-side cost by model, reasoning effort and subagent type, and subagents on their parent's top-priced model (Claude, OTLP)
     Models,
     /// Hook durations, cancellations and timeouts (Claude)
     Hooks,
@@ -164,5 +169,6 @@ pub enum AgentChoice {
     Gemini,
     Qwen,
     Antigravity,
+    Otlp,
     All,
 }

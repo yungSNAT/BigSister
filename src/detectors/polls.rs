@@ -141,7 +141,8 @@ impl Detector for Polls {
             | Agent::OpenCode
             | Agent::Gemini
             | Agent::Qwen
-            | Agent::Antigravity => {
+            | Agent::Antigravity
+            | Agent::Otlp => {
                 line.contains("\"tool_use\"")
                     || self.claude.wants(line)
                     || (self.truncation.has_pending() && line.contains("\"type\":\"assistant\""))
@@ -194,7 +195,8 @@ impl Detector for Polls {
             | Agent::OpenCode
             | Agent::Gemini
             | Agent::Qwen
-            | Agent::Antigravity => {
+            | Agent::Antigravity
+            | Agent::Otlp => {
                 self.truncation.note_claude_turn(r);
                 for b in tool_uses(r) {
                     let id = b.get("id").and_then(Value::as_str);

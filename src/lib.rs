@@ -6,6 +6,7 @@ pub mod detectors;
 pub mod diff;
 pub mod gemini;
 pub mod opencode;
+pub mod otlp;
 pub mod pi;
 pub mod prices;
 pub mod programs;
@@ -175,6 +176,9 @@ fn read_transcripts(
             Vec::new(),
         ));
     }
+    if cli.agent == AgentChoice::Otlp && cli.otlp_root.is_none() {
+        return Err("--agent otlp reads only the folder --otlp-root gives".to_owned());
+    }
     let (roots, skipped) = resolve_roots(cli, &read, home)?;
     Ok((scan::scan(&roots, since, prices, dets), skipped))
 }
@@ -227,13 +231,31 @@ pub(crate) fn chosen(cli: &Cli) -> Option<Agent> {
         AgentChoice::Gemini => Some(Agent::Gemini),
         AgentChoice::Qwen => Some(Agent::Qwen),
         AgentChoice::Antigravity => Some(Agent::Antigravity),
+        AgentChoice::Otlp => Some(Agent::Otlp),
     }
 }
 
-/// Default folders under home whose names are too long to share a line in
-/// [`resolve_roots`].
-const OPENCODE_DIR: &str = ".local/share/opencode";
-const AGY_DIR: &str = ".gemini/antigravity/brain";
+/// Each agent, the folder its option gives and its usual folder under the home folder.
+fn candidates(cli: &Cli) -> [(Agent, Option<PathBuf>, &'static str); 8] {
+    [
+        (Agent::Claude, cli.claude_root.clone(), ".claude/projects"),
+        (Agent::Codex, cli.codex_root.clone(), ".codex/sessions"),
+        (Agent::Pi, cli.pi_root.clone(), ".pi/agent/sessions"),
+        (
+            Agent::OpenCode,
+            cli.opencode_root.clone(),
+            ".local/share/opencode",
+        ),
+        (Agent::Gemini, cli.gemini_root.clone(), ".gemini/tmp"),
+        (Agent::Qwen, cli.qwen_root.clone(), ".qwen/projects"),
+        (
+            Agent::Antigravity,
+            cli.antigravity_root.clone(),
+            ".gemini/antigravity/brain",
+        ),
+        (Agent::Otlp, cli.otlp_root.clone(), ""),
+    ]
+}
 
 /// The transcript folders to scan for agents that `--agent` allows and the chosen
 /// detectors read, and notes on default folders that are missing.
@@ -244,24 +266,17 @@ pub(crate) fn resolve_roots(
 ) -> Result<Roots, String> {
     let chosen = chosen(cli);
     let wanted = |a: Agent| read.contains(&a) && chosen.is_none_or(|c| c == a);
-    let candidates = [
-        (Agent::Claude, cli.claude_root.clone(), ".claude/projects"),
-        (Agent::Codex, cli.codex_root.clone(), ".codex/sessions"),
-        (Agent::Pi, cli.pi_root.clone(), ".pi/agent/sessions"),
-        (Agent::OpenCode, cli.opencode_root.clone(), OPENCODE_DIR),
-        (Agent::Gemini, cli.gemini_root.clone(), ".gemini/tmp"),
-        (Agent::Qwen, cli.qwen_root.clone(), ".qwen/projects"),
-        (Agent::Antigravity, cli.antigravity_root.clone(), AGY_DIR),
-    ];
     let mut roots = Vec::new();
     let mut skipped = Vec::new();
-    for (agent, explicit, default) in candidates {
+    for (agent, explicit, default) in candidates(cli) {
         if !wanted(agent) {
             continue;
         }
         let given = explicit.is_some();
         let path = match explicit {
             Some(p) => p,
+            // OTLP files have no usual folder: they are read only from one given.
+            None if agent == Agent::Otlp => continue,
             None => PathBuf::from(home.ok_or("cannot find the home folder")?).join(default),
         };
         let Some(problem) = folder_problem(&path) else {

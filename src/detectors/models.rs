@@ -205,7 +205,7 @@ fn models_wants(_s: &Session, line: &str) -> bool {
 
 impl Detector for Models {
     fn agents(&self) -> &'static [Agent] {
-        &[Agent::Claude]
+        &[Agent::Claude, Agent::Otlp]
     }
 
     fn wants(&self, s: &Session, line: &str) -> bool {

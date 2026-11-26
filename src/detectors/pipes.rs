@@ -78,7 +78,8 @@ impl Detector for Pipes {
             | Agent::OpenCode
             | Agent::Gemini
             | Agent::Qwen
-            | Agent::Antigravity => line.contains("\"tool_use\"") || self.claude.wants(line),
+            | Agent::Antigravity
+            | Agent::Otlp => line.contains("\"tool_use\"") || self.claude.wants(line),
             Agent::Codex => codex_call_line(line) || self.codex.wants(line),
         }
     }
@@ -106,7 +107,8 @@ impl Detector for Pipes {
             | Agent::OpenCode
             | Agent::Gemini
             | Agent::Qwen
-            | Agent::Antigravity => {
+            | Agent::Antigravity
+            | Agent::Otlp => {
                 for b in tool_uses(r) {
                     let id = b.get("id").and_then(Value::as_str);
                     let fresh = self.claude.note(id);

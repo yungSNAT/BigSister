@@ -1,5 +1,5 @@
 #![no_main]
-//! Any bytes as Claude, Codex, pi, Gemini, Qwen, Antigravity and OpenCode transcripts, `diff`, and all
+//! Any bytes as Claude, Codex, pi, Gemini, Qwen, Antigravity, OTLP and OpenCode transcripts, `diff`, and all
 //! report formats (text, JSON and CSV).
 
 use std::path::PathBuf;
@@ -45,6 +45,7 @@ fn diff_cli(before: String, after: String, json: bool, csv: bool) -> Cli {
         gemini_root: None,
         qwen_root: None,
         antigravity_root: None,
+        otlp_root: None,
         json,
         csv,
         limit: 20,
@@ -78,6 +79,7 @@ fuzz_target!(|data: &[u8]| {
         (Agent::Gemini, scan_dir.clone()),
         (Agent::Qwen, scan_dir.clone()),
         (Agent::Antigravity, antigravity),
+        (Agent::Otlp, scan_dir.clone()),
         (Agent::OpenCode, scan_dir),
     ];
     let since = Timestamp::UNIX_EPOCH;

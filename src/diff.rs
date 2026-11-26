@@ -273,6 +273,7 @@ fn dir_roots(cli: &Cli, path: &Path) -> Vec<(Agent, PathBuf)> {
         (Agent::Gemini, "gemini"),
         (Agent::Qwen, "qwen"),
         (Agent::Antigravity, "antigravity"),
+        (Agent::Otlp, "otlp"),
     ];
     let found: Vec<(Agent, PathBuf)> = subdirs
         .into_iter()

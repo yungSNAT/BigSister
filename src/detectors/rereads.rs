@@ -125,7 +125,8 @@ impl Detector for Rereads {
             | Agent::OpenCode
             | Agent::Gemini
             | Agent::Qwen
-            | Agent::Antigravity => {
+            | Agent::Antigravity
+            | Agent::Otlp => {
                 line.contains("\"compact_boundary\"")
                     || line.contains("\"tool_use\"")
                     || self.claude.wants(line)
@@ -193,7 +194,8 @@ impl Detector for Rereads {
             | Agent::OpenCode
             | Agent::Gemini
             | Agent::Qwen
-            | Agent::Antigravity => {
+            | Agent::Antigravity
+            | Agent::Otlp => {
                 self.health.on_assistant(s, r);
                 for b in tool_uses(r) {
                     let id = b.get("id").and_then(Value::as_str);

@@ -41,6 +41,8 @@ pub enum Rewrite {
     Qwen,
     /// An Antigravity file, indexed in a first pass ([`crate::antigravity`]).
     Antigravity(crate::antigravity::Antigravity),
+    /// An OTLP/JSON trace file ([`crate::otlp`]).
+    Otlp(crate::otlp::Otlp),
 }
 
 impl Rewrite {
@@ -52,6 +54,7 @@ impl Rewrite {
             Self::Gemini(g) => g.read(line, out),
             Self::Qwen => qwen(line, out),
             Self::Antigravity(a) => a.read(line, out),
+            Self::Otlp(o) => o.read(line, out),
         }
     }
 }
