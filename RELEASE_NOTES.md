@@ -1,3 +1,23 @@
+# v0.2.1
+
+BigSister v0.2.1 adds a `permissions` section, a `diff` command, Antigravity's logs and OpenTelemetry trace files as sources, and new tables in `cache`, `rereads`, `polls` and `models`. An install of v0.1.0 should also read v0.2.0's notes below.
+
+## New since v0.2.0
+
+- `cache`: sub-TTL (< 5 minute) cache-bust table classifying unexpected prefix rebuilds (model swap, tool load / schema change via `shapeHash`, mid-history edit / rewind, or proxy or prefix change) with avoidable USD penalty and token-share vs dollar-share divergence.
+- `rereads`: compaction health metrics covering post/pre retention ratio (flagging > 95% drops), compaction thrashing (< 10% saved across 2+ consecutive passes) and post-compaction file-churn/revert detection (including pi `edit`/`write` `path` mapping and Codex `exec`-cell `apply_patch`, `writeFile` and `writeFileSync` edits).
+- `polls`: truncation-triggered command re-run table flagging identical shell commands re-run within 2 turns of a truncated or stashed tool output.
+- `diff <before> <after>`: side-by-side comparison of turns, tokens, cache hit %, cost, sub-TTL cache busts, compactions and waste across 2 session folders or `START..END` time windows.
+- Antigravity's conversation logs (`~/.gemini/antigravity/brain`, `--antigravity-root`) for `pipes`, `polls` and `tools`; `--agent antigravity` reads them alone.
+- `permissions`: the permission decisions Claude Code records on tool results (from about 2.1.299), allowed and blocked, by cause (your answer to a prompt, a hook, the safety check, auto mode, a rule or the permission mode), by tool and, for auto mode's blocks, by category; tool results with no decision recorded are counted, so older transcripts never read as nothing blocked. Rule text and reason codes are never printed.
+- A scan that finds no record in the window prints `Nothing scanned` above the sections instead of zeros that read as a clean result; `--json` adds `records_scanned` and each root's `files_with_records`.
+- `--by-day` adds a `models` table of input-side cost by the local day of each reply, latest first.
+- OpenTelemetry GenAI spans in OTLP/JSON trace files (`--otlp-root`, `--agent otlp`), from any agent that records them, for `models` (cost by model, with cache reads and writes) and `tools` (calls and errors). A span counts as a reply only when its `gen_ai.operation.name` is absent or names an inference operation (`chat`, `generate_content`, `text_completion` or `realtime_inference`), so embeddings and agent spans are not counted; a span exported again, or one the exporter matches to a counted Claude reply or tool call, counts once.
+
+## Fixes
+
+- `scan`: scope cross-file UUID deduplication to Claude Code and pi so Gemini CLI, Qwen Code and OpenCode per-session short IDs never collide across files or agents.
+
 # v0.2.0
 
 BigSister is ShaphansAudit renamed, with 4 new report sections, 4 more agents, priced estimates and CSV output.
@@ -10,7 +30,6 @@ BigSister is ShaphansAudit renamed, with 4 new report sections, 4 more agents, p
 - `models`: input-side cost by model, reasoning effort and subagent type, and how many subagent sessions ran on their parent session's top-priced model (Claude).
 - pi's sessions (`~/.pi/agent/sessions`, `--pi-root`) for `pipes`, `polls`, `rereads` and `tools`, and OpenCode's database (`~/.local/share/opencode`, `--opencode-root`) for `pipes`, `polls`, `rereads` and `tools`. OpenCode's database is read from a copy in memory, without a lock or a file beside it; `--agent pi` and `--agent opencode` read one of them alone.
 - Gemini CLI's sessions (`~/.gemini/tmp`, `--gemini-root`) and Qwen Code's (`~/.qwen/projects`, `--qwen-root`) for `pipes`, `polls` and `tools`; `--agent gemini` and `--agent qwen` read one of them alone.
-- OpenTelemetry GenAI spans in OTLP/JSON trace files (`--otlp-root`, `--agent otlp`), from any agent that records them, for `models` (cost by model, with cache reads and writes) and `tools` (calls and errors).
 - `rereads` also counts files read again after a recorded Qwen Code compaction.
 - `rereads` also splits compactions by the trigger Claude Code records (auto or manual), with the median and largest token count in context before them and the re-reads after them, so a manual compaction before a break can be compared with an automatic one.
 - Each `tokens est` column is followed by a `usd est` column: the estimate at the bundled price of the model that read it (every active Claude model, OpenAI's GPT-6, GPT-6.2, GPT-5.6 and Codex models, priced by prompt size where the price depends on it). `--usd-per-mtok USD` prices every estimate at one rate instead, and `--prices FILE` reads prices from a file with LiteLLM's field names.
@@ -45,15 +64,3 @@ BigSister keeps no configuration, cache or state file and reads no environment v
 ## Licence
 
 From this release BigSister is under Apache-2.0. v0.1.0 stays under FSL-1.1-ALv2, and becomes available under Apache-2.0 2 years after its release.
-
-## Unreleased (since v0.2.0)
-
-- `cache`: sub-TTL (< 5 minute) cache-bust table classifying unexpected prefix rebuilds (model swap, tool load / schema change via `shapeHash`, mid-history edit / rewind, or proxy or prefix change) with avoidable USD penalty and token-share vs dollar-share divergence.
-- `rereads`: compaction health metrics covering post/pre retention ratio (flagging > 95% drops), compaction thrashing (< 10% saved across 2+ consecutive passes) and post-compaction file-churn/revert detection (including pi `edit`/`write` `path` mapping and Codex `exec`-cell `apply_patch`, `writeFile` and `writeFileSync` edits).
-- `polls`: truncation-triggered command re-run table flagging identical shell commands re-run within 2 turns of a truncated or stashed tool output.
-- `diff <before> <after>`: side-by-side comparison of turns, tokens, cache hit %, cost, sub-TTL cache busts, compactions and waste across 2 session folders or `START..END` time windows.
-- Antigravity's conversation logs (`~/.gemini/antigravity/brain`, `--antigravity-root`) for `pipes`, `polls` and `tools`; `--agent antigravity` reads them alone.
-- `permissions`: the permission decisions Claude Code records on tool results (from about 2.1.299), allowed and blocked, by cause (your answer to a prompt, a hook, the safety check, auto mode, a rule or the permission mode), by tool and, for auto mode's blocks, by category; tool results with no decision recorded are counted, so older transcripts never read as nothing blocked. Rule text and reason codes are never printed.
-- A scan that finds no record in the window prints `Nothing scanned` above the sections instead of zeros that read as a clean result; `--json` adds `records_scanned` and each root's `files_with_records`.
-- `--by-day` adds a `models` table of input-side cost by the local day of each reply, latest first.
-- `scan`: scope cross-file UUID deduplication to Claude Code and pi so Gemini CLI, Qwen Code and OpenCode per-session short IDs never collide across files or agents.
