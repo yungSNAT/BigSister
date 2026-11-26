@@ -37,8 +37,8 @@
 //! Each record is written at its span's end time, the spans of a line in end-time order.
 //! Other spans are ignored, as is a span whose trace and span ids already produced records
 //! in this file, as when an exporter writes a batch again. A line that is not a JSON object
-//! with a `resourceSpans` list counts as a skipped line, as does a GenAI span without a
-//! span id or an end time.
+//! with a `resourceSpans` list counts as a skipped line, as does a reply or tool span
+//! without a span id or an end time.
 
 use std::collections::HashSet;
 
@@ -237,7 +237,7 @@ const INFERENCE: [&str; 4] = [
 ];
 
 /// A GenAI span's end time and its records; `None` for another span, and an error for a
-/// GenAI span without a span id or an end time.
+/// reply or tool span without a span id or an end time.
 fn span_records(span: &Value) -> Result<Option<(i128, Vec<String>)>, ()> {
     let a = Attrs(span.get("attributes").and_then(Value::as_array));
     let tool = a.str("gen_ai.operation.name") == Some("execute_tool")
