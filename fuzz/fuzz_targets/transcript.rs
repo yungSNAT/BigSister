@@ -1,5 +1,5 @@
 #![no_main]
-//! Any bytes as Claude, Codex, pi, Gemini, Qwen and OpenCode transcripts, `diff`, and all
+//! Any bytes as Claude, Codex, pi, Gemini, Qwen, Antigravity and OpenCode transcripts, `diff`, and all
 //! report formats (text, JSON and CSV).
 
 use std::path::PathBuf;
@@ -21,6 +21,8 @@ thread_local! {
     static DIR: PathBuf = {
         let dir = std::env::temp_dir().join(format!("bigsister-fuzz-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("scan")).expect("fuzz scan folder");
+        std::fs::create_dir_all(dir.join("antigravity/c/.system_generated/logs"))
+            .expect("fuzz antigravity folder");
         for sub in ["before", "after"] {
             for agent in ["claude", "codex", "pi", "gemini", "qwen", "opencode"] {
                 std::fs::create_dir_all(dir.join(sub).join(agent)).expect("fuzz diff folder");
@@ -42,6 +44,7 @@ fn diff_cli(before: String, after: String, json: bool, csv: bool) -> Cli {
         opencode_root: None,
         gemini_root: None,
         qwen_root: None,
+        antigravity_root: None,
         json,
         csv,
         limit: 20,
@@ -60,6 +63,12 @@ fuzz_target!(|data: &[u8]| {
         std::fs::write(scan_dir.join(name), data).expect("transcript");
     }
     std::fs::write(scan_dir.join("opencode.db"), data).expect("opencode db");
+    let antigravity = dir.join("antigravity");
+    std::fs::write(
+        antigravity.join("c/.system_generated/logs/transcript_full.jsonl"),
+        data,
+    )
+    .expect("antigravity log");
     let prices = Rc::new(Prices::bundled());
     let mut dets = PROGRAMS.with(|p| build(Command::All, p, &prices));
     let roots = [
@@ -68,14 +77,18 @@ fuzz_target!(|data: &[u8]| {
         (Agent::Pi, scan_dir.clone()),
         (Agent::Gemini, scan_dir.clone()),
         (Agent::Qwen, scan_dir.clone()),
+        (Agent::Antigravity, antigravity),
         (Agent::OpenCode, scan_dir),
     ];
     let since = Timestamp::UNIX_EPOCH;
     let stats = scan(&roots, Some(since), &prices, &mut dets);
     // File-based roots list both files, the compressed one counted as read or skipped.
+    // Antigravity's root holds one conversation's log.
     for st in &stats {
-        if st.agent != Agent::OpenCode {
-            assert_eq!(st.files + st.compressed, 2, "{st:?}");
+        match st.agent {
+            Agent::OpenCode => {}
+            Agent::Antigravity => assert_eq!(st.files, 1, "{st:?}"),
+            _ => assert_eq!(st.files + st.compressed, 2, "{st:?}"),
         }
     }
     let opts = Opts {

@@ -120,7 +120,12 @@ impl Detector for Rereads {
 
     fn wants(&self, s: &Session, line: &str) -> bool {
         match s.agent {
-            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {
+            Agent::Claude
+            | Agent::Pi
+            | Agent::OpenCode
+            | Agent::Gemini
+            | Agent::Qwen
+            | Agent::Antigravity => {
                 line.contains("\"compact_boundary\"")
                     || line.contains("\"tool_use\"")
                     || self.claude.wants(line)
@@ -172,19 +177,23 @@ impl Detector for Rereads {
     }
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
-        let boundary = match s.agent {
-            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {
-                r.kind() == "system"
-                    && r.value.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
-            }
-            Agent::Codex => r.kind() == "compacted",
+        let boundary = if s.agent.claude_shaped() {
+            r.kind() == "system"
+                && r.value.get("subtype").and_then(Value::as_str) == Some("compact_boundary")
+        } else {
+            r.kind() == "compacted"
         };
         if boundary {
             self.boundary(s, r);
             return;
         }
         match s.agent {
-            Agent::Claude | Agent::Pi | Agent::OpenCode | Agent::Gemini | Agent::Qwen => {
+            Agent::Claude
+            | Agent::Pi
+            | Agent::OpenCode
+            | Agent::Gemini
+            | Agent::Qwen
+            | Agent::Antigravity => {
                 self.health.on_assistant(s, r);
                 for b in tool_uses(r) {
                     let id = b.get("id").and_then(Value::as_str);

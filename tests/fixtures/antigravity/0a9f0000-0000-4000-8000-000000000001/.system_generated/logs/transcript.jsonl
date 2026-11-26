@@ -1,0 +1,2 @@
+{"step_index":0,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-09T06:00:00Z","tool_calls":[{"name":"run_command","args":{"CommandLine":"echo short","Cwd":"/w"}}]}
+{"step_index":1,"source":"SYSTEM","type":"GENERIC","status":"DONE","created_at":"2026-11-09T06:01:00Z","content":"ANTIGRAVITY_SENTINEL_OUT","truncated_fields":["content"]}

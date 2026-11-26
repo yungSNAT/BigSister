@@ -39,6 +39,8 @@ pub enum Rewrite {
     /// A Gemini CLI file, indexed in a first pass.
     Gemini(Gemini),
     Qwen,
+    /// An Antigravity file, indexed in a first pass ([`crate::antigravity`]).
+    Antigravity(crate::antigravity::Antigravity),
 }
 
 impl Rewrite {
@@ -49,6 +51,7 @@ impl Rewrite {
         match self {
             Self::Gemini(g) => g.read(line, out),
             Self::Qwen => qwen(line, out),
+            Self::Antigravity(a) => a.read(line, out),
         }
     }
 }
