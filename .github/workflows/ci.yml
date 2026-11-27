@@ -98,12 +98,12 @@ jobs:
             reports/coverage/coverage.lcov reports/coverage-windows/coverage.lcov
 
   # The upload runs apart from the tests, so the OIDC token is never available whilst
-  # test code runs, and only for pushes to main: a pull request's workflow, a Dependabot
-  # one included, could change what runs with the token before review.
+  # test code runs. Pull requests upload too, so Codecov reports patch and project
+  # coverage before a merge. A fork's pull request gets no OIDC token, so it is left out.
   codecov:
     name: upload coverage to Codecov
     needs: [check]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # A Codecov outage must not fail the checks.
