@@ -267,11 +267,16 @@ fn an_incomplete_span_does_not_hide_the_first_complete_copy() {
     assert_eq!(out.len(), 1);
 }
 
+const OVERFLOW_NS: &str = "18446744073709551616";
+const VALID_NS: &str = "1794272400000000000";
+
 #[test]
 fn an_end_time_reads_as_a_string_or_a_number() {
     assert_eq!(nanos(&json!("20")), Some(20));
     assert_eq!(nanos(&json!(20)), Some(20));
     assert_eq!(nanos(&json!(-1)), None);
+    assert_eq!(nanos(&json!("-1")), None);
+    assert_eq!(nanos(&json!(OVERFLOW_NS)), None);
 }
 
 #[test]
@@ -322,8 +327,10 @@ fn non_inference_genai_spans_emit_dropped_records_and_require_both_ids_to_dedup(
     ]});
     let line = export(&[
         dropped_span(Some("t1"), Some("s1"), None, "embeddings"),
-        dropped_span(Some("t1"), Some("s1"), Some("20"), "embeddings"),
-        dropped_span(Some("t1"), Some("s1"), Some("20"), "embeddings"),
+        dropped_span(Some("t1"), Some("s1"), Some("-1"), "embeddings"),
+        dropped_span(Some("t1"), Some("s1"), Some(OVERFLOW_NS), "embeddings"),
+        dropped_span(Some("t1"), Some("s1"), Some(VALID_NS), "embeddings"),
+        dropped_span(Some("t1"), Some("s1"), Some(VALID_NS), "embeddings"),
         dropped_span(Some(""), Some("s2"), Some("10"), "invoke_agent"),
         dropped_span(Some(""), Some("s2"), Some("10"), "invoke_agent"),
         dropped_span(Some("t2"), Some(""), Some("15"), "custom_op"),
@@ -352,4 +359,18 @@ fn non_inference_genai_spans_emit_dropped_records_and_require_both_ids_to_dedup(
             ("otlp_dropped", Some("t1/s1"), "embeddings"),
         ]
     );
+    assert_eq!(out[4]["timestamp"], "2026-11-10T01:00:00Z");
+}
+
+#[test]
+fn overflow_dropped_timestamp_does_not_hide_a_valid_copy() {
+    let line = export(&[
+        dropped_span(Some("t1"), Some("s3"), Some(OVERFLOW_NS), "embeddings"),
+        dropped_span(Some("t1"), Some("s3"), Some(VALID_NS), "embeddings"),
+    ]);
+    let (out, bad) = records(&line);
+    assert_eq!(bad, 0);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0]["id"], "t1/s3");
+    assert_eq!(out[0]["timestamp"], "2026-11-10T01:00:00Z");
 }

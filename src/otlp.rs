@@ -350,10 +350,10 @@ impl<'a> Attrs<'a> {
     }
 }
 
-/// A time in nanoseconds since the epoch, written as a string or a number.
+/// A time in nanoseconds since the epoch (OTLP `fixed64`), written as a string or a number.
 fn nanos(v: &Value) -> Option<i128> {
     match v {
-        Value::String(s) => s.parse().ok(),
+        Value::String(s) => s.parse::<u64>().ok().map(i128::from),
         v => v.as_u64().map(i128::from),
     }
 }
