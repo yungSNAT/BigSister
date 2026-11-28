@@ -151,6 +151,10 @@ pub struct Models {
     /// without a price, each count at most 2^40.
     // nosemgrep: codacy.yaml.security.hard-coded-tokens -- a count of model tokens, not a credential
     unpriced_tokens: u64,
+    /// Trace-qualified ids (`traceId/spanId`) of dropped OTLP GenAI spans already counted.
+    dropped_ids: HashSet<String>,
+    /// In-window OTLP GenAI spans excluded by `gen_ai.operation.name`, by sanitised name.
+    otlp_dropped: BTreeMap<String, u64>,
 }
 
 /// A reply that did not read: its message id if it has one, whether it is in the window,
@@ -210,8 +214,9 @@ fn label<'a>(object: &'a Value, key: &'static str) -> Result<Option<&'a str>, &'
     object.get(key).map(|v| v.as_str().ok_or(key)).transpose()
 }
 
-fn models_wants(_s: &Session, line: &str) -> bool {
+fn models_wants(s: &Session, line: &str) -> bool {
     line.contains("\"type\":\"assistant\"")
+        || (s.agent == Agent::Otlp && line.contains("\"type\":\"otlp_dropped\""))
 }
 
 impl Detector for Models {
@@ -261,6 +266,10 @@ impl Detector for Models {
     }
 
     fn record(&mut self, s: &Session, r: &Record<'_>) {
+        if s.agent == Agent::Otlp && r.kind() == "otlp_dropped" {
+            self.record_otlp_dropped(r);
+            return;
+        }
         // The scan gives a reply's price just before the reply, and none for a copy.
         let price = self.price.take();
         let reply = match read(r, read_reply) {
@@ -281,39 +290,10 @@ impl Detector for Models {
             return;
         }
         self.readable(reply.id);
-        if !r.in_window {
+        if !r.in_window || self.counted_counterpart(s, &reply) {
             return;
         }
-        if self.counted_counterpart(s, &reply) {
-            return;
-        }
-        let u = &reply.usage;
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "token counts stay far below 2^52"
-        )]
-        let weighted = reply.input as f64
-            + u.write as f64 * u.multiplier
-            + u.read as f64 * read_multiplier(reply.model);
-        let shown = |label: Option<&str>| label.map_or_else(|| NONE.to_owned(), printed);
-        let key = (
-            s.scope(),
-            printed(reply.model),
-            shown(reply.effort),
-            shown(reply.agent),
-        );
-        self.groups
-            .entry(key)
-            .or_default()
-            .add(&reply, weighted, price);
-        self.add_by_branch_and_day(r.value, &reply, weighted, price);
-        if price.is_none() {
-            let tokens = reply.input.saturating_add(u.write).saturating_add(u.read);
-            self.unpriced_tokens = self.unpriced_tokens.saturating_add(tokens);
-        }
-        self.without_split += u64::from(!u.split);
-        let base = self.prices.base_usd_per_mtok(reply.model);
-        self.session(s, reply.session, weighted, price, base);
+        self.record_reply(s, r.value, &reply, price);
     }
 
     fn section(&self, opts: &Opts) -> Section {
@@ -350,6 +330,10 @@ impl Detector for Models {
             ("subagent_sessions_below_top_model", json!(below)),
             ("subagent_sessions_indeterminate", json!(unknown)),
             ("on_top_input_usd_est", json!(cents(on_top_usd))),
+            (
+                "otlp_non_inference_spans",
+                json!(self.otlp_dropped.values().sum::<u64>()),
+            ),
         ];
         Section {
             name: "models",
@@ -359,7 +343,7 @@ impl Detector for Models {
                 .map(|(k, v)| (k.to_owned(), v))
                 .collect(),
             tables: self.tables(opts),
-            notes: notes(opts),
+            notes: notes(opts, !self.otlp_dropped.is_empty()),
         }
     }
 }

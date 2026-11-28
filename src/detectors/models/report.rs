@@ -12,7 +12,7 @@ use crate::report::{Opts, Table};
 use crate::scan::Session;
 
 /// The section's notes.
-pub(super) fn notes(opts: &Opts) -> Vec<String> {
+pub(super) fn notes(opts: &Opts, has_otlp_dropped: bool) -> Vec<String> {
     let price = input_price(opts);
     let mut notes = vec![
         format!("Each reply counts once (the first record of its message.id); synthetic replies are left out, and a reply none of whose records reads whole (a message with an id, a model and a usage whose input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens and, when it has a cache_creation split, ephemeral_5m_input_tokens and ephemeral_1h_input_tokens are integers from 0 to 2^40; a session id; and effort and agent type as text when recorded) counts as skipped (replies skipped) and adds to no total, so with any skipped the totals are a floor. Effort is the reasoning effort the reply records and agent type the subagent type Claude Code records (attributionAgent); {NONE} marks a reply that records neither."),
@@ -24,6 +24,9 @@ pub(super) fn notes(opts: &Opts) -> Vec<String> {
     }
     if opts.by_day {
         notes.push(format!("By local day (--by-day) groups the same replies by the day of each reply's recorded time in this machine's time zone (UTC when it cannot be found), latest first, so --limit keeps the latest days; {NONE} marks a reply whose time does not read. Its dollars are the same estimate as above, rounded to cents in each row."));
+    }
+    if has_otlp_dropped {
+        notes.push("OTLP non inference spans counts in-window GenAI spans with a model and token usage whose gen_ai.operation.name is outside chat, generate_content, text_completion and realtime_inference (and not a named execute_tool span), excluding spans without a valid end time; distinct exports sharing non-empty trace and span ids count once. An operation name holding characters other than ASCII letters, digits and _, -, . or :, or over 128 characters, prints as (other).".to_owned());
     }
     notes
 }
@@ -37,6 +40,63 @@ pub(crate) struct DiffTotals {
 }
 
 impl Models {
+    /// Counts an in-window non-inference OTLP GenAI span by sanitised operation name,
+    /// deduplicating across files when both trace and span ids were present.
+    pub(super) fn record_otlp_dropped(&mut self, r: &Record<'_>) {
+        if !r.in_window {
+            return;
+        }
+        if let Some(id) = r.value.get("id").and_then(Value::as_str)
+            && !self.dropped_ids.insert(id.to_owned())
+        {
+            return;
+        }
+        let op = printed(
+            r.value
+                .get("operation")
+                .and_then(Value::as_str)
+                .unwrap_or(""),
+        );
+        *self.otlp_dropped.entry(op).or_default() += 1;
+    }
+
+    /// Counts a unique, in-window reply into its model, branch, day and session totals.
+    pub(super) fn record_reply(
+        &mut self,
+        s: &Session,
+        v: &Value,
+        reply: &Reply<'_>,
+        price: Option<f64>,
+    ) {
+        let u = &reply.usage;
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "token counts stay far below 2^52"
+        )]
+        let weighted = reply.input as f64
+            + u.write as f64 * u.multiplier
+            + u.read as f64 * read_multiplier(reply.model);
+        let shown = |label: Option<&str>| label.map_or_else(|| NONE.to_owned(), printed);
+        let key = (
+            s.scope(),
+            printed(reply.model),
+            shown(reply.effort),
+            shown(reply.agent),
+        );
+        self.groups
+            .entry(key)
+            .or_default()
+            .add(reply, weighted, price);
+        self.add_by_branch_and_day(v, reply, weighted, price);
+        if price.is_none() {
+            let tokens = reply.input.saturating_add(u.write).saturating_add(u.read);
+            self.unpriced_tokens = self.unpriced_tokens.saturating_add(tokens);
+        }
+        self.without_split += u64::from(!u.split);
+        let base = self.prices.base_usd_per_mtok(reply.model);
+        self.session(s, reply.session, weighted, price, base);
+    }
+
     pub(super) fn counted_counterpart(&mut self, s: &Session, reply: &Reply<'_>) -> bool {
         if s.agent == Agent::Claude {
             self.overlap
@@ -64,12 +124,13 @@ impl Models {
             .add(reply, weighted, price);
     }
 
-    /// The first table, then the tables by branch and by day when asked for.
+    /// The first table, then optional branch, day and excluded OTLP operation tables.
     pub(super) fn tables(&self, opts: &Opts) -> Vec<Table> {
         [
             Some(self.table(opts)),
             opts.by_branch.then(|| self.branch_table(opts)),
             opts.by_day.then(|| self.day_table(opts)),
+            (!self.otlp_dropped.is_empty()).then(|| self.otlp_dropped_table(opts)),
         ]
         .into_iter()
         .flatten()
@@ -113,6 +174,8 @@ impl Models {
             without_split: 0,
             // nosemgrep: codacy.yaml.security.hard-coded-tokens -- a count of model tokens, not a credential
             unpriced_tokens: 0,
+            dropped_ids: HashSet::new(),
+            otlp_dropped: BTreeMap::new(),
         }
     }
 
@@ -267,6 +330,22 @@ impl Models {
         };
         let mut table = group_table("By local day, latest first", &["day"], groups, &all);
         table.rows.sort_by(|a, b| b[0].as_str().cmp(&a[0].as_str()));
+        table.truncate(opts.limit);
+        table
+    }
+
+    /// OTLP GenAI spans excluded by `gen_ai.operation.name`, most spans first.
+    fn otlp_dropped_table(&self, opts: &Opts) -> Table {
+        let mut rows: Vec<(&String, &u64)> = self.otlp_dropped.iter().collect();
+        rows.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let mut table = Table::new(
+            "OTLP GenAI spans excluded by operation, most first",
+            vec!["operation", "spans"],
+        );
+        table.rows = rows
+            .into_iter()
+            .map(|(op, n)| vec![json!(op), json!(n)])
+            .collect();
         table.truncate(opts.limit);
         table
     }

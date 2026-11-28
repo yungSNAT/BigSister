@@ -25,7 +25,10 @@
 //!   guessed, so `models` counts the reply as skipped. A span naming a
 //!   `gen_ai.operation.name` other than `chat`, `generate_content`, `text_completion` or
 //!   `realtime_inference` (such as `embeddings` or `invoke_agent`) is not a reply, as the
-//!   conventions sum usage only over those operations.
+//!   conventions sum usage only over those operations; when it carries a model, token usage
+//!   and a valid end time (and is not a named `execute_tool` span), it becomes a synthetic
+//!   `otlp_dropped` record so `models` counts it by sanitised operation name without
+//!   counting it as a reply or skipped line.
 //! - A tool span has `gen_ai.operation.name` `execute_tool` and a `gen_ai.tool.name`. It
 //!   becomes a synthetic `assistant` record, which `models` passes over, holding one
 //!   `tool_use` block with an empty input under the span's id (a tool call id need not be
@@ -35,10 +38,10 @@
 //!   are never read.
 //!
 //! Each record is written at its span's end time, the spans of a line in end-time order.
-//! Other spans are ignored, as is a span whose trace and span ids already produced records
-//! in this file, as when an exporter writes a batch again. A line that is not a JSON object
-//! with a `resourceSpans` list counts as a skipped line, as does a reply or tool span
-//! without a span id or an end time.
+//! Other spans are ignored, as is a span whose non-empty trace and span ids already
+//! produced records in this file, as when an exporter writes a batch again. A line that is
+//! not a JSON object with a `resourceSpans` list counts as a skipped line, as does a reply
+//! or tool span without a span id or an end time.
 
 use std::collections::HashSet;
 
@@ -204,10 +207,7 @@ fn read(line: &str, out: &mut Vec<String>, seen: &mut HashSet<(String, String)>)
         .filter_map(|s| s.get("spans").and_then(Value::as_array))
         .flatten();
     for span in all {
-        let key = span["traceId"]
-            .as_str()
-            .zip(span["spanId"].as_str())
-            .map(|(trace, id)| (trace.to_owned(), id.to_owned()));
+        let key = span_identity(span).map(|(trace, id)| (trace.to_owned(), id.to_owned()));
         if key.as_ref().is_some_and(|id| seen.contains(id)) {
             continue;
         }
@@ -236,22 +236,49 @@ const INFERENCE: [&str; 4] = [
     "realtime_inference",
 ];
 
+/// A span's `(traceId, spanId)` pair when both are non-empty strings.
+fn span_identity(span: &Value) -> Option<(&str, &str)> {
+    let non_empty = |key: &str| {
+        span.get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    };
+    non_empty("traceId").zip(non_empty("spanId"))
+}
+
+/// A non-inference GenAI span with model and usage as a synthetic `otlp_dropped` record,
+/// or `None` when it lacks a valid end time (kept out of skipped lines).
+fn dropped_record(span: &Value, op: &str) -> Option<(i128, Vec<String>)> {
+    let end = span.get("endTimeUnixNano").and_then(nanos)?;
+    let ts = jiff::Timestamp::from_nanosecond(end).ok()?;
+    let id = span_identity(span).map(|(trace, id)| format!("{trace}/{id}"));
+    let record = json!({
+        "type": "otlp_dropped",
+        "id": id,
+        "operation": op,
+        "timestamp": ts.to_string(),
+    })
+    .to_string();
+    Some((end, vec![record]))
+}
+
 /// A GenAI span's end time and its records; `None` for another span, and an error for a
 /// reply or tool span without a span id or an end time.
 fn span_records(span: &Value) -> Result<Option<(i128, Vec<String>)>, ()> {
     let a = Attrs(span.get("attributes").and_then(Value::as_array));
-    let tool = a.str("gen_ai.operation.name") == Some("execute_tool")
-        && a.str("gen_ai.tool.name").is_some_and(|n| !n.is_empty());
+    let op = a.str("gen_ai.operation.name");
+    let tool =
+        op == Some("execute_tool") && a.str("gen_ai.tool.name").is_some_and(|n| !n.is_empty());
     let model = a
         .str("gen_ai.response.model")
         .or_else(|| a.str("gen_ai.request.model"))
         .filter(|m| !m.is_empty());
     let usage = a.input().is_some() || a.output().is_some();
-    let inference = a
-        .str("gen_ai.operation.name")
-        .is_none_or(|op| INFERENCE.contains(&op));
+    let inference = op.is_none_or(|name| INFERENCE.contains(&name));
     if !tool && !(inference && model.is_some() && usage) {
-        return Ok(None);
+        return Ok(op
+            .filter(|_| model.is_some() && usage)
+            .and_then(|name| dropped_record(span, name)));
     }
     let trace = span.get("traceId").and_then(Value::as_str);
     // A span id is unique only within its trace, so the trace qualifies it.
@@ -323,10 +350,10 @@ impl<'a> Attrs<'a> {
     }
 }
 
-/// A time in nanoseconds since the epoch, written as a string or a number.
+/// A time in nanoseconds since the epoch (OTLP `fixed64`), written as a string or a number.
 fn nanos(v: &Value) -> Option<i128> {
     match v {
-        Value::String(s) => s.parse().ok(),
+        Value::String(s) => s.parse::<u64>().ok().map(i128::from),
         v => v.as_u64().map(i128::from),
     }
 }

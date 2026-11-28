@@ -267,11 +267,16 @@ fn an_incomplete_span_does_not_hide_the_first_complete_copy() {
     assert_eq!(out.len(), 1);
 }
 
+const OVERFLOW_NS: &str = "18446744073709551616";
+const VALID_NS: &str = "1794272400000000000";
+
 #[test]
 fn an_end_time_reads_as_a_string_or_a_number() {
     assert_eq!(nanos(&json!("20")), Some(20));
     assert_eq!(nanos(&json!(20)), Some(20));
     assert_eq!(nanos(&json!(-1)), None);
+    assert_eq!(nanos(&json!("-1")), None);
+    assert_eq!(nanos(&json!(OVERFLOW_NS)), None);
 }
 
 #[test]
@@ -293,4 +298,79 @@ fn spans_sharing_a_span_id_across_traces_stay_apart() {
     assert_eq!(blocks[2]["id"], "t2/s");
     assert_eq!(blocks[3]["tool_use_id"], "t2/s");
     assert_eq!(blocks[3]["is_error"], true);
+}
+
+fn dropped_span(trace: Option<&str>, id: Option<&str>, end: Option<&str>, op: &str) -> Value {
+    let mut s = json!({"attributes": [
+        attr("gen_ai.operation.name", json!({"stringValue": op})),
+        attr("gen_ai.request.model", json!({"stringValue": "m"})),
+        attr("gen_ai.usage.input_tokens", json!({"intValue": "10"})),
+    ]});
+    if let Some(t) = trace {
+        s["traceId"] = json!(t);
+    }
+    if let Some(i) = id {
+        s["spanId"] = json!(i);
+    }
+    if let Some(e) = end {
+        s["endTimeUnixNano"] = json!(e);
+    }
+    s
+}
+
+#[test]
+fn non_inference_genai_spans_emit_dropped_records_and_require_both_ids_to_dedup() {
+    let no_usage = json!({"traceId": "t1", "spanId": "u0", "endTimeUnixNano": "5",
+    "attributes": [
+        attr("gen_ai.operation.name", json!({"stringValue": "retrieval"})),
+        attr("gen_ai.request.model", json!({"stringValue": "m"})),
+    ]});
+    let line = export(&[
+        dropped_span(Some("t1"), Some("s1"), None, "embeddings"),
+        dropped_span(Some("t1"), Some("s1"), Some("-1"), "embeddings"),
+        dropped_span(Some("t1"), Some("s1"), Some(OVERFLOW_NS), "embeddings"),
+        dropped_span(Some("t1"), Some("s1"), Some(VALID_NS), "embeddings"),
+        dropped_span(Some("t1"), Some("s1"), Some(VALID_NS), "embeddings"),
+        dropped_span(Some(""), Some("s2"), Some("10"), "invoke_agent"),
+        dropped_span(Some(""), Some("s2"), Some("10"), "invoke_agent"),
+        dropped_span(Some("t2"), Some(""), Some("15"), "custom_op"),
+        dropped_span(Some("t2"), Some(""), Some("15"), "custom_op"),
+        no_usage,
+    ]);
+    let (out, bad) = records(&line);
+    assert_eq!(bad, 0);
+    let got: Vec<(&str, Option<&str>, &str)> = out
+        .iter()
+        .map(|r| {
+            (
+                r["type"].as_str().unwrap(),
+                r["id"].as_str(),
+                r["operation"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("otlp_dropped", None, "invoke_agent"),
+            ("otlp_dropped", None, "invoke_agent"),
+            ("otlp_dropped", None, "custom_op"),
+            ("otlp_dropped", None, "custom_op"),
+            ("otlp_dropped", Some("t1/s1"), "embeddings"),
+        ]
+    );
+    assert_eq!(out[4]["timestamp"], "2026-11-10T01:00:00Z");
+}
+
+#[test]
+fn overflow_dropped_timestamp_does_not_hide_a_valid_copy() {
+    let line = export(&[
+        dropped_span(Some("t1"), Some("s3"), Some(OVERFLOW_NS), "embeddings"),
+        dropped_span(Some("t1"), Some("s3"), Some(VALID_NS), "embeddings"),
+    ]);
+    let (out, bad) = records(&line);
+    assert_eq!(bad, 0);
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0]["id"], "t1/s3");
+    assert_eq!(out[0]["timestamp"], "2026-11-10T01:00:00Z");
 }
