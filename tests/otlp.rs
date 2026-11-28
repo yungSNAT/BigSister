@@ -119,6 +119,21 @@ fn only_inference_operations_count_as_replies() {
     let summary = &doc["detectors"]["models"]["summary"];
     assert_eq!(summary["replies_skipped"], json!(0), "{summary}");
     assert_eq!(summary["replies_unpriced"], json!(0), "{summary}");
+    assert_eq!(summary["otlp_non_inference_spans"], json!(2), "{summary}");
+    let tables = doc["detectors"]["models"]["tables"]
+        .as_array()
+        .expect("tables");
+    assert_eq!(tables.len(), 2, "{tables:?}");
+    let dropped_rows: Vec<Value> = tables[1]["rows"]
+        .as_array()
+        .expect("dropped rows")
+        .iter()
+        .map(|r| cells(r, &["operation", "spans"]))
+        .collect();
+    assert_eq!(
+        dropped_rows,
+        [json!(["embeddings", 1]), json!(["invoke_agent", 1])]
+    );
 }
 
 #[test]
